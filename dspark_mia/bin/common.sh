@@ -54,6 +54,7 @@ unset NCCL_IB_GID_INDEX
 : "${DSPARK_VLLM_IMAGE:?missing DSPARK_VLLM_IMAGE}"
 : "${DSPARK_MODEL_HOST_PATH:?missing DSPARK_MODEL_HOST_PATH}"
 : "${DSPARK_MODEL:?missing DSPARK_MODEL}"
+: "${SERVED_MODEL_NAME:?missing SERVED_MODEL_NAME}"
 
 # shellcheck disable=SC2034  # Shared library array is consumed by callers.
 MIA_SSH_OPTIONS=(
@@ -69,6 +70,26 @@ need_command() {
     echo "Missing required command: $1" >&2
     exit 2
   fi
+}
+
+served_model_ids() {
+  local aliases=()
+  printf '%s\n' "${SERVED_MODEL_NAME}"
+  if [[ -n "${SERVED_MODEL_ALIASES:-}" ]]; then
+    read -r -a aliases <<<"${SERVED_MODEL_ALIASES}"
+    printf '%s\n' "${aliases[@]}"
+  fi
+}
+
+missing_served_model_ids() {
+  local catalog="$1"
+  local model_id
+  while IFS= read -r model_id; do
+    if ! jq -e --arg id "${model_id}" \
+      'any(.data[]?; .id == $id)' <<<"${catalog}" >/dev/null 2>&1; then
+      printf '%s\n' "${model_id}"
+    fi
+  done < <(served_model_ids)
 }
 
 require_ssh_identity() {

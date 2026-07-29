@@ -11,7 +11,7 @@ Type=simple
 User=catid
 Group=catid
 WorkingDirectory=/home/catid/dgx-spark-laguna/dspark_mia
-Environment=MIA_ENV_FILE=mia-throughput.env
+Environment=MIA_ENV_FILE=mia-agent.env
 Environment=MIA_SUPERVISOR_STATE_DIR=/var/lib/dgx-spark-dspark-mia
 Environment=MIA_SUPERVISOR_RUNTIME_DIR=/run/dgx-spark-dspark-mia
 Environment=MIA_SUPERVISOR_LOCK_DIR=/home/catid/.local/state/dgx-spark-dspark-mia-locks

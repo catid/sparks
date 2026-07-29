@@ -3,25 +3,28 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-template="${root_dir}/dspark_mia/mia-throughput.env.example"
-output_basename="${DSPARK_PROFILE_NAME:-mia-throughput.local.env}"
+profile_kind="${DSPARK_PROFILE_KIND:-throughput}"
 force=0
 
 usage() {
   cat <<'EOF'
-Usage: configure-dspark-profile.sh [--force]
+Usage: configure-dspark-profile.sh [--profile throughput|agent] [--force]
 
-Render dspark_mia/mia-throughput.local.env for the current checkout and user.
-The defaults reproduce the validated Spark-1/Spark-2 four-rail deployment.
+Render a local DSpark profile for the current checkout and user. Throughput is
+the default. The agent profile keeps the same model ID and API port but limits
+the scheduler/graph set to C8 for OpenClaw-style traffic.
 
 Optional environment overrides:
+  DSPARK_PROFILE_KIND          throughput (default) or agent
   SPARK2_HOST                  default: spark2
   CLUSTER_SSH_KEY              default: ~/.ssh/id_ed25519_dgx_cluster
   DSPARK_MODEL_HOST_PATH       default: ~/models/DeepSeek-V4-Flash-DSpark-official
-  MIA_PROJECT_NAME             default: mia-dspark-throughput
-  MASTER_PORT                  default: 29631
+  MIA_PROJECT_NAME             throughput: mia-dspark-throughput
+                               agent: mia-dspark-agent
+  MASTER_PORT                  throughput: 29631; agent: 29632
   VLLM_PORT                    default: 8889
-  DSPARK_PROFILE_NAME          default: mia-throughput.local.env
+  DSPARK_PROFILE_NAME          throughput: mia-throughput.local.env
+                               agent: mia-agent.local.env
 
 DSPARK_PROFILE_NAME must be a basename ending in .env. Paths containing
 whitespace or shell metacharacters are rejected because the same file is used
@@ -36,6 +39,18 @@ EOF
 while (($#)); do
   case "$1" in
     --force) force=1 ;;
+    --profile)
+      shift
+      if (($# == 0)); then
+        echo "--profile requires throughput or agent." >&2
+        usage >&2
+        exit 2
+      fi
+      profile_kind="$1"
+      ;;
+    --profile=*)
+      profile_kind="${1#*=}"
+      ;;
     -h|--help)
       usage
       exit 0
@@ -48,6 +63,26 @@ while (($#)); do
   shift
 done
 
+case "${profile_kind}" in
+  throughput)
+    template="${root_dir}/dspark_mia/mia-throughput.env.example"
+    default_output_basename="mia-throughput.local.env"
+    default_project_name="mia-dspark-throughput"
+    default_master_port="29631"
+    ;;
+  agent)
+    template="${root_dir}/dspark_mia/mia-agent.env.example"
+    default_output_basename="mia-agent.local.env"
+    default_project_name="mia-dspark-agent"
+    default_master_port="29632"
+    ;;
+  *)
+    echo "Profile kind must be throughput or agent: ${profile_kind}" >&2
+    exit 2
+    ;;
+esac
+output_basename="${DSPARK_PROFILE_NAME:-${default_output_basename}}"
+
 if [[ ! "${output_basename}" =~ ^[A-Za-z0-9._-]+\.env$ ||
       "${output_basename}" == */* ]]; then
   echo "DSPARK_PROFILE_NAME must be a safe basename ending in .env." >&2
@@ -59,8 +94,8 @@ spark1_ip="192.168.100.10"
 spark2_ip="192.168.100.11"
 cluster_ssh_key="${CLUSTER_SSH_KEY:-${HOME}/.ssh/id_ed25519_dgx_cluster}"
 model_path="${DSPARK_MODEL_HOST_PATH:-${HOME}/models/DeepSeek-V4-Flash-DSpark-official}"
-project_name="${MIA_PROJECT_NAME:-mia-dspark-throughput}"
-master_port="${MASTER_PORT:-29631}"
+project_name="${MIA_PROJECT_NAME:-${default_project_name}}"
+master_port="${MASTER_PORT:-${default_master_port}}"
 vllm_port="${VLLM_PORT:-8889}"
 output="${root_dir}/dspark_mia/${output_basename}"
 
@@ -170,4 +205,5 @@ mv -f -- "${temporary}" "${output}"
 trap - EXIT
 
 echo "Rendered ${output}"
+echo "Profile kind: ${profile_kind}"
 echo "Select it with: MIA_ENV_FILE=${output_basename}"

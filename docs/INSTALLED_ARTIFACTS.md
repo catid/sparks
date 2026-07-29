@@ -129,10 +129,10 @@ Both hosts must have:
 - `/dev/infiniband` available to containers; and
 - the rootful NVIDIA Docker runtime.
 
-The active Compose identity is:
+The active low-concurrency Compose identity is:
 
 ```text
-project: mia-dspark-throughput
+project: mia-dspark-agent
 service: vllm-dspark
 rank 0: Spark 1
 rank 1: Spark 2
@@ -144,11 +144,29 @@ The checkpoint is mounted read-only at the lock's container path. The image,
 model, caches, and writable container layers are deployment artifacts, not Git
 content.
 
-The overlay now declares a `500000/500000` nofile soft/hard limit. The
-2026-07-29 live generation predated that explicit setting and showed
-asymmetric limits, including a 1024 soft limit on Spark 2. Treat the higher
-limit as staged until both ranks undergo one coordinated cold reload and are
-rechecked.
+The overlay declares a `500000/500000` nofile soft/hard limit. The active C8
+cold generation was inspected on both ranks: Docker's configured soft/hard
+values and the process-visible `ulimit` values were all 500,000, with zero
+container restarts and no OOM flag. Recheck after every coordinated cold
+reload; a running container never inherits a changed Compose limit
+retroactively.
+
+## OpenClaw control-host artifacts
+
+OpenClaw is intentionally installed on a third computer, not on either Spark.
+The validated headless macOS deployment adds:
+
+| Installed path | Public source | Notes |
+| --- | --- | --- |
+| `/Library/LaunchDaemons/ai.openclaw.gateway.headless.plist` | rendered from `openclaw/ai.openclaw.gateway.headless.plist.in` | system-domain service; runs as the unprivileged OpenClaw user |
+| `${HOME}/.openclaw/ops/install-headless-macos.sh` | `openclaw/install-headless-macos.sh` | verifier/installer copied beside private state |
+| `${HOME}/.openclaw/openclaw.json` | merge `openclaw/scenefit-ds4f.patch.json` into local config | private active config; do not copy back into Git |
+| `${HOME}/.openclaw/.env` | no tracked equivalent | mode 0600 provider/channel credentials |
+| `${HOME}/.openclaw/workspace/AGENTS.md` | append `openclaw/AGENTS-routing.md` | local-to-Sol escalation policy |
+
+The LaunchDaemon plist contains paths and service identity but no provider
+credentials. The dotenv, gateway token, sessions, audit history, and config
+backup archives remain private runtime state.
 
 ## Runtime and private state
 
@@ -190,10 +208,10 @@ systemctl show dgx-spark-dspark-mia.service \
   -p LoadState -p UnitFileState -p ActiveState -p SubState -p MainPID
 
 sudo docker ps \
-  --filter label=com.docker.compose.project=mia-dspark-throughput \
+  --filter label=com.docker.compose.project=mia-dspark-agent \
   --filter label=com.docker.compose.service=vllm-dspark
 
-MIA_ENV_FILE=mia-throughput.env dspark_mia/bin/probe.sh
+MIA_ENV_FILE=mia-agent.env dspark_mia/bin/probe.sh
 ```
 
 On Spark 2, compare against `netplan/spark2-40-cx7.yaml`. For unit templates,

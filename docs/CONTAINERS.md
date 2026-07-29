@@ -74,6 +74,11 @@ bash ./scripts/configure-dspark-profile.sh
 export MIA_ENV_FILE=mia-throughput.local.env
 ```
 
+Use `--profile agent` and select `mia-agent.local.env` for the C8
+OpenClaw-oriented scheduler. Both profiles retain the same model checkpoint,
+image digest, API port, and served model IDs; their Compose project,
+rendezvous port, tmp path, and scheduler limits differ.
+
 Review the generated values before continuing, especially
 `WORKER_INSTALL_DIR`, `CLUSTER_SSH_KEY`, both fabric addresses, model paths,
 API/rendezvous ports, and the served model name. The selector is a basename
@@ -137,15 +142,15 @@ cannot safely restart and join the other rank's existing NCCL generation.
 Spark 1's supervisor replaces both ranks as one generation when either rank
 changes or fails.
 
-The override now requests a soft and hard `nofile` limit of 500,000. This is a
-staged improvement: an existing container retains the limits with which it was
-created. It takes effect on the next coordinated cold reload, not when the
-repository file changes. Verify it after that reload:
+The override requests a soft and hard `nofile` limit of 500,000. The active C8
+generation was recreated with this setting and both ranks reported 500,000
+through Docker inspection and process-visible `ulimit`. Existing containers
+retain the limits with which they were created, so verify after later reloads:
 
 ```bash
 container="$(
   sudo docker ps -q \
-    --filter label=com.docker.compose.project=mia-dspark-throughput \
+    --filter label=com.docker.compose.project=mia-dspark-agent \
     --filter label=com.docker.compose.service=vllm-dspark
 )"
 sudo docker inspect --format '{{json .HostConfig.Ulimits}}' "${container}"

@@ -5,28 +5,15 @@
       "timeoutMs": 15000
     }
   },
-  "gateway": {
-    "mode": "local",
-    "bind": "loopback",
-    "port": 18789,
-    "auth": {
-      "mode": "token",
-      "token": {
-        "source": "env",
-        "provider": "default",
-        "id": "OPENCLAW_GATEWAY_TOKEN"
-      }
-    }
-  },
   "agents": {
     "defaults": {
-      "workspace": "/Users/YOUR_USER/.openclaw/workspace",
       "model": {
         "primary": "vllm/deepseek-v4-flash",
         "fallbacks": []
       },
       "utilityModel": "vllm/deepseek-v4-flash",
       "models": {
+        "vllm/deepseek-v4-flash-dspark-mia-throughput": null,
         "vllm/deepseek-v4-flash": {
           "alias": "ds4f",
           "params": {
@@ -105,7 +92,6 @@
     "providers": {
       "vllm": {
         "baseUrl": "http://spark1.lan:8889/v1",
-        "apiKey": "vllm-local",
         "api": "openai-completions",
         "timeoutSeconds": 3600,
         "models": [
@@ -154,20 +140,8 @@
   },
   "channels": {
     "slack": {
-      "enabled": true,
-      "mode": "socket",
-      "appToken": {
-        "source": "env",
-        "provider": "default",
-        "id": "SLACK_APP_TOKEN"
-      },
-      "botToken": {
-        "source": "env",
-        "provider": "default",
-        "id": "SLACK_BOT_TOKEN"
-      },
       "dmPolicy": "pairing",
-      "groupPolicy": "disabled"
+      "groupPolicy": "allowlist"
     }
   },
   "plugins": {
@@ -195,9 +169,6 @@
           "maxTokens": 16384,
           "timeoutMs": 300000
         }
-      },
-      "slack": {
-        "enabled": true
       }
     }
   }

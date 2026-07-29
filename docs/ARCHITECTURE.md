@@ -52,8 +52,8 @@ and for proof that application traffic uses all four.
 
 ## Active inference deployment
 
-The audited deployment uses the isolated `mia-dspark-throughput` Compose
-project:
+The active OpenClaw-oriented deployment uses the isolated
+`mia-dspark-agent` Compose project:
 
 | Property | Value |
 | --- | --- |
@@ -62,9 +62,10 @@ project:
 | Parallelism | TP=2, PP=1, one process per Spark |
 | Speculation | native DSpark, probabilistic, five speculative tokens |
 | Context ceiling | 1,048,576 tokens |
-| Scheduler | up to 32 sequences, 8,192 batched tokens |
+| Scheduler | up to 8 sequences, 8,192 batched tokens |
+| Served IDs | historical `deepseek-v4-flash-dspark-mia-throughput` plus canonical `deepseek-v4-flash` |
 | API | rank 0 only, port `8889` |
-| Rendezvous | `192.168.100.10:29631` |
+| Rendezvous | `192.168.100.10:29632` |
 | Container network | host network |
 | Container restart | deliberately `no` |
 
@@ -88,7 +89,7 @@ supervisor:
 2. checks the exact model, image, ports, and selected profile on both hosts;
 3. starts Spark 2's headless container before Spark 1's rank-0 container;
 4. verifies both container identities, host boot IDs, OOM state, `/health`,
-   and the exact served model;
+   and every required served-model ID, including the canonical alias;
 5. adopts an already healthy generation without restarting it; and
 6. replaces **both** ranks when either rank disappears, changes identity,
    independently restarts, or fails health checks.
@@ -130,9 +131,10 @@ topology and authentication settings.
 | `443/tcp` | Spark 1/Nginx | optional dashboard HTTPS |
 | `8090/tcp` | Spark 1/dashboard | collector; prefer loopback |
 | `8889/tcp` | Spark 1/vLLM | OpenAI-compatible model API |
-| `29631/tcp` | direct rail 0 | current TP rendezvous |
+| `29632/tcp` | direct rail 0 | current C8-agent TP rendezvous |
 
-The pinned seq6 profile uses API port `8888` and rendezvous port `29630`.
+The C32 throughput profile uses rendezvous port `29631`; the pinned seq6
+profile uses API port `8888` and rendezvous port `29630`.
 Only one large model profile can safely occupy the unified memory at a time.
 
 ## Security boundaries

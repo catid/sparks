@@ -36,6 +36,7 @@ known_hosts
 *.env
 !**/*.env.example
 !/dspark_mia/mia.env
+!/dspark_mia/mia-agent.env
 !/dspark_mia/mia-throughput.env
 /dashboard/dashboard.env.lan
 /openclaw/openclaw.json
@@ -51,6 +52,7 @@ known_hosts
 !/results/AGENT_EVAL.md
 !/results/BASELINE.md
 !/results/DEEPSEEK_V4_2SPARK_REPORT.md
+!/results/DEEPSEEK_V4_C8_AGENT_PROFILE.md
 !/results/DEEPSEEK_V4_AGENT_EVAL_MAX.md
 !/results/DEEPSEEK_V4_DSPARK_AGENT_EVAL_MAX.md
 !/results/DFLASH_REALISTIC.md

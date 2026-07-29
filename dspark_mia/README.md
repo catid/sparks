@@ -39,6 +39,9 @@ every provisioning and lifecycle command:
 ```bash
 ../scripts/configure-dspark-profile.sh
 MIA_ENV_FILE=mia-throughput.local.env ./bin/validate-static.sh
+
+../scripts/configure-dspark-profile.sh --profile agent
+MIA_ENV_FILE=mia-agent.local.env ./bin/validate-static.sh
 ```
 
 ## Throughput benchmark profile
@@ -66,6 +69,46 @@ activation peak on the larger graph capture. The graph ceiling is
 target and DSpark graph sets through C32. GPU utilization stays at 0.78 to
 give capture more headroom.
 
+## Low-concurrency agent profile
+
+`mia-agent.env.example` is the OpenClaw-oriented alternative to the C32
+throughput profile. It retains the same pinned model/image, TP2/PP1 placement,
+native DSpark k5 proposer, one-million-token per-request ceiling, thinking
+mode, four-rail transport, API port, and public model ID. Its isolated
+Compose/rendezvous/tmp identity and reduced scheduler are:
+
+| Setting | Agent value |
+| --- | --- |
+| Compose project | `mia-dspark-agent` |
+| Served model names | historical ID plus canonical `deepseek-v4-flash` alias |
+| API / rendezvous | `0.0.0.0:8889` / `192.168.100.10:29632` |
+| Host tmp | `$HOME/.cache/dspark-mia-agent-tmp` |
+| Context / slots | 1,048,576 / 8 |
+| Max batched tokens | 8,192 |
+| CUDA-graph capture | 48 = `8 * (k5 + target slot)` |
+| GPU memory utilization | 0.78 |
+
+The fixed 1,024-in/1,024-out C1-C8 comparison found speed effectively neutral
+versus C32, while captured graph memory fell from 2.59 GiB to 1.27 GiB. This
+profile removes the unused C9-C32 graph set and prevents more than eight active
+requests from expanding the decode batch; additional requests wait in vLLM's
+queue. The 8,192-token scheduler budget remains deliberate for long chunked
+prefills. Lowering it can improve decode fairness while another request
+prefills, but can also increase time to first token on a long agent transcript
+and must be measured. See
+[`../results/DEEPSEEK_V4_C8_AGENT_PROFILE.md`](../results/DEEPSEEK_V4_C8_AGENT_PROFILE.md).
+
+Render a separate ignored profile so selection and rollback stay explicit:
+
+```bash
+../scripts/configure-dspark-profile.sh --profile agent
+MIA_ENV_FILE=mia-agent.local.env ./bin/validate-static.sh
+```
+
+Switching the boot supervisor to this profile requires a coordinated
+`restart`; `start` may adopt a healthy existing generation and therefore does
+not apply new scheduler limits to already-running containers.
+
 ## Four-rail transport
 
 The local override uses the already proven topology:
@@ -89,15 +132,16 @@ peer reachability on all four rails.
 Static validation neither pulls nor starts anything:
 
 ```bash
-export MIA_ENV_FILE=mia-throughput.local.env
-./bin/validate-static.sh
-./tests/test-profile-selection.sh
-./tests/test-start-timeout.sh
+MIA_ENV_FILE=mia-agent.local.env ./bin/validate-static.sh
+MIA_ENV_FILE=mia-throughput.env ./tests/test-profile-selection.sh
+./tests/test-profile-renderer.sh
+./tests/test-model-catalog.sh
+MIA_ENV_FILE=mia-throughput.env ./tests/test-start-timeout.sh
 ```
 
-The generated local profile is the fresh-clone path. The tracked `mia.env` and
-`mia-throughput.env` files preserve the audited deployment and contain its
-original absolute paths.
+Generated local profiles are the fresh-clone path. The tracked `mia.env`,
+`mia-throughput.env`, and `mia-agent.env` files preserve this audited
+deployment and contain its original absolute paths.
 
 The timeout test uses fixture helpers and fake `ssh`/`curl`; it never contacts
 Docker or Spark 2. It proves that a failed API wait tears down both isolated
@@ -120,9 +164,10 @@ hosts' four rails, free ports, absence of an active vLLM workload, exact local
 image availability, and complete pinned model trees:
 
 ```bash
-./bin/sync-worker.sh
-./bin/preflight.sh
+MIA_ENV_FILE=mia-agent.env ./bin/sync-worker.sh
+MIA_ENV_FILE=mia-agent.env ./bin/preflight.sh
 
+# C32 alternative:
 MIA_ENV_FILE=mia-throughput.env ./bin/sync-worker.sh
 MIA_ENV_FILE=mia-throughput.env ./bin/preflight.sh
 ```
@@ -137,7 +182,7 @@ This profile is port-isolated from the existing port-8000 deployment, but two
 continue while any vLLM workload is active and never stops or changes the
 existing services. Stop those workloads explicitly before a controlled trial.
 
-When ready:
+The bare commands below select the legacy `mia.env` profile:
 
 ```bash
 ./bin/start.sh
@@ -152,22 +197,23 @@ MIA_ENV_FILE=mia-throughput.env ./bin/status.sh
 ```
 
 The launcher syncs this pinned tree to the same path on Spark 2, revalidates
-both copies, starts rank 1 headless first, then rank 0, and waits for
-`http://127.0.0.1:8888/v1/models`. Compose has `pull_policy: never`,
+both copies, and starts rank 1 headless before rank 0. The legacy `mia.env`
+profile waits on `http://127.0.0.1:8888/v1/models`; the C8 agent and C32
+throughput profiles both wait on port 8889. Compose has `pull_policy: never`,
 `restart: "no"`, and a unique project name. The lack of per-container restart
 is intentional: one TP rank cannot safely restart and rejoin the other rank's
 existing NCCL collective. The optional Spark 1 supervisor below always
 recycles the complete two-rank generation.
-The throughput profile waits on `http://127.0.0.1:8889/v1/models`.
 
 The local overlay also requests a `500000/500000` soft/hard `nofile` limit.
-Existing containers retain their creation-time limit; this applies on the
-next coordinated pair recreation.
+The active C8 generation passed both Docker and process-visible checks for that
+limit on both ranks. Existing containers still retain their creation-time
+limit, so recheck after every coordinated pair recreation.
 
 ## Optional boot persistence
 
-The Compose projects remain non-restarting and scoped. For the selected
-throughput deployment, Spark 1 can own boot orchestration through
+The Compose projects remain non-restarting and scoped. For either selected
+profile, Spark 1 can own boot orchestration through
 `systemd/dgx-spark-dspark-mia.service`. The long-running supervisor adopts an
 already healthy generation without interrupting it, or launches rank 1 first
 and rank 0 second if recovery is needed.
@@ -176,7 +222,8 @@ Every poll verifies:
 
 - exactly one running project-labelled container on each Spark;
 - each container's ID, start timestamp, OOM state, and host boot ID;
-- the rank-0 `/health` response and exact model advertised by `/v1/models`.
+- the rank-0 `/health` response and every required model ID advertised by
+  `/v1/models`, including the canonical OpenClaw alias.
 
 A missing, stopped, OOM-killed, independently restarted, or replaced rank
 causes an immediate coordinated stop/start of both ranks. API and management
@@ -192,11 +239,11 @@ Install and enable the unit only after disabling the retired rank-0 service;
 do not enable both:
 
 ```bash
-MIA_ENV_FILE=mia-throughput.local.env \
+MIA_ENV_FILE=mia-agent.local.env \
   ../scripts/install-dspark-supervisor.sh enable
 ```
 
-Starting the unit over an existing healthy throughput project is
+Starting the unit over an existing healthy selected project is
 non-disruptive. Confirm that systemd retains a live main process and recorded
 generation:
 
@@ -205,7 +252,7 @@ sudo systemctl start dgx-spark-dspark-mia.service
 systemctl show dgx-spark-dspark-mia.service \
   -p ActiveState -p SubState -p MainPID
 sudo cat /var/lib/dgx-spark-dspark-mia/epoch
-MIA_ENV_FILE=mia-throughput.env ./bin/probe.sh
+MIA_ENV_FILE=mia-agent.env ./bin/probe.sh
 ```
 
 `ActiveState=active`, `SubState=running`, and a nonzero `MainPID` distinguish
@@ -226,37 +273,48 @@ replace both IDs and timestamps and return the same model API:
 
 ```bash
 sudo docker ps \
-  --filter label=com.docker.compose.project=mia-dspark-throughput \
+  --filter label=com.docker.compose.project=mia-dspark-agent \
   --filter label=com.docker.compose.service=vllm-dspark
-MIA_ENV_FILE=mia-throughput.env ./bin/probe.sh
+MIA_ENV_FILE=mia-agent.env ./bin/probe.sh
 ```
 
 Cold initialization includes CUDA-graph capture and can take several minutes.
 Follow it with `journalctl -fu dgx-spark-dspark-mia.service`; do not start a
 second launcher while the supervisor lock is held.
 
-## Rollback
+## Profile switching and rollback
 
-Rollback only the isolated Compose project:
-
-```bash
-./bin/stop.sh
-sudo -n docker ps -a --filter label=com.docker.compose.project=mia-dspark-pinned
-ssh -i "$HOME/.ssh/id_ed25519_dgx_cluster" -o IdentitiesOnly=yes spark2 \
-  sudo -n docker ps -a --filter label=com.docker.compose.project=mia-dspark-pinned
-```
-
-Throughput rollback is equally scoped and must retain its selector:
+With the supervisor enabled, switch profiles through the installer so it
+re-renders the unit and replaces both TP ranks as one generation:
 
 ```bash
-MIA_ENV_FILE=mia-throughput.env ./bin/stop.sh
-sudo -n docker ps -a --filter label=com.docker.compose.project=mia-dspark-throughput
+# C8 agent -> C32 throughput
+MIA_ENV_FILE=mia-throughput.local.env \
+  ../scripts/install-dspark-supervisor.sh restart
+
+# C32 throughput -> C8 agent
+MIA_ENV_FILE=mia-agent.local.env \
+  ../scripts/install-dspark-supervisor.sh restart
 ```
 
-Both container listings should be empty. The rollback does not delete the
-pinned source/model/image and does not start, stop, enable, disable, or edit
-the existing port-8000 units. Those services can be resumed through their
-existing runbook after this project is confirmed down.
+Do not call `bin/stop.sh` while the supervisor is active; the lifecycle lock
+rejects it. To stop serving completely, stop the unit and let its owned-pair
+cleanup run:
+
+```bash
+sudo systemctl stop dgx-spark-dspark-mia.service
+```
+
+For a manually launched generation with the supervisor inactive, stop only
+the selected isolated project:
+
+```bash
+MIA_ENV_FILE=mia-agent.env ./bin/stop.sh
+# Or: MIA_ENV_FILE=mia-throughput.env ./bin/stop.sh
+```
+
+Rollback does not delete the pinned source, model, or image and does not
+modify the retired port-8000 units.
 
 ## Layout
 
@@ -264,6 +322,8 @@ existing runbook after this project is confirmed down.
 - `UPSTREAM.lock`: source tree, image digest, and model revision provenance
 - `MODEL.lock.json`: location-independent checkpoint metadata and path hint
 - `mia.env`: pinned cluster and runtime values
+- `mia-agent.env`: audited C8 / 1M-context agent profile for this checkout
+- `mia-agent.env.example`: portable input for `--profile agent`
 - `mia-throughput.env`: isolated seq32 / conservative 8,192-token benchmark profile
 - `mia-throughput.env.example`: portable input to the profile renderer
 - `compose.mia.override.yml`: local four-rail/thinking/image/model override

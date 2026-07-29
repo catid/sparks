@@ -113,6 +113,13 @@ for rendered in "${rank0_json}" "${rank1_json}"; do
     (($c | contains("--port 8000")) | not) and
     (($c | contains("--master-port 29601")) | not)
   ' "${rendered}" >/dev/null
+
+  while IFS= read -r model_id; do
+    jq -e --arg model_id "${model_id}" '
+      (.services["vllm-dspark"].command | join(" ")) |
+      contains(" " + $model_id + " ")
+    ' "${rendered}" >/dev/null
+  done < <(served_model_ids)
 done
 
 jq -e '

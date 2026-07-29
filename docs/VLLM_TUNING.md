@@ -5,9 +5,9 @@ checkpoint served by the pinned vLLM image across two DGX Sparks. It uses
 native DSpark speculative decoding, tensor parallelism across the two
 machines, thinking mode, and all four logical ConnectX-7 RoCE rails.
 
-## Selected serving profile
+## C32 throughput baseline
 
-The throughput profile is intentionally conservative at startup while still
+The retained throughput profile is intentionally conservative at startup while still
 admitting 32-request waves:
 
 | Setting | Value |
@@ -30,6 +30,47 @@ The vLLM command is rendered from
 [`compose.mia.override.yml`](../dspark_mia/compose.mia.override.yml), while
 profile-specific capacities and fabric values come from the selected `.env`
 file.
+
+## Low-concurrency OpenClaw profile
+
+The credential-free
+[`mia-agent.env.example`](../dspark_mia/mia-agent.env.example) specializes the
+same runtime for C1-C8 agent traffic:
+
+| Setting | Agent value |
+| --- | ---: |
+| Maximum model length | 1,048,576 tokens |
+| Maximum sequences | 8 |
+| Maximum batched tokens | 8,192 |
+| DSpark speculative tokens | 5 |
+| Maximum CUDA-graph capture | 48 expanded slots |
+| GPU memory utilization | 0.78 |
+
+At k5, eight target sequences require a graph ceiling of
+`8 * (5 + 1) = 48`, and vLLM reserves `8 * (5 - 1) = 32` draft scheduler
+slots. Requests beyond C8 queue. This is appropriate when OpenClaw normally
+runs one or two turns and only occasionally fans out to a few subagents. It
+avoids capturing graph sizes that an agent host is not expected to use while
+preserving long-context capacity, prefix caching, asynchronous scheduling,
+and chunked prefill.
+
+The cold C8 launch succeeded at the live-proven 0.78 memory fraction. It
+captured 1.27 GiB of graphs in about seven seconds and reported a
+1,417,464-token KV pool; the C32 baseline captured 2.59 GiB in about 24
+seconds and reported 1,464,202 KV tokens.
+
+Three warmed C8 waves measured 73.60, 101.21, 141.89, and 186.92 aggregate
+output tok/s at C1/C2/C4/C8. Against the identical C32 baseline, the changes
+were +2.3%, +0.4%, +1.1%, and -1.0%: effectively neutral. C8 is selected for
+the smaller graph footprint and workload-appropriate queue ceiling, not a
+claimed decode speedup. Full method, TTFT, response inspection, and limitations
+are in
+[`DEEPSEEK_V4_C8_AGENT_PROFILE.md`](../results/DEEPSEEK_V4_C8_AGENT_PROFILE.md).
+
+Keep the 8,192-token prefill budget unless a controlled long-prefill test
+proves a reason to change it. A 4,096-token follow-up could improve decode
+fairness while another request prefills, but can also add prefill iterations
+and worsen time to first token.
 
 ## Why TP2/PP1
 
@@ -93,6 +134,17 @@ consume casually. The baseline captured graphs successfully, but late capture
 produced nonfatal allocation retries and the lowest observed free system
 memory was under 9 GiB on one node. Raising the fraction risks failing cold
 startup even if a hot process appears comfortable.
+
+The C32 cold-start log reported a 1,464,202-token KV pool and 2.59 GiB of
+captured graphs. One later `cache_config_info` sample disagreed at 886,775
+tokens, so the coordinated cold-start log remains the capacity authority. The
+active C8 cold start reported 1,417,464 tokens and 1.27 GiB of graphs. Its
+later live metric reported 858,469 tokens (`0.8187` maximum concurrency),
+leaving only 72,037 tokens above two configured 393,216-token OpenClaw working
+contexts. The reason for that cold-log/runtime-metric disagreement is not yet
+resolved. Use early compaction and do not treat the two-context arithmetic as
+a guarantee that both sessions can fill their configured window
+simultaneously.
 
 The one-million-token number is a per-request model ceiling, not a guarantee
 that 32 one-million-token conversations fit concurrently. The measured shared
@@ -198,7 +250,7 @@ container, get its host PID, and inspect the mapped library:
 ```bash
 container="$(
   sudo docker ps -q \
-    --filter label=com.docker.compose.project=mia-dspark-throughput \
+    --filter label=com.docker.compose.project=mia-dspark-agent \
     --filter label=com.docker.compose.service=vllm-dspark
 )"
 pid="$(sudo docker inspect --format '{{.State.Pid}}' "${container}")"

@@ -190,10 +190,25 @@ The default output is `dspark_mia/mia-throughput.local.env`. Review at least:
 - Spark 1/2 addresses and the rendezvous/API ports;
 - the four NCCL HCA names.
 
-Select that same profile for every lifecycle or provisioning command:
+For an OpenClaw-oriented C1-C8 deployment, render the agent profile instead:
 
 ```bash
-export MIA_ENV_FILE="$HOME/sparks/dspark_mia/mia-throughput.local.env"
+scripts/configure-dspark-profile.sh --profile agent
+```
+
+That output is `dspark_mia/mia-agent.local.env`. It retains the one-million
+token model ceiling, port 8889, and both served model IDs while using an
+isolated Compose project/rendezvous/tmp identity and a C8 graph ceiling.
+
+Select exactly one rendered profile and keep it exported for every lifecycle
+or provisioning command:
+
+```bash
+# OpenClaw / C1-C8:
+export MIA_ENV_FILE="$HOME/sparks/dspark_mia/mia-agent.local.env"
+
+# Or, for C1-C32 throughput waves:
+# export MIA_ENV_FILE="$HOME/sparks/dspark_mia/mia-throughput.local.env"
 ```
 
 Do not add the generated profile to Git. It contains no required secret, but
@@ -231,8 +246,8 @@ root-equivalent. Keep the service account and its SSH key protected.
 ```bash
 # Spark 1
 cd ~/sparks
-scripts/pull-dspark-container.sh
-MIA_ENV_FILE="$HOME/sparks/dspark_mia/mia-throughput.local.env" \
+MIA_ENV_FILE="${MIA_ENV_FILE}" scripts/pull-dspark-container.sh
+MIA_ENV_FILE="${MIA_ENV_FILE}" \
   scripts/pull-dspark-container.sh --pull-both
 ```
 
@@ -259,10 +274,10 @@ the profile, shell history, command arguments, or repository.
 
 ```bash
 cd ~/sparks
-MIA_ENV_FILE="$HOME/sparks/dspark_mia/mia-throughput.local.env" \
+MIA_ENV_FILE="${MIA_ENV_FILE}" \
   scripts/download-pinned-model.sh --download
 
-MIA_ENV_FILE="$HOME/sparks/dspark_mia/mia-throughput.local.env" \
+MIA_ENV_FILE="${MIA_ENV_FILE}" \
   scripts/sync-pinned-model-multirail.sh --sync
 ```
 
@@ -285,8 +300,9 @@ Re-run local and remote validation:
 cd ~/sparks/dspark_mia
 ./bin/validate-model.sh
 
+remote_profile="$HOME/sparks/dspark_mia/$(basename "${MIA_ENV_FILE}")"
 ssh -i ~/.ssh/id_ed25519_dgx_cluster -o IdentitiesOnly=yes spark2 \
-  "MIA_ENV_FILE='$HOME/sparks/dspark_mia/mia-throughput.local.env' \
+  "MIA_ENV_FILE='${remote_profile}' \
    '$HOME/sparks/dspark_mia/bin/validate-model.sh'"
 ```
 
@@ -303,11 +319,12 @@ active; it never stops that workload for you.
 
 ```bash
 cd ~/sparks/dspark_mia
-export MIA_ENV_FILE=mia-throughput.local.env
 ./bin/validate-static.sh
-./tests/test-profile-selection.sh
-./tests/test-start-timeout.sh
-./tests/test-supervisor.sh
+MIA_ENV_FILE=mia-throughput.env ./tests/test-profile-selection.sh
+./tests/test-profile-renderer.sh
+./tests/test-model-catalog.sh
+MIA_ENV_FILE=mia-throughput.env ./tests/test-start-timeout.sh
+MIA_ENV_FILE=mia-throughput.env ./tests/test-supervisor.sh
 ./bin/preflight.sh
 ```
 
@@ -322,7 +339,7 @@ Only Spark 1 owns the DSpark service:
 
 ```bash
 cd ~/sparks
-MIA_ENV_FILE="$HOME/sparks/dspark_mia/mia-throughput.local.env" \
+MIA_ENV_FILE="${MIA_ENV_FILE}" \
   scripts/install-dspark-supervisor.sh start
 ```
 

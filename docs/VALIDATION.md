@@ -9,27 +9,29 @@ model failures are not collapsed into one “server is up” result.
 From the repository root, check shell syntax and deterministic tests:
 
 ```bash
-find bin scripts dspark_mia/bin dspark_mia/tests tests \
+find bin scripts dspark_mia/bin dspark_mia/tests openclaw tests \
   -type f -name '*.sh' -print0 |
   xargs -0 -r -n1 bash -n
 
 shellcheck \
   bin/*.sh scripts/*.sh dspark_mia/bin/*.sh \
-  dspark_mia/tests/*.sh tests/*.sh
+  dspark_mia/tests/*.sh openclaw/*.sh tests/*.sh
 
-MIA_ENV_FILE=mia-throughput.local.env \
+MIA_ENV_FILE=mia-agent.local.env \
   ./dspark_mia/bin/validate-static.sh
 
-MIA_ENV_FILE=mia-throughput.local.env \
+MIA_ENV_FILE=mia-agent.local.env \
   ./scripts/install-dspark-supervisor.sh verify
 ./scripts/install-dashboard.sh verify --web
 
 (cd dspark_mia && \
-  MIA_ENV_FILE=mia-throughput.local.env ./tests/test-profile-selection.sh)
+  MIA_ENV_FILE=mia-throughput.env ./tests/test-profile-selection.sh)
+(cd dspark_mia && ./tests/test-profile-renderer.sh)
+(cd dspark_mia && ./tests/test-model-catalog.sh)
 (cd dspark_mia && \
-  MIA_ENV_FILE=mia-throughput.local.env ./tests/test-start-timeout.sh)
+  MIA_ENV_FILE=mia-throughput.env ./tests/test-start-timeout.sh)
 (cd dspark_mia && \
-  MIA_ENV_FILE=mia-throughput.local.env ./tests/test-supervisor.sh)
+  MIA_ENV_FILE=mia-throughput.env ./tests/test-supervisor.sh)
 ```
 
 `validate-static.sh` renders both rank configurations without pulling or
@@ -59,7 +61,8 @@ Run the runtime-specific test with the same Python stack used by vLLM:
 Before publishing changes to the public repository:
 
 ```bash
-git add docs/CONTAINERS.md docs/VLLM_TUNING.md
+git status --short
+git add -- path/to/reviewed-file another/reviewed-file
 ./scripts/check-public.sh --staged
 ```
 
@@ -72,8 +75,8 @@ agent trajectories, runtime state, or active service environment files.
 After generating and synchronizing the selected local profile:
 
 ```bash
-MIA_ENV_FILE=mia-throughput.local.env ./dspark_mia/bin/sync-worker.sh
-MIA_ENV_FILE=mia-throughput.local.env ./dspark_mia/bin/preflight.sh
+MIA_ENV_FILE=mia-agent.local.env ./dspark_mia/bin/sync-worker.sh
+MIA_ENV_FILE=mia-agent.local.env ./dspark_mia/bin/preflight.sh
 ```
 
 The sync changes only the worker's pinned integration tree. Preflight itself
@@ -106,7 +109,7 @@ Once the service is ready:
 ```bash
 curl -fsS http://127.0.0.1:8889/health
 curl -fsS http://127.0.0.1:8889/v1/models | jq .
-MIA_ENV_FILE=mia-throughput.local.env ./dspark_mia/bin/probe.sh
+MIA_ENV_FILE=mia-agent.local.env ./dspark_mia/bin/probe.sh
 curl -fsS http://127.0.0.1:8889/metrics | head
 ```
 
@@ -230,7 +233,7 @@ python3 deepseek_v4_bench/benchmark.py \
   --endpoint http://127.0.0.1:8889 \
   --label tp2-dspark-nvfp4-k5 \
   --output-dir "${run_dir}" \
-  --concurrency 1 2 4 8 16 32 \
+  --concurrency 1 2 4 8 \
   --repeats 1 \
   --prompt-tokens 1024 \
   --output-tokens 1024
@@ -241,6 +244,11 @@ The default forces exact completion length with vLLM's `min_tokens`,
 `max_tokens`, and `ignore_eos`; this is appropriate for throughput
 comparability but not agent-quality judgment. It runs a short untimed warm-up
 before each measured wave.
+
+The active agent profile schedules at most eight sequences. To measure native
+C16/C32 batching rather than queued work, first perform a coordinated switch
+to `mia-throughput.local.env`, then add `16 32` to the matrix. Switch back to
+the agent profile after the throughput experiment.
 
 Review at least:
 
@@ -306,7 +314,9 @@ violated the cancellation invariant and never produced a final answer. See
 [`DEEPSEEK_V4_DSPARK_AGENT_EVAL_MAX.md`](../results/DEEPSEEK_V4_DSPARK_AGENT_EVAL_MAX.md)
 before considering OpenClaw or Hermes integration.
 
-OpenClaw is unfinished and is not deployed by these validation steps.
+The Spark validation steps do not install OpenClaw. The separately validated
+third-host deployment and its local-model/Sol verifier smoke checks are
+documented in [`openclaw/README.md`](../openclaw/README.md).
 
 ## 7. Recovery, limits, and thermals
 
@@ -315,9 +325,10 @@ Use the exact-container failure injection in
 container fingerprints to change, the same model to return, and no manual
 rank-1 intervention.
 
-After the next coordinated cold reload, verify that both containers received
-the staged `nofile` soft/hard limit of 500,000. Repository validation cannot
-retroactively change a running container's limits.
+The active C8 cold generation passed Docker and process-visible checks for a
+`nofile` soft/hard limit of 500,000 on both ranks. Recheck after every
+coordinated reload because repository validation cannot retroactively change a
+running container's limits.
 
 During cold capture and the full matrix, monitor:
 

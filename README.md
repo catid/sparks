@@ -6,7 +6,8 @@ with reproducible fresh-host automation. Spark 1 owns the OpenAI-compatible
 endpoint and supervises both ranks; Spark 2 is a headless worker. The selected
 profile uses TP=2, native DSpark speculative decoding (`k=5`), NVFP4 DS-MLA KV
 cache, FlashInfer B12X kernels, thinking mode, and four logical RoCE rails
-carried by two ConnectX-7 cables.
+carried by two ConnectX-7 cables. The active scheduler is the C8 agent profile;
+the C32 throughput profile remains available for bulk request waves.
 
 The active pair and its installed artifacts were inspected directly. The new
 portable renderers/installers have static, unit, and non-mutating integration
@@ -53,8 +54,8 @@ OpenClaw state in this public checkout.
 | Container | digest-pinned `ghcr.io/anemll/dspark-vllm-gx10` |
 | Parallelism | one TP=2 generation spanning both Sparks; PP=1 |
 | Speculation | native probabilistic DSpark, five draft tokens |
-| Context | 1,048,576-token ceiling; 32 scheduler slots |
-| API | Spark 1 only, port 8889; Spark 2 runs `--headless` |
+| Context | 1,048,576-token ceiling; 8 active scheduler slots |
+| API | Spark 1 only, port 8889; canonical `deepseek-v4-flash` alias |
 | Fabric | four 200 Gb/s, MTU-9000 RoCE interfaces |
 | Recovery | Spark 1 systemd supervisor recycles the complete TP pair |
 | Dashboard | GPU/CPU/SoC/NVMe/CX-7 thermals, memory, vLLM and RDMA history |
@@ -72,7 +73,7 @@ easy rollback, but GDM/X is not running.
 
 ## Measured throughput
 
-The selected native DSpark profile was measured with realistic coding-agent
+The native DSpark C32 throughput baseline was measured with realistic coding-agent
 prompts calibrated to 1,024 ± 12 input tokens, maximum reasoning, thinking
 enabled, and exactly 1,024 generated tokens per request:
 
@@ -85,9 +86,12 @@ enabled, and exactly 1,024 generated tokens per request:
 | 16 | 283.94 | 19.65 |
 | 32 | 381.77 | 14.54 |
 
-These are aggregate server rates, not 381 tok/s for each of 32 users. The
-complete methodology, comparisons, thermals, network counters, failure cases,
-and qualitative agent evaluation are in
+These are aggregate server rates, not 381 tok/s for each of 32 users. The live
+C8 agent profile is separately qualified at C1-C8; its repeated comparison and
+memory trade-off are documented in
+[`docs/VLLM_TUNING.md`](docs/VLLM_TUNING.md). The complete original
+methodology, comparisons, thermals, network counters, failure cases, and
+qualitative agent evaluation are in
 [`results/DEEPSEEK_V4_2SPARK_REPORT.md`](results/DEEPSEEK_V4_2SPARK_REPORT.md).
 
 ## Start here
@@ -108,13 +112,13 @@ The short path, after completing the prerequisites in the setup guide, is:
 
 ```bash
 # Spark 1
-MIA_ENV_FILE=mia-throughput.local.env \
+MIA_ENV_FILE=mia-agent.local.env \
   dspark_mia/bin/preflight.sh
-MIA_ENV_FILE=mia-throughput.local.env \
+MIA_ENV_FILE=mia-agent.local.env \
   scripts/install-dspark-supervisor.sh start
 
 # Health and identity checks
-MIA_ENV_FILE=mia-throughput.local.env \
+MIA_ENV_FILE=mia-agent.local.env \
   dspark_mia/bin/probe.sh
 curl -fsS http://127.0.0.1:8889/v1/models | jq
 ```
@@ -137,8 +141,8 @@ minutes for weight loading, warm-up, and CUDA-graph capture.
 - `results/`: reviewed reports and aggregate result files only
 - `bin/`, `deepseek-v4/`, `agent_eval/`: earlier experiments and the retired
   Laguna topology, retained for provenance
-- `openclaw/`: sanitized experimental examples; OpenClaw is not a completed or
-  enabled service on either Spark
+- `openclaw/`: sanitized, validated third-host OpenClaw configuration,
+  GPT-5.6 Sol verifier routing, and headless macOS persistence
 
 Generated responses, prompts, reasoning traces, telemetry, logs, credentials,
 certificates, model weights, and host state are intentionally excluded. Run

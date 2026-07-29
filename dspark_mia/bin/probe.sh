@@ -8,6 +8,7 @@ source "${script_dir}/common.sh"
 
 need_command curl
 need_command docker
+need_command jq
 need_command ssh
 need_command sudo
 need_command timeout
@@ -82,9 +83,9 @@ check_api() {
     api_probe_error="rank 0 model listing unavailable: ${api_base}/v1/models"
     return 1
   fi
-  if ! grep -Eq \
-    "\"id\"[[:space:]]*:[[:space:]]*\"${SERVED_MODEL_NAME}\"" <<<"${models}"; then
-    api_probe_error="rank 0 API does not advertise ${SERVED_MODEL_NAME}"
+  mapfile -t missing_model_ids < <(missing_served_model_ids "${models}")
+  if ((${#missing_model_ids[@]} != 0)); then
+    api_probe_error="rank 0 API is missing required model IDs: ${missing_model_ids[*]}"
     return 1
   fi
   return 0

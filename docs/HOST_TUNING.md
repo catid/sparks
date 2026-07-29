@@ -178,18 +178,17 @@ copies are more dangerous than small VM tuning differences.
 Compose does not inherit the invoking shell's file-descriptor limit. The
 repository overlay now requests `nofile` soft/hard limits of
 `500000/500000`. The audit found older live containers with asymmetric
-limits—including a worker soft limit of 1024—so this improvement applies on
-the next coordinated cold generation, not retroactively. Verify after that
-reload:
+limits—including a worker soft limit of 1024. The active C8 cold generation
+now reports 500,000 on both ranks. The setting is still creation-time only, so
+verify after later reloads:
 
 ```bash
 sudo docker exec CONTAINER sh -c \
   'printf "soft="; ulimit -Sn; printf "hard="; ulimit -Hn'
 ```
 
-Do not restart a healthy 120B generation solely to apply this staged limit;
-let the Spark 1 supervisor replace both ranks together at the next planned
-reload.
+If a future change is needed, let the Spark 1 supervisor replace both ranks
+together at a planned reload; never restart only one TP rank.
 
 ## Settings intentionally left alone
 

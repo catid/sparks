@@ -45,6 +45,7 @@ for path in "${files[@]}"; do
       results/AGENT_EVAL.md|\
       results/BASELINE.md|\
       results/DEEPSEEK_V4_2SPARK_REPORT.md|\
+      results/DEEPSEEK_V4_C8_AGENT_PROFILE.md|\
       results/DEEPSEEK_V4_AGENT_EVAL_MAX.md|\
       results/DEEPSEEK_V4_DSPARK_AGENT_EVAL_MAX.md|\
       results/DFLASH_REALISTIC.md|\
@@ -86,6 +87,7 @@ for path in "${files[@]}"; do
       ;;
     *.env)
       if [[ "${path}" != "dspark_mia/mia.env" &&
+            "${path}" != "dspark_mia/mia-agent.env" &&
             "${path}" != "dspark_mia/mia-throughput.env" ]]; then
         echo "public-safety: unapproved .env file: ${path}" >&2
         failed=1

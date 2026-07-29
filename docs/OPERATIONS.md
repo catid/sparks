@@ -5,7 +5,7 @@ OpenAI-compatible HTTP endpoint, supervises both ranks, and hosts the
 dashboard. Spark 2 runs one headless rank and must not run an independent
 model supervisor.
 
-The default throughput deployment is:
+The active low-concurrency agent deployment is:
 
 | Role | Location |
 | --- | --- |
@@ -33,7 +33,7 @@ Spark 1:
 
 ```bash
 cd /path/to/sparks
-export MIA_ENV_FILE=mia-throughput.local.env
+export MIA_ENV_FILE=mia-agent.local.env
 
 MIA_ENV_FILE="${MIA_ENV_FILE}" ./dspark_mia/bin/preflight.sh
 MIA_ENV_FILE="${MIA_ENV_FILE}" ./dspark_mia/bin/start.sh
@@ -62,10 +62,10 @@ Install from Spark 1 only. Select the generated local profile when invoking
 the installer:
 
 ```bash
-MIA_ENV_FILE=mia-throughput.local.env \
+MIA_ENV_FILE=mia-agent.local.env \
   ./scripts/install-dspark-supervisor.sh verify
 
-MIA_ENV_FILE=mia-throughput.local.env \
+MIA_ENV_FILE=mia-agent.local.env \
   ./scripts/install-dspark-supervisor.sh enable
 ```
 
@@ -82,9 +82,24 @@ action only for an intentional coordinated stop and several-minute cold
 reload:
 
 ```bash
-MIA_ENV_FILE=mia-throughput.local.env \
+MIA_ENV_FILE=mia-agent.local.env \
   ./scripts/install-dspark-supervisor.sh restart
 ```
+
+Render the C8 OpenClaw profile before the first installation or when switching
+back from the C32 throughput profile:
+
+```bash
+./scripts/configure-dspark-profile.sh --profile agent
+MIA_ENV_FILE=mia-agent.local.env \
+  ./scripts/install-dspark-supervisor.sh restart
+```
+
+The API remains on port 8889 and advertises both the historical and canonical
+model IDs, so clients do not need a provider change. Verify the new
+`max_num_seqs=8` and `capture=48` profile values in the supervisor journal and
+vLLM startup log; do not infer that a healthy endpoint alone proves the new
+generation adopted the profile.
 
 Starting the supervisor over an already healthy generation is non-disruptive:
 it adopts and fingerprints that generation. Starting with no healthy
@@ -112,18 +127,18 @@ curl -fsS http://127.0.0.1:8889/v1/models | jq .
 The generation-aware check is:
 
 ```bash
-MIA_ENV_FILE=mia-throughput.local.env ./dspark_mia/bin/probe.sh
+MIA_ENV_FILE=mia-agent.local.env ./dspark_mia/bin/probe.sh
 ```
 
 It requires exactly one correctly labelled container on each host, verifies
 that neither was OOM-killed, checks both container start timestamps and both
-host boot IDs, and confirms that rank 0 advertises the expected model. On
-success it prints a generation fingerprint.
+host boot IDs, and confirms that rank 0 advertises the historical ID plus
+every configured alias. On success it prints a generation fingerprint.
 
 For container status without relying on process-name matches:
 
 ```bash
-MIA_ENV_FILE=mia-throughput.local.env ./dspark_mia/bin/status.sh
+MIA_ENV_FILE=mia-agent.local.env ./dspark_mia/bin/status.sh
 ```
 
 Useful service logs are:
@@ -137,7 +152,7 @@ For vLLM logs, first resolve the container using both Compose labels:
 
 ```bash
 sudo docker ps \
-  --filter label=com.docker.compose.project=mia-dspark-throughput \
+  --filter label=com.docker.compose.project=mia-dspark-agent \
   --filter label=com.docker.compose.service=vllm-dspark
 ```
 
@@ -153,7 +168,7 @@ Each poll checks:
 - container IDs and start timestamps;
 - both host boot IDs;
 - the rank-0 `/health` endpoint; and
-- the exact model returned by `/v1/models`.
+- every required model ID returned by `/v1/models`.
 
 A missing, stopped, OOM-killed, independently restarted, or replaced rank
 invalidates the complete TP generation and triggers immediate coordinated
@@ -185,7 +200,7 @@ rank using both labels, verify that exactly one container is returned, then
 stop that ID:
 
 ```bash
-project=mia-dspark-throughput
+project=mia-dspark-agent
 mapfile -t ids < <(
   sudo docker ps -q \
     --filter "label=com.docker.compose.project=${project}" \
@@ -274,7 +289,7 @@ complete generation:
 ```bash
 systemctl is-enabled dgx-spark-dspark-mia.service
 systemctl is-active dgx-spark-dspark-mia.service
-MIA_ENV_FILE=mia-throughput.local.env ./dspark_mia/bin/probe.sh
+MIA_ENV_FILE=mia-agent.local.env ./dspark_mia/bin/probe.sh
 ```
 
 Wait for the generation-aware probe rather than judging recovery from systemd
@@ -282,14 +297,17 @@ activity alone.
 
 ## OpenClaw status
 
-OpenClaw is not deployed or enabled as part of this two-Spark service. Files
-under `openclaw/` are sanitized examples and unfinished integration work.
-They are not evidence of a working gateway, credential configuration, or
-agent sandbox.
+OpenClaw is deployed on a third computer so both Sparks remain dedicated to
+inference. The validated configuration uses the canonical
+`vllm/deepseek-v4-flash` model for routine work and an explicit, schema-bound
+`llm-task` call to `openai/gpt-5.6-sol` for consequential semantic review.
+Routine turns and compaction remain local. See
+[`openclaw/README.md`](../openclaw/README.md) for deployment, credential
+isolation, launchd recovery, and end-to-end verifier checks.
 
-The recommended architecture is to keep both Sparks dedicated to inference
-and run an eventual agent gateway on another machine. Before granting it
-shell access, evaluate model behavior in a disposable sandbox with semantic
-invariants and hidden tests. The max-context coding-agent trial produced safe
-tool calls and passing tests but still failed the task semantically; see
+This integration does not erase the model-quality caveat. The earlier
+max-context coding-agent trial produced safe tool calls and passing tests but
+still failed the task semantically; see
 [`DEEPSEEK_V4_DSPARK_AGENT_EVAL_MAX.md`](../results/DEEPSEEK_V4_DSPARK_AGENT_EVAL_MAX.md).
+Keep consequential external actions behind normal approval boundaries and use
+the Sol verifier as advisory review, not autonomous authority.
