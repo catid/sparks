@@ -1,0 +1,19 @@
+{
+  "schema": 2,
+  "repo_id": "deepseek-ai/DeepSeek-V4-Flash-DSpark",
+  "revision": "62af8fffb2f7030cac4de2f0169f5b8d1101b646",
+  "default_host_path": "~/models/DeepSeek-V4-Flash-DSpark-official",
+  "container_path": "/models/deepseek-ai--DeepSeek-V4-Flash-DSpark--62af8fffb2f7030cac4de2f0169f5b8d1101b646",
+  "expected_safetensor_shards": 48,
+  "expected_safetensor_bytes": 166886535336,
+  "key_files": {
+    "config.json": {
+      "bytes": 1888,
+      "sha256": "6c8f3d2d3b48707541b88f32f22ef3f0f8a6b57d8523281e2b8d3cdb0ae9a023"
+    },
+    "model.safetensors.index.json": {
+      "bytes": 5602871,
+      "sha256": "98efab455cf08dfbbbaaba6f570e1bf10bf927d2b4c3c453a59c2f6f0e3be92b"
+    }
+  }
+}

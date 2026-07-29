@@ -1,0 +1,27 @@
+[Unit]
+Description=Laguna router streaming front end
+Wants=network-online.target dgx-laguna-router.service
+After=network-online.target dgx-laguna-router.service
+
+[Service]
+Type=simple
+User=catid
+Group=catid
+WorkingDirectory=/home/catid/dgx-spark-laguna
+Environment=PYTHONUNBUFFERED=1
+Environment=ROUTER_UPSTREAM=http://127.0.0.1:8081
+Environment=ROUTER_FRONT_HOST=0.0.0.0
+Environment=ROUTER_FRONT_PORT=8080
+ExecStart=/home/catid/venvs/vllm-router0115/bin/python /home/catid/dgx-spark-laguna/bin/router-front.py
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

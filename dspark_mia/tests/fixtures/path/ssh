@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh' >>"${MIA_START_TEST_LOG:?}"
+printf ' %q' "$@" >>"${MIA_START_TEST_LOG}"
+printf '\n' >>"${MIA_START_TEST_LOG}"

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Forced-command endpoint for the dedicated Spark 1 -> Spark 2 rank-control
+# key. sshd supplies the client's requested operation in SSH_ORIGINAL_COMMAND;
+# authorized_keys supplies this program as the only executable command.
+
+readonly rank1_unit="dgx-spark-deepseek-v4-rank1.service"
+readonly systemctl_bin="/usr/bin/systemctl"
+readonly sudo_bin="/usr/bin/sudo"
+readonly status_request="DGX_SPARK_DEEPSEEK_V4_RANK1_CONTROL_V1_STATUS"
+readonly restart_request="DGX_SPARK_DEEPSEEK_V4_RANK1_CONTROL_V1_RESTART"
+readonly stop_request="DGX_SPARK_DEEPSEEK_V4_RANK1_CONTROL_V1_STOP"
+
+PATH=/usr/sbin:/usr/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+umask 077
+
+deny() {
+  echo "Denied rank-1 control request." >&2
+  exit 126
+}
+
+# The authorized_keys forced command passes no arguments. Rejecting arguments
+# also makes accidental direct use fail closed.
+if (($# != 0)); then
+  deny
+fi
+
+case "${SSH_ORIGINAL_COMMAND-}" in
+  "${status_request}")
+    exec "${systemctl_bin}" show "${rank1_unit}" \
+      -p LoadState \
+      -p ActiveState \
+      -p SubState \
+      -p MainPID \
+      -p InvocationID
+    ;;
+  "${restart_request}")
+    # reset-failed is opportunistic: a unit that is not failed may reject it,
+    # but a restart must still be attempted.
+    "${sudo_bin}" -n "${systemctl_bin}" reset-failed "${rank1_unit}" \
+      >/dev/null 2>&1 || true
+    exec "${sudo_bin}" -n "${systemctl_bin}" restart --no-block "${rank1_unit}"
+    ;;
+  "${stop_request}")
+    exec "${sudo_bin}" -n "${systemctl_bin}" stop --no-block "${rank1_unit}"
+    ;;
+  *)
+    deny
+    ;;
+esac

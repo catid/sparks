@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Spark Array</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">DGX SPARK ARRAY · DEEPSEEK V4 FLASH</p>
+      <h1>Inference control plane</h1>
+    </div>
+    <div id="freshness" class="freshness"><i></i><span>Connecting</span></div>
+  </header>
+
+  <main>
+    <section id="router" class="router hero-card">
+      <div>
+        <p id="endpoint-eyebrow" class="eyebrow">INFERENCE ENDPOINT</p>
+        <h2 id="endpoint-title">Checking topology</h2>
+        <p id="router-url" class="mono muted">—</p>
+      </div>
+      <div class="hero-metrics">
+        <div><strong id="cluster-out">—</strong><span>generation tok/s</span></div>
+        <div><strong id="cluster-in">—</strong><span>prompt tok/s</span></div>
+        <div><strong id="router-rps">—</strong><span>requests/s</span></div>
+      </div>
+      <span id="router-state" class="state">CHECKING</span>
+    </section>
+
+    <section id="nodes" class="node-grid"></section>
+
+    <section class="chart-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">LIVE WINDOW</p>
+          <h2>Generation throughput</h2>
+        </div>
+        <div class="legend">
+          <span><i class="spark1"></i>Cluster aggregate</span>
+        </div>
+      </div>
+      <canvas id="throughput-chart" height="180"></canvas>
+    </section>
+
+    <section class="chart-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">THERMAL HISTORY</p>
+          <h2>GPU and CPU temperatures</h2>
+        </div>
+        <div class="legend thermal-legend">
+          <span><i class="spark1"></i>Spark 1 GPU</span>
+          <span><i class="spark1-cpu"></i>Spark 1 CPU</span>
+          <span><i class="spark2"></i>Spark 2 GPU</span>
+          <span><i class="spark2-cpu"></i>Spark 2 CPU</span>
+        </div>
+      </div>
+      <canvas id="temperature-chart" height="180"></canvas>
+    </section>
+
+    <section class="notes">
+      <p><span class="dot cyan"></span>TP2 token rates come from rank 0 once; rank 1 is headless.</p>
+      <p><span class="dot violet"></span>GB10 uses unified memory; framebuffer memory may be unavailable by design.</p>
+      <p><span class="dot green"></span>CPU is the hottest named firmware cluster sensor; LPDDR5X exposes no temperature sensor.</p>
+      <p><span class="dot amber"></span>Unavailable values are shown as “—”, never as zero.</p>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+# Exact root operations permitted to the Spark 2 forced-command wrapper.
+# Argument matching is literal: no wildcard or command without its fixed unit
+# name is allowed. systemctl show remains unprivileged and is not listed here.
+Cmnd_Alias DGX_SPARK_DEEPSEEK_V4_RANK1_CONTROL = \
+    /usr/bin/systemctl reset-failed dgx-spark-deepseek-v4-rank1.service, \
+    /usr/bin/systemctl restart --no-block dgx-spark-deepseek-v4-rank1.service, \
+    /usr/bin/systemctl stop --no-block dgx-spark-deepseek-v4-rank1.service
+
+catid ALL=(root) NOPASSWD: DGX_SPARK_DEEPSEEK_V4_RANK1_CONTROL

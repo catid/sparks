@@ -1,0 +1,27 @@
+[Unit]
+Description=Laguna S 2.1 NVFP4+DFlash vLLM agent backend
+Wants=network-online.target
+After=network-online.target local-fs.target
+
+[Service]
+Type=simple
+User=catid
+Group=catid
+WorkingDirectory=/home/catid/dgx-spark-laguna
+Environment=PYTHONUNBUFFERED=1
+Environment=LAGUNA_VLLM_HOST=0.0.0.0
+Environment=LAGUNA_VLLM_PORT=8000
+EnvironmentFile=-/etc/dgx-spark-laguna-vllm-agent.conf
+ExecStart=/home/catid/dgx-spark-laguna/bin/launch-nvfp4-agent-local.sh
+Restart=on-failure
+RestartSec=15s
+KillSignal=SIGINT
+KillMode=mixed
+SuccessExitStatus=SIGINT 130
+TimeoutStopSec=5min
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+[Unit]
+Description=Laguna NVFP4 vLLM replica router
+Documentation=https://docs.vllm.ai/projects/production-stack/en/latest/router.html
+Wants=network-online.target dgx-spark-laguna-vllm-agent.service
+After=network-online.target dgx-spark-laguna-vllm-agent.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=catid
+Group=catid
+WorkingDirectory=/home/catid/dgx-spark-laguna
+Environment=ROUTER_PORT=8081
+EnvironmentFile=-/etc/default/dgx-laguna-router
+ExecStart=/home/catid/dgx-spark-laguna/bin/launch-router.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+KillMode=mixed
+LimitNOFILE=1048576
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/catid/dgx-spark-laguna/logs
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

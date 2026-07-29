@@ -1,0 +1,3 @@
+[submodule "dspark_mia/upstream"]
+	path = dspark_mia/upstream
+	url = https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark.git

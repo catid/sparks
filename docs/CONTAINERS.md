@@ -1,0 +1,180 @@
+# Container and checkpoint provenance
+
+The serving deployment is deliberately reproducible: source, container, and
+model are pinned independently, the model is mounted read-only, and service
+startup never downloads anything. Do not replace a digest or revision with a
+floating tag when reproducing the setup.
+
+## Locked artifacts
+
+| Artifact | Lock |
+| --- | --- |
+| Recipe | `MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark` |
+| Recipe commit | `0220360b752349c9b3129d64799246a4ec106640` |
+| Recipe tree | `3869c6a7720746199122f7530b4692f696619f82` |
+| Runtime image | `ghcr.io/anemll/dspark-vllm-gx10@sha256:a83948492cf13df455170fb42885f5ef4db54fefe0feff0f841ecbff464ac9d8` |
+| Model | `deepseek-ai/DeepSeek-V4-Flash-DSpark` |
+| Model revision | `62af8fffb2f7030cac4de2f0169f5b8d1101b646` |
+
+The authoritative machine-readable records are
+[`UPSTREAM.lock`](../dspark_mia/UPSTREAM.lock) and
+[`MODEL.lock.json`](../dspark_mia/MODEL.lock.json). The upstream recipe is a
+Git submodule at [`dspark_mia/upstream`](../dspark_mia/upstream); local
+orchestration changes live outside that submodule.
+
+The model lock additionally verifies:
+
+- 48 Safetensors shards;
+- 166,886,535,336 total Safetensors bytes;
+- the hashes and sizes of `config.json` and
+  `model.safetensors.index.json`;
+- Hugging Face download metadata for the exact revision; and
+- the expected DeepSeek V4, DSpark block-size, and one-million-token model
+  configuration.
+
+The observed image stack used for the recorded baseline was:
+
+| Component | Version |
+| --- | --- |
+| Architecture | `linux/arm64` |
+| PyTorch | `2.11.0+cu130` |
+| vLLM | `0.25.2.dev0+g752a3a504.d20260714` |
+| Transformers | `5.13.1` |
+| FlashInfer | `0.6.15` |
+| NCCL distribution loaded by vLLM | `nvidia-nccl-cu13 2.30.7` |
+
+`torch.cuda.nccl.version()` reports the NCCL version against which PyTorch was
+built, 2.28.9 in this image. It is not proof of the shared object used by the
+running process. The vLLM processes on both ranks map the identical
+`nvidia/nccl/lib/libnccl.so.2` from the Python distribution, and
+`ncclGetVersion()` returns 23007. In other words, the serving runtime is NCCL
+2.30.7 even though PyTorch's build metadata says 2.28.9. See
+[VLLM_TUNING.md](VLLM_TUNING.md#nccl-and-the-four-rail-fabric) for transport
+details.
+
+## First-time artifact provisioning
+
+Run lifecycle commands on Spark 1. Both machines should have this repository
+at the same absolute path, Docker available through `sudo -n docker`, the
+four-rail network configured, and key-based SSH from Spark 1 to Spark 2.
+Follow the host and network setup first.
+
+Initialize the pinned upstream checkout on both machines:
+
+```bash
+git submodule update --init --recursive
+ssh spark2 'cd /path/to/sparks && git submodule update --init --recursive'
+```
+
+Generate a local serving profile rather than editing a tracked profile. The
+profile must end in `.env` and live directly under `dspark_mia/`:
+
+```bash
+bash ./scripts/configure-dspark-profile.sh
+export MIA_ENV_FILE=mia-throughput.local.env
+```
+
+Review the generated values before continuing, especially
+`WORKER_INSTALL_DIR`, `CLUSTER_SSH_KEY`, both fabric addresses, model paths,
+API/rendezvous ports, and the served model name. The selector is a basename
+when used by the DSpark lifecycle wrappers; they resolve it inside
+`dspark_mia/`.
+
+Validate the rendered Compose configuration, then synchronize the selected
+integration and profile to Spark 2:
+
+```bash
+MIA_ENV_FILE="${MIA_ENV_FILE}" ./dspark_mia/bin/validate-static.sh
+MIA_ENV_FILE="${MIA_ENV_FILE}" ./dspark_mia/bin/sync-worker.sh
+```
+
+Pull the exact image on both hosts. The helper uses the selected profile's
+dedicated SSH identity, refuses an unpinned image, requires identical image
+IDs, and does not run a container:
+
+```bash
+MIA_ENV_FILE="${MIA_ENV_FILE}" \
+  ./scripts/pull-dspark-container.sh --pull-both
+```
+
+Authenticate the Hugging Face CLI using its credential store, never by adding
+a token to this repository. Download the exact revision to Spark 1:
+
+```bash
+hf auth login
+MIA_ENV_FILE="${MIA_ENV_FILE}" \
+  ./scripts/download-pinned-model.sh --download
+```
+
+The download helper validates the checkpoint immediately. Copy it to Spark 2
+over all four fabric addresses and validate both copies:
+
+```bash
+MIA_ENV_FILE="${MIA_ENV_FILE}" \
+  ./scripts/sync-pinned-model-multirail.sh --sync
+MIA_ENV_FILE="${MIA_ENV_FILE}" ./dspark_mia/bin/preflight.sh
+```
+
+`preflight.sh` is non-downloading and does not start a service. It requires the
+ports to be free and rejects any already-running vLLM workload, so use the
+live health checks in [OPERATIONS.md](OPERATIONS.md) after deployment instead
+of running preflight against a serving cluster.
+
+## Runtime isolation
+
+The local Compose override enforces:
+
+- the digest-pinned image with `pull_policy: never`;
+- `restart: "no"` on each individual rank;
+- an exact, read-only model bind mount;
+- `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`;
+- host networking for the distributed rendezvous and rank-0 API;
+- one process/rank per Spark; and
+- an explicit four-rail NCCL environment.
+
+Per-container restart is intentionally disabled. A lone tensor-parallel rank
+cannot safely restart and join the other rank's existing NCCL generation.
+Spark 1's supervisor replaces both ranks as one generation when either rank
+changes or fails.
+
+The override now requests a soft and hard `nofile` limit of 500,000. This is a
+staged improvement: an existing container retains the limits with which it was
+created. It takes effect on the next coordinated cold reload, not when the
+repository file changes. Verify it after that reload:
+
+```bash
+container="$(
+  sudo docker ps -q \
+    --filter label=com.docker.compose.project=mia-dspark-throughput \
+    --filter label=com.docker.compose.service=vllm-dspark
+)"
+sudo docker inspect --format '{{json .HostConfig.Ulimits}}' "${container}"
+sudo docker exec "${container}" sh -lc 'ulimit -Sn; ulimit -Hn'
+```
+
+Resolve the container through both Compose labels as shown. Do not select a
+container by a broad image or process match.
+
+## Rebuilding instead of pulling
+
+The tested path uses the locked prebuilt image. If the registry artifact is
+unavailable or a runtime patch must be developed, the pinned upstream
+submodule includes the Dockerfiles, build scripts, and source-overlay
+verification used to construct it. Start with:
+
+```bash
+sed -n '1,240p' dspark_mia/upstream/build-dspark-vllm-runtime.sh
+sed -n '1,240p' dspark_mia/upstream/docs/SETUP.md
+bash dspark_mia/upstream/scripts/verify-overlay-sources.sh
+```
+
+The locked upstream stores its shell files with mode 0644. Invoke standalone
+helpers with `bash`; do not assume `./script.sh` is executable. The upstream
+builder itself assumes executable helper bits, so make those mode changes only
+in a disposable build copy rather than dirtying the pinned submodule used by
+serving validation.
+
+A locally rebuilt image is a new artifact. Give it its own immutable digest,
+record the full toolchain and source commit, update the locks deliberately,
+and rerun static, model, network, functional, and performance validation.
+Results from an unrecorded local image are not comparable with this baseline.

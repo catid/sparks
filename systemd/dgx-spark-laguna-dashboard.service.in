@@ -1,0 +1,32 @@
+[Unit]
+Description=DGX Spark inference dashboard
+Documentation=file:@PROJECT_DIR@/dashboard/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@PROJECT_DIR@
+Environment=HOME=@HOME@
+EnvironmentFile=/etc/default/dgx-spark-laguna-dashboard
+ExecStart=@PROJECT_DIR@/dashboard/run-dashboard.sh
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

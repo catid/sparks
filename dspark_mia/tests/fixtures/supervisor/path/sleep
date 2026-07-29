@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+test_dir="${MIA_SUPERVISOR_TEST_DIR:?missing MIA_SUPERVISOR_TEST_DIR}"
+duration="${1:?missing sleep duration}"
+printf 'SLEEP:%s\n' "${duration}" >>"${test_dir}/events.log"
+
+if [[ -n "${MIA_SUPERVISOR_TEST_SLEEP_READY:-}" ]]; then
+  trap 'exit 143' TERM INT HUP
+  : >"${MIA_SUPERVISOR_TEST_SLEEP_READY}"
+  while [[ ! -e "${MIA_SUPERVISOR_TEST_SLEEP_RELEASE:-/nonexistent}" ]]; do
+    /usr/bin/sleep 0.05
+  done
+fi

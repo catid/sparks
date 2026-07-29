@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Direct lifecycle lock tests must remain harmless even if lock acquisition
+# regresses. Never execute the command supplied to this timeout fixture.
+printf '%s\n' 'UNEXPECTED:LIFECYCLE_TIMEOUT' \
+  >>"${MIA_SUPERVISOR_TEST_DIR:?missing MIA_SUPERVISOR_TEST_DIR}/events.log"
+exit 99

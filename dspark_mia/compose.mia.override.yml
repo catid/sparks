@@ -1,0 +1,94 @@
+# Local controlled overlay. The upstream checkout in ./upstream is unmodified.
+services:
+  vllm-dspark:
+    image: ${DSPARK_VLLM_IMAGE:?DSPARK_VLLM_IMAGE must be the pinned digest}
+    pull_policy: never
+    restart: "no"
+
+    # Compose does not inherit the host shell's nofile limit. Keep enough
+    # descriptors for long-lived, high-concurrency API and NCCL workloads.
+    ulimits:
+      nofile:
+        soft: 500000
+        hard: 500000
+
+    volumes:
+      - ${DSPARK_MODEL_HOST_PATH:?missing host model path}:${DSPARK_MODEL:?missing container model path}:ro
+
+    environment:
+      # The full checkpoint is mounted by exact local path; serving is offline.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+
+      # Four-rail profile already proven on this Spark pair.
+      NCCL_NET: IB
+      NCCL_IB_DISABLE: "0"
+      NCCL_IB_HCA: "${NCCL_IB_HCA}"
+      NCCL_NETDEVS_POLICY: ALL
+      NCCL_CROSS_NIC: "0"
+      NCCL_IB_MERGE_NICS: "0"
+      NCCL_SOCKET_IFNAME: "${NCCL_SOCKET_IFNAME}"
+      NCCL_SOCKET_FAMILY: AF_INET
+      NCCL_IB_ADDR_FAMILY: AF_INET
+      NCCL_IB_ROCE_VERSION_NUM: "2"
+      TP_SOCKET_IFNAME: "${TP_SOCKET_IFNAME}"
+      GLOO_SOCKET_IFNAME: "${GLOO_SOCKET_IFNAME}"
+      NCCL_DMABUF_ENABLE: "1"
+      NCCL_NET_GDR_C2C: "1"
+      NCCL_IB_QPS_PER_CONNECTION: "1"
+      NCCL_IB_SPLIT_DATA_ON_QPS: "0"
+      NCCL_CUMEM_ENABLE: "0"
+      NCCL_IGNORE_CPU_AFFINITY: "1"
+      NCCL_NVLS_ENABLE: "0"
+      NCCL_DEBUG: "${NCCL_DEBUG:-INFO}"
+      NCCL_DEBUG_SUBSYS: "${NCCL_DEBUG_SUBSYS:-INIT,NET,GRAPH}"
+      TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+
+      # Null explicitly removes the scalar inherited by the upstream map.
+      NCCL_IB_GID_INDEX: null
+
+    # Upstream hard-codes thinking=false, so the local overlay replaces only
+    # the command surface while retaining its image layout and runtime flags.
+    command:
+      - bash
+      - -lc
+      - >
+        export PATH="/usr/local/cuda/bin:/usr/local/bin:$${PATH:-}";
+        export CUDA_HOME="$${CUDA_HOME:-/usr/local/cuda}";
+        export CUDA_PATH="$${CUDA_PATH:-$${CUDA_HOME}}";
+        export CUDAToolkit_ROOT="$${CUDAToolkit_ROOT:-$${CUDA_HOME}}";
+        export LD_LIBRARY_PATH="/usr/local/cuda/lib64:$${LD_LIBRARY_PATH:-}";
+        SPECULATIVE_CONFIG="{\"method\":\"dspark\",\"num_speculative_tokens\":$${MTP_NUM_TOKENS:-5},\"draft_sample_method\":\"probabilistic\"}";
+        exec /usr/local/bin/vllm serve ${DSPARK_MODEL}
+        --served-model-name ${SERVED_MODEL_NAME}
+        --host ${VLLM_HOST}
+        --port ${VLLM_PORT}
+        --trust-remote-code
+        --tensor-parallel-size 2
+        --pipeline-parallel-size 1
+        --kv-cache-dtype nvfp4_ds_mla
+        --block-size 256
+        --max-model-len ${MAX_MODEL_LEN}
+        --max-num-seqs ${MAX_NUM_SEQS}
+        --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}
+        --max-cudagraph-capture-size ${MAX_CUDAGRAPH_CAPTURE_SIZE}
+        --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}
+        --enable-prefix-caching
+        --async-scheduling
+        --enable-chunked-prefill
+        --speculative-config "$${SPECULATIVE_CONFIG}"
+        --tokenizer-mode deepseek_v4
+        --distributed-executor-backend mp
+        --moe-backend flashinfer_b12x
+        --tool-call-parser deepseek_v4
+        --enable-auto-tool-choice
+        --reasoning-parser deepseek_v4
+        --reasoning-config '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"<think>","reasoning_end_str":"</think>"}'
+        --default-chat-template-kwargs '{"thinking":true}'
+        --generation-config vllm
+        --enable-flashinfer-autotune
+        --nnodes 2
+        --node-rank ${NODE_RANK}
+        --master-addr ${MASTER_ADDR}
+        --master-port ${MASTER_PORT}
+        ${HEADLESS:+--headless}

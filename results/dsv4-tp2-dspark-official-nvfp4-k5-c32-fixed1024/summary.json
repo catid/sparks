@@ -1,0 +1,562 @@
+{
+  "status": "completed",
+  "updated_at": "2026-07-29T15:31:52.435357+00:00",
+  "configuration": {
+    "created_at": "2026-07-29T15:27:16.076777+00:00",
+    "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+    "endpoint": "http://127.0.0.1:8889",
+    "model": "deepseek-v4-flash-dspark-mia-throughput",
+    "concurrency": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32
+    ],
+    "repeats": 1,
+    "target_prompt_tokens": 1024,
+    "prompt_tolerance": 12,
+    "max_output_tokens": 1024,
+    "min_output_tokens": 1024,
+    "ignore_eos": true,
+    "reasoning_effort": "max",
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "thinking": true,
+    "warmup_output_tokens": 32,
+    "timeout_seconds": 7200.0,
+    "seed": 260729,
+    "tool_execution": "disabled; calls are recorded only"
+  },
+  "prompt_calibration": [
+    {
+      "case_index": 0,
+      "token_count": 1029,
+      "pad_words": 1
+    },
+    {
+      "case_index": 1,
+      "token_count": 1030,
+      "pad_words": 1
+    },
+    {
+      "case_index": 2,
+      "token_count": 1027,
+      "pad_words": 1
+    },
+    {
+      "case_index": 3,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 4,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 5,
+      "token_count": 1029,
+      "pad_words": 1
+    },
+    {
+      "case_index": 6,
+      "token_count": 1030,
+      "pad_words": 1
+    },
+    {
+      "case_index": 7,
+      "token_count": 1029,
+      "pad_words": 1
+    },
+    {
+      "case_index": 8,
+      "token_count": 1027,
+      "pad_words": 1
+    },
+    {
+      "case_index": 9,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 10,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 11,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 12,
+      "token_count": 1031,
+      "pad_words": 1
+    },
+    {
+      "case_index": 13,
+      "token_count": 1029,
+      "pad_words": 1
+    },
+    {
+      "case_index": 14,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 15,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 16,
+      "token_count": 1030,
+      "pad_words": 1
+    },
+    {
+      "case_index": 17,
+      "token_count": 1030,
+      "pad_words": 1
+    },
+    {
+      "case_index": 18,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 19,
+      "token_count": 1029,
+      "pad_words": 1
+    },
+    {
+      "case_index": 20,
+      "token_count": 1027,
+      "pad_words": 1
+    },
+    {
+      "case_index": 21,
+      "token_count": 1027,
+      "pad_words": 1
+    },
+    {
+      "case_index": 22,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 23,
+      "token_count": 1030,
+      "pad_words": 1
+    },
+    {
+      "case_index": 24,
+      "token_count": 1030,
+      "pad_words": 1
+    },
+    {
+      "case_index": 25,
+      "token_count": 1027,
+      "pad_words": 1
+    },
+    {
+      "case_index": 26,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 27,
+      "token_count": 1029,
+      "pad_words": 1
+    },
+    {
+      "case_index": 28,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 29,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 30,
+      "token_count": 1028,
+      "pad_words": 1
+    },
+    {
+      "case_index": 31,
+      "token_count": 1026,
+      "pad_words": 1
+    }
+  ],
+  "waves": [
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 1,
+      "repeat": 1,
+      "requests": 1,
+      "successful": 1,
+      "batch_wall_s": 14.232093045999136,
+      "reported_prompt_tokens_total": 1029,
+      "completion_tokens_total": 1024,
+      "aggregate_prompt_tokens_per_s": 72.30138228257775,
+      "aggregate_output_tokens_per_s": 71.95006361259438,
+      "aggregate_output_tokens_per_s_per_user": 71.95006361259438,
+      "request_output_tokens_per_s_after_first_mean": 73.54038233656736,
+      "request_output_tokens_per_s_after_first_p50": 73.54038233656736,
+      "request_output_tokens_per_s_e2e_mean": 71.95123795912544,
+      "ttft_mean_s": 0.32113623500117683,
+      "ttft_p50_s": 0.32113623500117683,
+      "ttft_p95_s": 0.32113623500117683,
+      "e2e_p50_s": 14.231860758000039,
+      "e2e_p95_s": 14.231860758000039,
+      "prompt_tokens_min": 1029,
+      "prompt_tokens_max": 1029,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 1
+      }
+    },
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 2,
+      "repeat": 1,
+      "requests": 2,
+      "successful": 2,
+      "batch_wall_s": 20.315469757000756,
+      "reported_prompt_tokens_total": 2059,
+      "completion_tokens_total": 2048,
+      "aggregate_prompt_tokens_per_s": 101.35133593405902,
+      "aggregate_output_tokens_per_s": 100.80987663572262,
+      "aggregate_output_tokens_per_s_per_user": 50.40493831786131,
+      "request_output_tokens_per_s_after_first_mean": 53.2234174871425,
+      "request_output_tokens_per_s_after_first_p50": 53.2234174871425,
+      "request_output_tokens_per_s_e2e_mean": 51.98811017040771,
+      "ttft_mean_s": 0.47548625800027366,
+      "ttft_p50_s": 0.47548625800027366,
+      "ttft_p95_s": 0.4756569340001988,
+      "e2e_p50_s": 19.715043940499527,
+      "e2e_p95_s": 20.254635592949853,
+      "prompt_tokens_min": 1029,
+      "prompt_tokens_max": 1030,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 2
+      }
+    },
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 4,
+      "repeat": 1,
+      "requests": 4,
+      "successful": 4,
+      "batch_wall_s": 29.181803425999533,
+      "reported_prompt_tokens_total": 4114,
+      "completion_tokens_total": 4096,
+      "aggregate_prompt_tokens_per_s": 140.97826443223283,
+      "aggregate_output_tokens_per_s": 140.3614416904292,
+      "aggregate_output_tokens_per_s_per_user": 35.0903604226073,
+      "request_output_tokens_per_s_after_first_mean": 36.80991888113928,
+      "request_output_tokens_per_s_after_first_p50": 36.86849283298899,
+      "request_output_tokens_per_s_e2e_mean": 35.87492390021972,
+      "ttft_mean_s": 0.7573070700004791,
+      "ttft_p50_s": 0.9011763800008339,
+      "ttft_p95_s": 0.9013123840014488,
+      "e2e_p50_s": 28.605095647500093,
+      "e2e_p95_s": 29.139238620800004,
+      "prompt_tokens_min": 1027,
+      "prompt_tokens_max": 1030,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 4
+      }
+    },
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 8,
+      "repeat": 1,
+      "requests": 8,
+      "successful": 8,
+      "batch_wall_s": 43.38936986199951,
+      "reported_prompt_tokens_total": 8230,
+      "completion_tokens_total": 8192,
+      "aggregate_prompt_tokens_per_s": 189.6777949570512,
+      "aggregate_output_tokens_per_s": 188.80200440925435,
+      "aggregate_output_tokens_per_s_per_user": 23.600250551156794,
+      "request_output_tokens_per_s_after_first_mean": 26.344778271848398,
+      "request_output_tokens_per_s_after_first_p50": 26.516956379305782,
+      "request_output_tokens_per_s_e2e_mean": 25.399634161870956,
+      "ttft_mean_s": 1.4814177388752796,
+      "ttft_p50_s": 1.4814358510011516,
+      "ttft_p95_s": 1.481884259150138,
+      "e2e_p50_s": 40.06116760399982,
+      "e2e_p95_s": 42.99486466135013,
+      "prompt_tokens_min": 1027,
+      "prompt_tokens_max": 1030,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 8
+      }
+    },
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 16,
+      "repeat": 1,
+      "requests": 16,
+      "successful": 16,
+      "batch_wall_s": 57.70197635800105,
+      "reported_prompt_tokens_total": 16457,
+      "completion_tokens_total": 16384,
+      "aggregate_prompt_tokens_per_s": 285.2068687889587,
+      "aggregate_output_tokens_per_s": 283.9417474775657,
+      "aggregate_output_tokens_per_s_per_user": 17.746359217347855,
+      "request_output_tokens_per_s_after_first_mean": 19.651236023457976,
+      "request_output_tokens_per_s_after_first_p50": 19.532915342484603,
+      "request_output_tokens_per_s_e2e_mean": 18.956725861973762,
+      "ttft_mean_s": 1.9565290521874203,
+      "ttft_p50_s": 1.956680826999218,
+      "ttft_p95_s": 1.9574867779997476,
+      "e2e_p50_s": 54.329878811000526,
+      "e2e_p95_s": 56.975834634000876,
+      "prompt_tokens_min": 1027,
+      "prompt_tokens_max": 1031,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 16
+      }
+    },
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 32,
+      "repeat": 1,
+      "requests": 32,
+      "successful": 32,
+      "batch_wall_s": 85.83173053300015,
+      "reported_prompt_tokens_total": 32910,
+      "completion_tokens_total": 32768,
+      "aggregate_prompt_tokens_per_s": 383.42463557048904,
+      "aggregate_output_tokens_per_s": 381.7702357451773,
+      "aggregate_output_tokens_per_s_per_user": 11.93031986703679,
+      "request_output_tokens_per_s_after_first_mean": 14.541660248454782,
+      "request_output_tokens_per_s_after_first_p50": 14.68035881102026,
+      "request_output_tokens_per_s_e2e_mean": 13.82218830095716,
+      "ttft_mean_s": 3.6692916066251655,
+      "ttft_p50_s": 3.990262735000215,
+      "ttft_p95_s": 3.991176902800271,
+      "e2e_p50_s": 73.67508863449984,
+      "e2e_p95_s": 82.43297504225092,
+      "prompt_tokens_min": 1026,
+      "prompt_tokens_max": 1031,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 32
+      }
+    }
+  ],
+  "by_concurrency": [
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 1,
+      "repeats": 1,
+      "requests": 1,
+      "successful": 1,
+      "batch_wall_s_total": 14.232093045999136,
+      "reported_prompt_tokens_total": 1029,
+      "completion_tokens_total": 1024,
+      "aggregate_prompt_tokens_per_s": 72.30138228257775,
+      "aggregate_output_tokens_per_s": 71.95006361259438,
+      "aggregate_output_tokens_per_s_per_user": 71.95006361259438,
+      "request_output_tokens_per_s_after_first_mean": 73.54038233656736,
+      "request_output_tokens_per_s_after_first_p50": 73.54038233656736,
+      "request_output_tokens_per_s_after_first_p95": 73.54038233656736,
+      "request_output_tokens_per_s_e2e_mean": 71.95123795912544,
+      "ttft_mean_s": 0.32113623500117683,
+      "ttft_p50_s": 0.32113623500117683,
+      "ttft_p95_s": 0.32113623500117683,
+      "e2e_p50_s": 14.231860758000039,
+      "e2e_p95_s": 14.231860758000039,
+      "prompt_tokens_min": 1029,
+      "prompt_tokens_max": 1029,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 1
+      }
+    },
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 2,
+      "repeats": 1,
+      "requests": 2,
+      "successful": 2,
+      "batch_wall_s_total": 20.315469757000756,
+      "reported_prompt_tokens_total": 2059,
+      "completion_tokens_total": 2048,
+      "aggregate_prompt_tokens_per_s": 101.35133593405902,
+      "aggregate_output_tokens_per_s": 100.80987663572262,
+      "aggregate_output_tokens_per_s_per_user": 50.40493831786131,
+      "request_output_tokens_per_s_after_first_mean": 53.2234174871425,
+      "request_output_tokens_per_s_after_first_p50": 53.2234174871425,
+      "request_output_tokens_per_s_after_first_p95": 54.71659088670935,
+      "request_output_tokens_per_s_e2e_mean": 51.98811017040771,
+      "ttft_mean_s": 0.47548625800027366,
+      "ttft_p50_s": 0.47548625800027366,
+      "ttft_p95_s": 0.4756569340001988,
+      "e2e_p50_s": 19.715043940499527,
+      "e2e_p95_s": 20.254635592949853,
+      "prompt_tokens_min": 1029,
+      "prompt_tokens_max": 1030,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 2
+      }
+    },
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 4,
+      "repeats": 1,
+      "requests": 4,
+      "successful": 4,
+      "batch_wall_s_total": 29.181803425999533,
+      "reported_prompt_tokens_total": 4114,
+      "completion_tokens_total": 4096,
+      "aggregate_prompt_tokens_per_s": 140.97826443223283,
+      "aggregate_output_tokens_per_s": 140.3614416904292,
+      "aggregate_output_tokens_per_s_per_user": 35.0903604226073,
+      "request_output_tokens_per_s_after_first_mean": 36.80991888113928,
+      "request_output_tokens_per_s_after_first_p50": 36.86849283298899,
+      "request_output_tokens_per_s_after_first_p95": 37.30973886540966,
+      "request_output_tokens_per_s_e2e_mean": 35.87492390021972,
+      "ttft_mean_s": 0.7573070700004791,
+      "ttft_p50_s": 0.9011763800008339,
+      "ttft_p95_s": 0.9013123840014488,
+      "e2e_p50_s": 28.605095647500093,
+      "e2e_p95_s": 29.139238620800004,
+      "prompt_tokens_min": 1027,
+      "prompt_tokens_max": 1030,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 4
+      }
+    },
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 8,
+      "repeats": 1,
+      "requests": 8,
+      "successful": 8,
+      "batch_wall_s_total": 43.38936986199951,
+      "reported_prompt_tokens_total": 8230,
+      "completion_tokens_total": 8192,
+      "aggregate_prompt_tokens_per_s": 189.6777949570512,
+      "aggregate_output_tokens_per_s": 188.80200440925435,
+      "aggregate_output_tokens_per_s_per_user": 23.600250551156794,
+      "request_output_tokens_per_s_after_first_mean": 26.344778271848398,
+      "request_output_tokens_per_s_after_first_p50": 26.516956379305782,
+      "request_output_tokens_per_s_after_first_p95": 28.058283476852445,
+      "request_output_tokens_per_s_e2e_mean": 25.399634161870956,
+      "ttft_mean_s": 1.4814177388752796,
+      "ttft_p50_s": 1.4814358510011516,
+      "ttft_p95_s": 1.481884259150138,
+      "e2e_p50_s": 40.06116760399982,
+      "e2e_p95_s": 42.99486466135013,
+      "prompt_tokens_min": 1027,
+      "prompt_tokens_max": 1030,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 8
+      }
+    },
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 16,
+      "repeats": 1,
+      "requests": 16,
+      "successful": 16,
+      "batch_wall_s_total": 57.70197635800105,
+      "reported_prompt_tokens_total": 16457,
+      "completion_tokens_total": 16384,
+      "aggregate_prompt_tokens_per_s": 285.2068687889587,
+      "aggregate_output_tokens_per_s": 283.9417474775657,
+      "aggregate_output_tokens_per_s_per_user": 17.746359217347855,
+      "request_output_tokens_per_s_after_first_mean": 19.651236023457976,
+      "request_output_tokens_per_s_after_first_p50": 19.532915342484603,
+      "request_output_tokens_per_s_after_first_p95": 21.161099838075835,
+      "request_output_tokens_per_s_e2e_mean": 18.956725861973762,
+      "ttft_mean_s": 1.9565290521874203,
+      "ttft_p50_s": 1.956680826999218,
+      "ttft_p95_s": 1.9574867779997476,
+      "e2e_p50_s": 54.329878811000526,
+      "e2e_p95_s": 56.975834634000876,
+      "prompt_tokens_min": 1027,
+      "prompt_tokens_max": 1031,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 16
+      }
+    },
+    {
+      "label": "tp2-dspark-official-nvfp4-k5-c32-fixed1024",
+      "batch_size": 32,
+      "repeats": 1,
+      "requests": 32,
+      "successful": 32,
+      "batch_wall_s_total": 85.83173053300015,
+      "reported_prompt_tokens_total": 32910,
+      "completion_tokens_total": 32768,
+      "aggregate_prompt_tokens_per_s": 383.42463557048904,
+      "aggregate_output_tokens_per_s": 381.7702357451773,
+      "aggregate_output_tokens_per_s_per_user": 11.93031986703679,
+      "request_output_tokens_per_s_after_first_mean": 14.541660248454782,
+      "request_output_tokens_per_s_after_first_p50": 14.68035881102026,
+      "request_output_tokens_per_s_after_first_p95": 15.628985326851883,
+      "request_output_tokens_per_s_e2e_mean": 13.82218830095716,
+      "ttft_mean_s": 3.6692916066251655,
+      "ttft_p50_s": 3.990262735000215,
+      "ttft_p95_s": 3.991176902800271,
+      "e2e_p50_s": 73.67508863449984,
+      "e2e_p95_s": 82.43297504225092,
+      "prompt_tokens_min": 1026,
+      "prompt_tokens_max": 1031,
+      "completion_tokens_min": 1024,
+      "completion_tokens_max": 1024,
+      "finish_reason_counts": {
+        "tool_calls": 32
+      }
+    }
+  ],
+  "metrics": {
+    "before_error": null,
+    "after_error": null,
+    "delta": {
+      "vllm:spec_decode_num_drafts_total": 13858.0,
+      "vllm:spec_decode_num_draft_tokens_total": 69290.0,
+      "vllm:spec_decode_num_accepted_tokens_total": 52782.0,
+      "vllm:prompt_tokens_total": 129598.0,
+      "vllm:generation_tokens_total": 66528.0
+    },
+    "accepted_tokens_per_draft_step": 3.8087747149660847,
+    "draft_token_acceptance_percent": 76.17549429932168
+  },
+  "artifacts": {
+    "request_bodies": "requests/*.request.json",
+    "byte_exact_sse": "responses/*.response.sse",
+    "timed_parsed_sse_events": "responses/*.events.jsonl",
+    "reconstructed_responses": "responses/*.response.json",
+    "per_request_table": "requests.csv",
+    "per_wave_table": "waves.csv",
+    "concurrency_summary_table": "summary.csv"
+  }
+}

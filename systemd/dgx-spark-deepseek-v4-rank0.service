@@ -1,0 +1,37 @@
+[Unit]
+Description=DeepSeek V4 Flash NVFP4+DFlash TP2 vLLM rank 0
+Documentation=file:/home/catid/dgx-spark-laguna/systemd/README-deepseek-v4.md
+Requires=dgx-spark-cx7-ready.service
+Wants=network-online.target
+After=local-fs.target network-online.target dgx-spark-cx7-ready.service
+Conflicts=dgx-spark-laguna-vllm-agent.service dgx-laguna-router.service dgx-laguna-router-front.service
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=catid
+Group=catid
+WorkingDirectory=/home/catid/dgx-spark-laguna
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/dgx-spark-deepseek-v4.env
+ExecStartPre=/home/catid/dgx-spark-laguna/bin/manage-deepseek-v4-rank1.sh start-wait
+ExecStart=/usr/bin/env DGX_NODE_RANK=0 /home/catid/dgx-spark-laguna/bin/launch-deepseek-v4-2node.sh tp2-dflash
+ExecStopPost=-/home/catid/dgx-spark-laguna/bin/manage-deepseek-v4-rank1.sh stop-wait
+Restart=on-failure
+RestartSec=45s
+RestartPreventExitStatus=2
+KillSignal=SIGINT
+KillMode=mixed
+SuccessExitStatus=SIGINT 130 143
+TimeoutStartSec=35min
+# Exceeds the controller's 330-second remote cgroup wait.
+TimeoutStopSec=6min
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+TasksMax=infinity
+OOMPolicy=stop
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

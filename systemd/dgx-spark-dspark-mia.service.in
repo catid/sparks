@@ -1,0 +1,32 @@
+[Unit]
+Description=DeepSeek V4 Flash native DSpark TP2 service
+Documentation=file:@PROJECT_DIR@/dspark_mia/README.md
+Wants=network-online.target docker.service dgx-spark-cx7-ready.service
+After=local-fs.target network-online.target docker.service dgx-spark-cx7-ready.service
+Conflicts=dgx-spark-deepseek-v4-rank0.service dgx-spark-laguna-vllm-agent.service dgx-laguna-router.service dgx-laguna-router-front.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@PROJECT_DIR@/dspark_mia
+Environment=MIA_ENV_FILE=@PROFILE@
+Environment=MIA_SUPERVISOR_STATE_DIR=/var/lib/dgx-spark-dspark-mia
+Environment=MIA_SUPERVISOR_RUNTIME_DIR=/run/dgx-spark-dspark-mia
+Environment=MIA_SUPERVISOR_LOCK_DIR=@HOME@/.local/state/dgx-spark-dspark-mia-locks
+ExecStart=@PROJECT_DIR@/dspark_mia/bin/supervise.sh
+ExecStopPost=-@PROJECT_DIR@/dspark_mia/bin/stop-if-owned.sh
+Restart=always
+RestartSec=15s
+TimeoutStopSec=10min
+OOMPolicy=stop
+KillMode=mixed
+RuntimeDirectory=dgx-spark-dspark-mia
+RuntimeDirectoryMode=0700
+StateDirectory=dgx-spark-dspark-mia
+StateDirectoryMode=0700
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

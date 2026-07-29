@@ -1,0 +1,203 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "port": 18789,
+    "auth": {
+      "mode": "token",
+      "token": {
+        "source": "env",
+        "provider": "default",
+        "id": "OPENCLAW_GATEWAY_TOKEN"
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/home/YOUR_USER/.openclaw/workspace",
+      "model": {
+        "primary": "vllm/deepseek-v4-flash-dspark-mia-throughput",
+        "fallbacks": []
+      },
+      "utilityModel": "vllm/deepseek-v4-flash-dspark-mia-throughput",
+      "models": {
+        "vllm/deepseek-v4-flash-dspark-mia-throughput": {
+          "alias": "ds4f",
+          "params": {
+            "temperature": 1,
+            "topP": 1
+          }
+        }
+      },
+      "thinkingDefault": "max",
+      "reasoningDefault": "on",
+      "elevatedDefault": "off",
+      "timeoutSeconds": 14400,
+      "contextTokens": 1000000,
+      "maxConcurrent": 2,
+      "runRetries": {
+        "base": 16,
+        "perProfile": 4,
+        "min": 24,
+        "max": 64
+      },
+      "contextPruning": {
+        "mode": "cache-ttl",
+        "ttl": "5m",
+        "keepLastAssistants": 4,
+        "minPrunableToolChars": 20000,
+        "softTrim": {
+          "maxChars": 8000,
+          "headChars": 3000,
+          "tailChars": 3000
+        }
+      },
+      "compaction": {
+        "mode": "safeguard",
+        "timeoutSeconds": 3600,
+        "reserveTokensFloor": 65536,
+        "keepRecentTokens": 65536,
+        "recentTurnsPreserve": 4,
+        "maxHistoryShare": 0.65,
+        "identifierPolicy": "strict",
+        "qualityGuard": {
+          "enabled": true,
+          "maxRetries": 1
+        },
+        "midTurnPrecheck": {
+          "enabled": true
+        },
+        "truncateAfterCompaction": true,
+        "maxActiveTranscriptBytes": "2mb",
+        "notifyUser": true
+      },
+      "sandbox": {
+        "mode": "all",
+        "backend": "docker",
+        "scope": "session",
+        "workspaceAccess": "rw",
+        "docker": {
+          "image": "openclaw-sandbox:bookworm-slim",
+          "readOnlyRoot": true,
+          "tmpfs": [
+            "/tmp",
+            "/var/tmp",
+            "/run"
+          ],
+          "network": "none",
+          "user": "0:0",
+          "capDrop": [
+            "ALL"
+          ],
+          "pidsLimit": 256,
+          "memory": "4g",
+          "memorySwap": "4g",
+          "cpus": 4
+        },
+        "prune": {
+          "idleHours": 24,
+          "maxAgeDays": 7
+        }
+      }
+    }
+  },
+  "tools": {
+    "profile": "coding",
+    "deny": [
+      "gateway",
+      "cron",
+      "sessions_spawn",
+      "sessions_send",
+      "nodes",
+      "browser",
+      "canvas"
+    ],
+    "elevated": {
+      "enabled": false
+    },
+    "loopDetection": {
+      "enabled": true
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "pricing": {
+      "enabled": false
+    },
+    "providers": {
+      "vllm": {
+        "baseUrl": "http://spark1.lan:8889/v1",
+        "apiKey": "vllm-local",
+        "api": "openai-completions",
+        "timeoutSeconds": 14400,
+        "models": [
+          {
+            "id": "deepseek-v4-flash-dspark-mia-throughput",
+            "name": "DeepSeek V4 Flash DSpark NVFP4 TP2",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 1048576,
+            "contextTokens": 1000000,
+            "maxTokens": 384000,
+            "compat": {
+              "supportsTools": true,
+              "supportsUsageInStreaming": true,
+              "supportsReasoningEffort": true,
+              "supportsStrictMode": false,
+              "maxTokensField": "max_tokens",
+              "thinkingFormat": "deepseek",
+              "requiresReasoningContentOnAssistantMessages": true,
+              "supportedReasoningEfforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "channels": {
+    "slack": {
+      "enabled": true,
+      "mode": "socket",
+      "appToken": {
+        "source": "env",
+        "provider": "default",
+        "id": "SLACK_APP_TOKEN"
+      },
+      "botToken": {
+        "source": "env",
+        "provider": "default",
+        "id": "SLACK_BOT_TOKEN"
+      },
+      "dmPolicy": "pairing",
+      "groupPolicy": "disabled"
+    }
+  },
+  "plugins": {
+    "allow": [
+      "exa",
+      "slack"
+    ],
+    "entries": {
+      "exa": {
+        "enabled": true
+      },
+      "slack": {
+        "enabled": true
+      }
+    }
+  }
+}

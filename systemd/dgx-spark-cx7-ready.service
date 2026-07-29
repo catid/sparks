@@ -1,0 +1,27 @@
+[Unit]
+Description=Wait for all four DGX Spark ConnectX-7 RoCE rails
+Documentation=file:/home/catid/dgx-spark-laguna/systemd/README-deepseek-v4.md
+Wants=NetworkManager.service network-online.target
+After=NetworkManager.service network-online.target local-fs.target
+Before=dgx-spark-deepseek-v4-rank0.service dgx-spark-deepseek-v4-rank1.service
+
+[Service]
+Type=oneshot
+User=catid
+Group=catid
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/catid/dgx-spark-laguna/bin/wait-cx7-ready.sh --wait
+# Do not remain active: each rank start must pull in a fresh rail check.
+TimeoutStartSec=infinity
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK

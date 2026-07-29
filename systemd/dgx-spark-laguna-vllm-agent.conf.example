@@ -1,0 +1,8 @@
+# Optional per-node overrides read by dgx-spark-laguna-vllm-agent.service.
+# The defaults below are already embedded in the service.
+LAGUNA_VLLM_HOST=0.0.0.0
+LAGUNA_VLLM_PORT=8000
+LAGUNA_MAX_MODEL_LEN=262144
+# Poolside currently recommends 7; local realistic prompts were 15% faster
+# than K=15 on GB10.
+DFLASH_TOKENS=7
