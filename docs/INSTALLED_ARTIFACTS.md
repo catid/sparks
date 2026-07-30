@@ -93,11 +93,20 @@ The active units execute version-controlled paths directly:
 | DSpark lifecycle and supervisor | `dspark_mia/bin/` |
 | Compose behavior | upstream submodule plus `dspark_mia/compose.mia.override.yml` |
 | dashboard | `dashboard/run-dashboard.sh`, `dashboard/server.py`, `dashboard/static/` |
+| optional remote dashboard probe | `dashboard/remote-probe.sh`, installed by `scripts/install-dashboard-probe.sh` |
 | benchmarks | `bench/`, `deepseek_v4_bench/`, `deepseek_v4_agent_eval/` |
 
 Older rank-control helpers under `bin/`, `libexec/`, `security/`, and the
 legacy systemd files document the previous deployment. They are not part of
 the active Mia supervisor path.
+
+The dashboard may be moved later without changing the model installation.
+`dashboard/dashboard.remote.env.example` and
+`systemd/dgx-spark-laguna-dashboard.service.in` render the third-host service;
+the fixed probe installs as
+`/usr/local/libexec/dgx-spark-dashboard-probe` on each Spark. None of those
+optional remote-placement artifacts were installed during this two-host
+audit. See [`REMOTE_DASHBOARD.md`](REMOTE_DASHBOARD.md).
 
 Spark 2 still had the previous deployment's restricted controller installed:
 

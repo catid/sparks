@@ -31,6 +31,9 @@ examples:
 
  spark1 systemd supervisor ── SSH/Docker control ──> spark2
  dashboard collector       ── read-only SSH ───────> spark2
+
+ optional third-host dashboard ── read-only SSH ───> spark1 + spark2
+                               └─ HTTP metrics ────> spark1:8889
 ```
 
 The management LAN carries browser/API traffic, SSH control, and package
@@ -120,7 +123,10 @@ network state remain visible during a several-minute cold model load.
   counters.
 
 The dashboard has no role in model recovery. See `dashboard/README.md` for its
-topology and authentication settings.
+topology and authentication settings. It may instead run on a third Linux host
+and SSH-probe both Sparks; that optional placement is described in
+[`REMOTE_DASHBOARD.md`](REMOTE_DASHBOARD.md) and does not alter inference
+ownership.
 
 ## Ports
 

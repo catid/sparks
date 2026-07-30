@@ -271,6 +271,11 @@ unset dashboard_auth
 
 For a loopback-only manual collector with no `DASHBOARD_AUTH`, omit `--user`.
 
+An optional third-host collector probes both Sparks over restricted SSH and
+keeps this dashboard's memory off the inference pair. Follow
+[`REMOTE_DASHBOARD.md`](REMOTE_DASHBOARD.md); do not stop the current Spark 1
+unit until the remote API reports fresh, healthy data for both nodes.
+
 For TP2, rank 0 is configured as `aggregate` and rank 1 as `worker`. Rank 1 has
 no HTTP endpoint, and the dashboard must not sum API counters from both ranks.
 RDMA hardware counters, rather than ordinary netdev bytes, prove that all four

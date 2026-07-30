@@ -3,6 +3,7 @@ import pathlib
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 SERVER = pathlib.Path(__file__).parents[1] / "server.py"
@@ -12,7 +13,34 @@ assert SPEC.loader
 SPEC.loader.exec_module(dashboard)
 
 
+def make_collector(**overrides):
+    values = {
+        "spark2_host": "spark2",
+        "ssh_key": "/cluster-key",
+        "node_urls": {
+            "spark1": "http://rank0:8000",
+            "spark2": "http://rank1:8000",
+        },
+        "node_roles": {"spark1": "aggregate", "spark2": "worker"},
+        "inference_mode": "direct",
+        "router_url": "http://router:8080",
+        "router_metrics_url": "http://router:29000",
+        "interfaces": (),
+        "interval": 2,
+    }
+    values.update(overrides)
+    return dashboard.Collector(**values)
+
+
 class DashboardTests(unittest.TestCase):
+    def test_initial_cluster_contract_is_stable_before_first_sample(self):
+        status = make_collector().get_snapshot()["cluster"]
+        self.assertEqual(status["state"], "down")
+        self.assertFalse(status["endpoint_healthy"])
+        self.assertEqual(status["affected_nodes"], [])
+        self.assertEqual(status["outage_elapsed_seconds"], 0.0)
+        self.assertIn("endpoint", status)
+
     def test_thermal_stats_uses_named_gb10_zones_and_hwmon(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -136,6 +164,195 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
         )
         self.assertFalse(unreachable["healthy"])
         self.assertEqual(unreachable["state"], "unreachable")
+        self.assertEqual(unreachable["error"], "ssh timeout")
+
+    def test_tp_worker_outage_is_down_and_timer_survives_recovery(self):
+        collector = make_collector()
+        nodes = {
+            "spark1": {
+                "role": "aggregate",
+                "system": {},
+                "vllm": {"healthy": True, "state": "serving"},
+            },
+            "spark2": {
+                "role": "worker",
+                "system": {"error": "ssh timeout"},
+                "vllm": {
+                    "healthy": False,
+                    "state": "unreachable",
+                    "error": "ssh timeout",
+                },
+            },
+        }
+        for name, node in nodes.items():
+            node["health"] = collector.node_health(name, node)
+        endpoint = {
+            "healthy": True,
+            "state": "serving",
+            "mode": "direct",
+            "label": "TP2 aggregate endpoint",
+            "url": "http://rank0:8000",
+            "active_ranks": 1,
+            "expected_ranks": 2,
+        }
+
+        initial = collector.cluster_health(nodes, endpoint, 1_000)
+        later = collector.cluster_health(nodes, endpoint, 1_012)
+
+        self.assertEqual(initial["state"], "down")
+        self.assertFalse(initial["healthy"])
+        self.assertTrue(initial["endpoint_healthy"])
+        self.assertEqual(initial["affected_nodes"], ["spark2"])
+        self.assertIn("cannot be reached over SSH", initial["reason"])
+        self.assertEqual(initial["outage_started_at"], "1970-01-01T00:16:40Z")
+        self.assertEqual(later["outage_started_at"], initial["outage_started_at"])
+        self.assertEqual(later["outage_elapsed_seconds"], 12)
+        self.assertIsNone(later["recovery_started_at"])
+
+        nodes["spark2"]["system"] = {"vllm_rss_bytes": 1024}
+        nodes["spark2"]["vllm"] = {
+            "healthy": True,
+            "state": "headless_worker",
+        }
+        nodes["spark2"]["health"] = collector.node_health(
+            "spark2", nodes["spark2"]
+        )
+        endpoint["active_ranks"] = 2
+
+        recovery_one = collector.cluster_health(nodes, endpoint, 1_014)
+        recovery_two = collector.cluster_health(nodes, endpoint, 1_016)
+        serving = collector.cluster_health(nodes, endpoint, 1_018)
+
+        self.assertEqual(recovery_one["state"], "recovering")
+        self.assertTrue(recovery_one["healthy"])
+        self.assertEqual(recovery_one["affected_nodes"], ["spark2"])
+        self.assertEqual(
+            recovery_one["outage_started_at"], initial["outage_started_at"]
+        )
+        self.assertEqual(recovery_one["outage_elapsed_seconds"], 14)
+        self.assertEqual(
+            recovery_one["recovery_started_at"], "1970-01-01T00:16:54Z"
+        )
+        self.assertEqual(recovery_two["state"], "recovering")
+        self.assertEqual(recovery_two["outage_elapsed_seconds"], 14)
+        self.assertEqual(serving["state"], "serving")
+        self.assertEqual(serving["affected_nodes"], [])
+        self.assertIsNone(serving["outage_started_at"])
+        self.assertIsNone(serving["outage_elapsed_seconds"])
+        self.assertIsNone(serving["recovery_started_at"])
+
+    def test_endpoint_failure_is_prominent_even_if_worker_is_alive(self):
+        collector = make_collector()
+        nodes = {
+            "spark1": {
+                "role": "aggregate",
+                "system": {},
+                "vllm": {
+                    "healthy": False,
+                    "state": "unreachable",
+                    "error": "connection refused",
+                },
+            },
+            "spark2": {
+                "role": "worker",
+                "system": {"vllm_rss_bytes": 1024},
+                "vllm": {"healthy": True, "state": "headless_worker"},
+            },
+        }
+        for name, node in nodes.items():
+            node["health"] = collector.node_health(name, node)
+        endpoint = {
+            "healthy": False,
+            "state": "unreachable",
+            "mode": "direct",
+            "label": "TP2 aggregate endpoint",
+            "url": "http://rank0:8000",
+            "error": "connection refused",
+            "active_ranks": 1,
+            "expected_ranks": 2,
+        }
+
+        status = collector.cluster_health(nodes, endpoint, 2_000)
+
+        self.assertEqual(status["state"], "down")
+        self.assertFalse(status["endpoint_healthy"])
+        self.assertEqual(status["endpoint"]["url"], "http://rank0:8000")
+        self.assertIn("TP2 aggregate endpoint is unreachable", status["reason"])
+        self.assertIn("spark1", status["affected_nodes"])
+        self.assertEqual(status["outage_elapsed_seconds"], 0)
+
+    def test_router_with_one_failed_replica_is_degraded(self):
+        collector = make_collector(
+            node_roles={"spark1": "replica", "spark2": "replica"},
+            inference_mode="router",
+        )
+        nodes = {
+            "spark1": {
+                "role": "replica",
+                "system": {},
+                "vllm": {"healthy": True, "state": "serving"},
+            },
+            "spark2": {
+                "role": "replica",
+                "system": {},
+                "vllm": {
+                    "healthy": False,
+                    "state": "unreachable",
+                    "error": "timed out",
+                },
+            },
+        }
+        for name, node in nodes.items():
+            node["health"] = collector.node_health(name, node)
+        endpoint = {
+            "healthy": True,
+            "state": "routing",
+            "mode": "router",
+            "label": "Router",
+            "url": "http://router:8080",
+            "active_workers": 1,
+        }
+
+        status = collector.cluster_health(nodes, endpoint, 3_000)
+
+        self.assertEqual(status["state"], "degraded")
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["endpoint_healthy"])
+        self.assertEqual(status["affected_nodes"], ["spark2"])
+        self.assertEqual(status["outage_elapsed_seconds"], 0)
+
+    def test_optional_spark1_remote_probe_uses_strict_known_hosts(self):
+        collector = make_collector(
+            spark1_host="operator@spark1.lan",
+            spark1_ssh_key="/spark1-key",
+            ssh_known_hosts="/dashboard/known_hosts",
+        )
+        completed = mock.Mock(
+            returncode=0,
+            stdout="HOSTNAME=spark1\nVLLM_RSS=100\n",
+            stderr="",
+        )
+
+        with mock.patch.object(dashboard.subprocess, "run", return_value=completed) as run:
+            result = collector.spark1_system()
+
+        command = run.call_args.args[0]
+        self.assertEqual(result["hostname"], "spark1")
+        self.assertIn("/spark1-key", command)
+        self.assertIn("StrictHostKeyChecking=yes", command)
+        self.assertIn("UserKnownHostsFile=/dashboard/known_hosts", command)
+        self.assertIn("BatchMode=yes", command)
+        self.assertIn("IdentitiesOnly=yes", command)
+        self.assertIn("operator@spark1.lan", command)
+
+    def test_spark1_probe_remains_local_when_host_is_unset(self):
+        collector = make_collector(spark1_host=None)
+        with mock.patch.object(
+            collector, "local_system", return_value={"hostname": "spark1-local"}
+        ) as local:
+            result = collector.spark1_system()
+        local.assert_called_once_with()
+        self.assertEqual(result["hostname"], "spark1-local")
 
     def test_aggregate_metrics_take_precedence_and_worker_is_never_counted(self):
         nodes = {

@@ -17,6 +17,33 @@
   </header>
 
   <main>
+    <section id="cluster-health" class="cluster-health cluster-health--checking"
+             role="region" aria-labelledby="health-title">
+      <div class="cluster-health__signal" aria-hidden="true"></div>
+      <div class="cluster-health__copy">
+        <div class="cluster-health__headline">
+          <p id="health-state" class="cluster-health__state">CHECKING</p>
+          <h2 id="health-title">Connecting to the inference endpoint</h2>
+        </div>
+        <p id="health-reason" class="cluster-health__reason">Waiting for the first health sample.</p>
+        <div id="health-details" class="cluster-health__details">
+          <span id="health-affected-item" hidden>
+            <span id="health-affected-label">Affected nodes</span>
+            <strong id="health-affected">—</strong>
+          </span>
+          <span id="health-elapsed-item" hidden>
+            <span id="health-elapsed-label">Down for</span>
+            <strong id="health-elapsed">—</strong>
+          </span>
+          <span id="health-recovery-item" hidden>
+            <span>Recovery checks</span>
+            <strong id="health-recovery">—</strong>
+          </span>
+        </div>
+      </div>
+    </section>
+    <p id="health-announcer" class="sr-only" aria-live="assertive" aria-atomic="true"></p>
+
     <section id="router" class="router hero-card">
       <div>
         <p id="endpoint-eyebrow" class="eyebrow">INFERENCE ENDPOINT</p>

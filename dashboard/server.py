@@ -46,6 +46,17 @@ VALID_NODE_ROLES = frozenset({"aggregate", "replica", "worker"})
 VALID_INFERENCE_MODES = frozenset({"direct", "router"})
 GB10_CPU_THERMAL_ZONES = frozenset({"TS0E", "TS0P", "TS1E", "TS1P"})
 MEMORY_HWMON_DRIVERS = frozenset({"jc42", "spd5118"})
+RECOVERY_HEALTHY_SAMPLES = 2
+
+
+def utc_timestamp(timestamp: float) -> str:
+    """Return a stable UTC timestamp for API status fields."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
+
+
+def readable_state(value: Any) -> str:
+    """Turn internal state identifiers into short human-readable text."""
+    return str(value or "unknown").strip().replace("_", " ")
 
 
 def finite_float(value: str | float | int | None) -> float | None:
@@ -476,9 +487,15 @@ class Collector:
         router_metrics_url: str,
         interfaces: tuple[str, ...],
         interval: float,
+        spark1_host: str | None = None,
+        spark1_ssh_key: str | None = None,
+        ssh_known_hosts: str | None = None,
     ) -> None:
+        self.spark1_host = spark1_host
+        self.spark1_ssh_key = spark1_ssh_key or ssh_key
         self.spark2_host = spark2_host
         self.ssh_key = ssh_key
+        self.ssh_known_hosts = ssh_known_hosts
         self.node_urls = node_urls
         self.node_roles = node_roles
         self.inference_mode = inference_mode
@@ -493,11 +510,32 @@ class Collector:
             "collector": {"state": "starting"},
             "nodes": {},
             "router": {"healthy": False, "state": "starting"},
+            "cluster": {
+                "state": "down",
+                "healthy": False,
+                "endpoint_healthy": False,
+                "affected_nodes": [],
+                "reason": "Waiting for the first health sample.",
+                "outage_started_at": None,
+                "outage_elapsed_seconds": 0.0,
+                "recovery_started_at": None,
+                "endpoint": {
+                    "healthy": False,
+                    "state": "starting",
+                    "url": None,
+                    "reason": "Waiting for the first health sample.",
+                },
+            },
         }
         self.previous_node_counters: dict[str, dict[str, Any]] = {}
         self.previous_router_counters: dict[str, Any] = {}
         self.history_limit = max(2, math.ceil(180 / self.interval))
         self.history: list[dict[str, Any]] = []
+        self._outage_started_at: float | None = None
+        self._outage_reason: str | None = None
+        self._outage_affected_nodes: list[str] = []
+        self._recovery_started_at: float | None = None
+        self._recovery_healthy_samples = 0
 
     def fetch_url(self, url: str, timeout: float = 1.5) -> tuple[int, str]:
         request = urllib.request.Request(
@@ -533,25 +571,37 @@ class Collector:
             "network": network_counters(self.interfaces),
         }
 
-    def remote_system(self) -> dict[str, Any]:
+    def ssh_system(self, host: str, ssh_key: str) -> dict[str, Any]:
+        """Collect one node through a non-interactive, host-key-verified SSH probe."""
         script = REMOTE_PROBE.replace("__INTERFACES__", " ".join(self.interfaces))
+        command = [
+            "ssh",
+            "-i",
+            ssh_key,
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+        ]
+        if self.ssh_known_hosts:
+            command.extend(
+                ["-o", f"UserKnownHostsFile={self.ssh_known_hosts}"]
+            )
+        command.extend(
+            [
+                "-o",
+                "ConnectTimeout=2",
+                "-o",
+                "ServerAliveInterval=2",
+                host,
+                "sh -s",
+            ]
+        )
         try:
             result = subprocess.run(
-                [
-                    "ssh",
-                    "-i",
-                    self.ssh_key,
-                    "-o",
-                    "IdentitiesOnly=yes",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=2",
-                    "-o",
-                    "ServerAliveInterval=2",
-                    self.spark2_host,
-                    "sh -s",
-                ],
+                command,
                 input=script,
                 capture_output=True,
                 text=True,
@@ -560,12 +610,22 @@ class Collector:
             )
             if result.returncode:
                 return {
-                    "hostname": self.spark2_host,
+                    "hostname": host,
                     "error": result.stderr.strip() or f"ssh exited {result.returncode}",
                 }
             return parse_remote_probe(result.stdout)
         except (OSError, subprocess.SubprocessError) as exc:
-            return {"hostname": self.spark2_host, "error": str(exc)}
+            return {"hostname": host, "error": str(exc)}
+
+    def spark1_system(self) -> dict[str, Any]:
+        """Sample spark1 locally by default, or over SSH from a third host."""
+        if not self.spark1_host:
+            return self.local_system()
+        return self.ssh_system(self.spark1_host, self.spark1_ssh_key)
+
+    def remote_system(self) -> dict[str, Any]:
+        """Sample spark2 over SSH (kept as a compatibility entry point)."""
+        return self.ssh_system(self.spark2_host, self.ssh_key)
 
     def vllm_metrics(self, base_url: str) -> dict[str, Any]:
         started = time.monotonic()
@@ -737,7 +797,214 @@ class Collector:
             "counters": {},
             "rates": {},
             "dflash_window_acceptance_percent": None,
+            **({"error": str(system_error)} if system_error else {}),
         }
+
+    @staticmethod
+    def node_health(name: str, node: dict[str, Any]) -> dict[str, Any]:
+        """Summarize service and telemetry health without hiding TP failures."""
+        role = node.get("role", "replica")
+        system = node.get("system", {})
+        vllm = node.get("vllm", {})
+        system_error = system.get("error")
+        service_healthy = bool(vllm.get("healthy"))
+        service_state = readable_state(vllm.get("state"))
+        service_error = vllm.get("error")
+
+        if role == "worker":
+            if system_error:
+                reason = f"{name} cannot be reached over SSH: {system_error}"
+            elif not service_healthy:
+                reason = f"Required TP worker {name} is {service_state}."
+            else:
+                reason = None
+            state = vllm.get("state", "unreachable")
+            healthy = service_healthy
+        elif not service_healthy:
+            detail = f": {service_error}" if service_error else "."
+            reason = (
+                f"{name} {readable_state(role)} endpoint is "
+                f"{service_state}{detail}"
+            )
+            state = vllm.get("state", "unreachable")
+            healthy = False
+        elif system_error:
+            reason = f"{name} telemetry cannot be reached over SSH: {system_error}"
+            state = "telemetry_unreachable"
+            healthy = False
+        else:
+            reason = None
+            state = vllm.get("state", "serving")
+            healthy = True
+
+        return {
+            "healthy": healthy,
+            "state": state,
+            "reason": reason,
+        }
+
+    @staticmethod
+    def endpoint_health(endpoint: dict[str, Any]) -> dict[str, Any]:
+        """Expose a compact endpoint record that is stable across topologies."""
+        healthy = bool(endpoint.get("healthy"))
+        state = endpoint.get("state", "unreachable")
+        reason = None
+        if not healthy:
+            label = endpoint.get("label") or "Inference endpoint"
+            error = endpoint.get("error")
+            detail = f": {error}" if error else "."
+            reason = f"{label} is {readable_state(state)}{detail}"
+        return {
+            "healthy": healthy,
+            "state": state,
+            "url": endpoint.get("url"),
+            "reason": reason,
+        }
+
+    @classmethod
+    def observed_cluster_health(
+        cls, nodes: dict[str, Any], endpoint: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Infer the current cluster state before applying recovery hysteresis."""
+        endpoint_summary = cls.endpoint_health(endpoint)
+        affected_nodes: list[str] = []
+        node_reasons: list[str] = []
+        for name, node in nodes.items():
+            health = node.get("health") or cls.node_health(name, node)
+            if not health.get("healthy"):
+                affected_nodes.append(name)
+                if health.get("reason"):
+                    node_reasons.append(str(health["reason"]))
+
+        tp_workers_down = [
+            name
+            for name, node in nodes.items()
+            if node.get("role") == "worker"
+            and not (node.get("health") or cls.node_health(name, node)).get(
+                "healthy"
+            )
+        ]
+        active_ranks = endpoint.get("active_ranks")
+        expected_ranks = endpoint.get("expected_ranks")
+        incomplete_tp = (
+            endpoint.get("mode") == "direct"
+            and active_ranks is not None
+            and expected_ranks is not None
+            and active_ranks < expected_ranks
+        )
+        router_has_no_workers = (
+            endpoint.get("mode") == "router"
+            and endpoint.get("active_workers") is not None
+            and endpoint.get("active_workers") <= 0
+        )
+        serving_nodes = [
+            node
+            for node in nodes.values()
+            if node.get("role") != "worker"
+            and bool(node.get("vllm", {}).get("healthy"))
+        ]
+
+        critical_reasons: list[str] = []
+        if not endpoint_summary["healthy"]:
+            critical_reasons.append(str(endpoint_summary["reason"]))
+        if tp_workers_down:
+            critical_reasons.extend(
+                str(
+                    (nodes[name].get("health") or cls.node_health(name, nodes[name]))[
+                        "reason"
+                    ]
+                )
+                for name in tp_workers_down
+            )
+        if incomplete_tp and not tp_workers_down:
+            critical_reasons.append(
+                f"Only {active_ranks} of {expected_ranks} required TP ranks are active."
+            )
+        if router_has_no_workers:
+            critical_reasons.append("Router reports no active inference workers.")
+        if endpoint_summary["healthy"] and not serving_nodes:
+            critical_reasons.append("No serving model endpoint is reachable.")
+
+        if critical_reasons:
+            state = "down"
+            reason = " ".join(dict.fromkeys(critical_reasons))
+        elif affected_nodes:
+            state = "degraded"
+            reason = " ".join(dict.fromkeys(node_reasons))
+        else:
+            state = "serving"
+            reason = (
+                f"Inference endpoint and all {len(nodes)} nodes are healthy."
+            )
+
+        return {
+            "state": state,
+            "healthy": state == "serving",
+            "endpoint_healthy": endpoint_summary["healthy"],
+            "affected_nodes": affected_nodes,
+            "reason": reason,
+            "endpoint": endpoint_summary,
+        }
+
+    def cluster_health(
+        self,
+        nodes: dict[str, Any],
+        endpoint: dict[str, Any],
+        now: float,
+    ) -> dict[str, Any]:
+        """Apply persistent incident timing and a short recovery hysteresis."""
+        observed = self.observed_cluster_health(nodes, endpoint)
+        state = observed["state"]
+
+        if state != "serving":
+            if self._outage_started_at is None:
+                self._outage_started_at = now
+                self._outage_affected_nodes = []
+            self._outage_reason = observed["reason"]
+            for name in observed["affected_nodes"]:
+                if name not in self._outage_affected_nodes:
+                    self._outage_affected_nodes.append(name)
+            self._recovery_started_at = None
+            self._recovery_healthy_samples = 0
+        elif self._outage_started_at is not None:
+            if self._recovery_started_at is None:
+                self._recovery_started_at = now
+            self._recovery_healthy_samples += 1
+            if self._recovery_healthy_samples <= RECOVERY_HEALTHY_SAMPLES:
+                observed["state"] = "recovering"
+                observed["healthy"] = True
+                observed["affected_nodes"] = list(self._outage_affected_nodes)
+                observed["reason"] = (
+                    "Inference is responding again; confirming stability "
+                    f"({self._recovery_healthy_samples}/"
+                    f"{RECOVERY_HEALTHY_SAMPLES} healthy samples). "
+                    f"Previous issue: {self._outage_reason}"
+                )
+            else:
+                self._outage_started_at = None
+                self._outage_reason = None
+                self._outage_affected_nodes = []
+                self._recovery_started_at = None
+                self._recovery_healthy_samples = 0
+
+        if self._outage_started_at is not None:
+            end = self._recovery_started_at or now
+            observed["outage_started_at"] = utc_timestamp(
+                self._outage_started_at
+            )
+            observed["outage_elapsed_seconds"] = round(
+                max(0.0, end - self._outage_started_at), 1
+            )
+            observed["recovery_started_at"] = (
+                utc_timestamp(self._recovery_started_at)
+                if self._recovery_started_at is not None
+                else None
+            )
+        else:
+            observed["outage_started_at"] = None
+            observed["outage_elapsed_seconds"] = None
+            observed["recovery_started_at"] = None
+        return observed
 
     @staticmethod
     def metric_source_names(nodes: dict[str, Any]) -> list[str]:
@@ -868,7 +1135,7 @@ class Collector:
 
         tasks: dict[str, Any] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-            tasks["spark1_system"] = executor.submit(self.local_system)
+            tasks["spark1_system"] = executor.submit(self.spark1_system)
             tasks["spark2_system"] = executor.submit(self.remote_system)
             if self.inference_mode == "router":
                 tasks["router"] = executor.submit(self.router_metrics)
@@ -894,7 +1161,7 @@ class Collector:
             self.add_network_rates(system, previous_node.get("system"), elapsed)
             if role != "worker":
                 self.add_rates(vllm, previous_node.get("vllm"), elapsed)
-            nodes[name] = {
+            node = {
                 "label": name,
                 "rank": 0 if name == "spark1" else 1,
                 "role": role,
@@ -904,6 +1171,8 @@ class Collector:
                 "system": system,
                 "vllm": vllm,
             }
+            node["health"] = self.node_health(name, node)
+            nodes[name] = node
 
         if self.inference_mode == "router":
             router = values["router"]
@@ -914,13 +1183,15 @@ class Collector:
             self.add_backend_rates(router, nodes)
         else:
             router = self.direct_endpoint(nodes)
+        cluster = self.cluster_health(nodes, router, now)
         snapshot = {
             "_sample_time": now,
-            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "generated_at": utc_timestamp(now),
             "sample_interval_seconds": elapsed,
             "collector": {"state": "ok", "interval_seconds": self.interval},
             "nodes": nodes,
             "router": router,
+            "cluster": cluster,
         }
         history_point = {
             "generated_at": snapshot["generated_at"],
@@ -1084,12 +1355,11 @@ def main() -> None:
             f"Invalid DASHBOARD_INFERENCE_MODE={inference_mode!r}; "
             f"choose from {choices}."
         )
+    default_ssh_key = str(Path.home() / ".ssh" / "id_ed25519_dgx_cluster")
+    spark2_ssh_key = os.environ.get("SPARK2_SSH_KEY", default_ssh_key)
     collector = Collector(
         spark2_host=os.environ.get("SPARK2_SSH_HOST", "spark2"),
-        ssh_key=os.environ.get(
-            "SPARK2_SSH_KEY",
-            str(Path.home() / ".ssh" / "id_ed25519_dgx_cluster"),
-        ),
+        ssh_key=spark2_ssh_key,
         node_urls={
             "spark1": os.environ.get("SPARK1_VLLM_URL", "http://127.0.0.1:8000"),
             "spark2": os.environ.get("SPARK2_VLLM_URL", "http://192.168.100.11:8000"),
@@ -1102,6 +1372,13 @@ def main() -> None:
         ),
         interfaces=interfaces,
         interval=max(args.interval, 0.5),
+        spark1_host=(
+            os.environ.get("SPARK1_SSH_HOST", "").strip() or None
+        ),
+        spark1_ssh_key=os.environ.get("SPARK1_SSH_KEY", default_ssh_key),
+        ssh_known_hosts=(
+            os.environ.get("DASHBOARD_SSH_KNOWN_HOSTS", "").strip() or None
+        ),
     )
     collector.collect()
     thread = threading.Thread(target=collector.run, name="collector", daemon=True)

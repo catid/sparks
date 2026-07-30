@@ -35,10 +35,131 @@ const sumPresent = (values) => {
   const present = values.filter((value) => safe(value) !== null);
   return present.length ? present.reduce((total, value) => total + Number(value), 0) : null;
 };
+const finiteNumber = (value) => {
+  const number = Number(value);
+  return value !== null && value !== undefined && Number.isFinite(number) ? number : null;
+};
+
+function secondsSince(timestamp, nowMs = Date.now()) {
+  if (!timestamp) return null;
+  const startedMs = Date.parse(timestamp);
+  return Number.isFinite(startedMs) ? Math.max(0, (nowMs - startedMs) / 1000) : null;
+}
+
+function formatDuration(value) {
+  const seconds = finiteNumber(value);
+  if (seconds === null) return "—";
+  const total = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor(total % 86400 / 3600);
+  const minutes = Math.floor(total % 3600 / 60);
+  const remainder = total % 60;
+  if (days) return `${days}d ${hours}h`;
+  if (hours) return `${hours}h ${minutes}m`;
+  if (minutes) return `${minutes}m ${remainder}s`;
+  return `${remainder}s`;
+}
+
+function healthViewModel(data, nowMs = Date.now()) {
+  const cluster = data.cluster || {};
+  const router = data.router || {};
+  const endpoint = cluster.endpoint || {};
+  const stateAliases = {
+    healthy: "serving",
+    online: "serving",
+    offline: "down",
+    unavailable: "down",
+  };
+  const suppliedState = String(cluster.state || "").toLowerCase();
+  let state = stateAliases[suppliedState] || suppliedState;
+  if (!["serving", "degraded", "down", "recovering", "starting"].includes(state)) {
+    state = router.healthy
+      ? "serving"
+      : router.state === "starting"
+        ? "starting"
+        : "down";
+  }
+
+  const affected = Array.isArray(cluster.affected_nodes)
+    ? [...new Set(cluster.affected_nodes.map(String).filter(Boolean))]
+    : [];
+  const outageElapsed = finiteNumber(cluster.outage_elapsed_seconds)
+    ?? secondsSince(cluster.outage_started_at, nowMs);
+  const recoveryElapsed = secondsSince(cluster.recovery_started_at, nowMs);
+  const reason = String(cluster.reason || endpoint.reason || "").trim();
+  const models = {
+    serving: {
+      label: "SERVING",
+      title: "Inference endpoint healthy",
+      reason: reason || "All expected ranks are available.",
+      elapsedLabel: null,
+    },
+    degraded: {
+      label: "DEGRADED",
+      title: "Inference capacity is degraded",
+      reason: reason || "At least one component is unhealthy, but requests may still succeed.",
+      elapsedLabel: "Degraded for",
+    },
+    down: {
+      label: "ENDPOINT DOWN",
+      title: "Inference requests are unavailable",
+      reason: reason || "The model endpoint did not pass its health check.",
+      elapsedLabel: "Down for",
+    },
+    recovering: {
+      label: "RECOVERING",
+      title: "Endpoint responding — verifying recovery",
+      reason: reason || "Waiting for consecutive healthy checks before returning to service.",
+      elapsedLabel: "Outage duration",
+    },
+    starting: {
+      label: "STARTING",
+      title: "Inference service is starting",
+      reason: reason || "The model ranks are loading and are not ready for requests yet.",
+      elapsedLabel: "Startup wait",
+    },
+  };
+  return {
+    state,
+    ...models[state],
+    affected,
+    outageElapsed,
+    recoveryElapsed,
+  };
+}
+
+function staleHealthViewModel(ageSeconds) {
+  return {
+    state: "stale",
+    label: "MONITORING STALE",
+    title: "Endpoint health is unknown",
+    reason: "The dashboard is connected, but its latest health sample is stale.",
+    affected: ["dashboard telemetry"],
+    outageElapsed: finiteNumber(ageSeconds),
+    recoveryElapsed: null,
+    elapsedLabel: "Last sample",
+  };
+}
+
+function unavailableHealthViewModel(error, elapsedSeconds) {
+  return {
+    state: "down",
+    label: "HEALTH API DOWN",
+    title: "Dashboard cannot verify the inference endpoint",
+    reason: error && error.message ? error.message : String(error || "Health request failed."),
+    affected: ["dashboard health API"],
+    outageElapsed: finiteNumber(elapsedSeconds),
+    recoveryElapsed: null,
+    elapsedLabel: "Unavailable for",
+  };
+}
 
 function nodeTemplate(name, node, index) {
   const s = node.system || {}, gpu = s.gpu || {}, mem = s.memory || {}, therm = s.thermals || {};
   const v = node.vllm || {}, rates = v.rates || {};
+  const nodeHealth = node.health || {};
+  const nodeHealthy = typeof nodeHealth.healthy === "boolean" ? nodeHealth.healthy : Boolean(v.healthy);
+  const nodeState = nodeHealth.state || v.state;
   const role = node.role || v.role || "replica";
   const worker = role === "worker";
   const memPercent = mem.used_bytes != null && mem.total_bytes ? mem.used_bytes / mem.total_bytes * 100 : null;
@@ -53,19 +174,19 @@ function nodeTemplate(name, node, index) {
       <span class="link-state ${n.operstate === "up" ? "" : "down"}">${(n.counter_source || "netdev").toUpperCase()} · ${n.operstate || "—"} · MTU ${n.mtu || "—"}</span>
     </div>`).join("");
   const dflash = v.dflash_window_acceptance_percent ?? v.dflash_acceptance_percent;
-  const error = s.error || (worker ? null : v.error);
+  const error = nodeHealth.reason || s.error || (worker ? null : v.error);
   const endpoint = worker
     ? "headless TP worker · telemetry over SSH"
     : `${role === "aggregate" ? "cluster-wide metrics" : "node metrics"} · ${node.endpoint || "no endpoint"}`;
   let stateLabel;
   if (worker) {
-    stateLabel = v.healthy
+    stateLabel = nodeHealthy
       ? `RANK ${node.rank ?? index - 1} · WORKER`
-      : v.state === "worker_stopped"
+      : nodeState === "worker_stopped"
         ? `RANK ${node.rank ?? index - 1} · STOPPED`
         : `RANK ${node.rank ?? index - 1} · UNREACHABLE`;
   } else {
-    stateLabel = `RANK ${node.rank ?? index - 1} · ${v.healthy ? "SERVING" : "OFFLINE"}`;
+    stateLabel = `RANK ${node.rank ?? index - 1} · ${nodeHealthy ? "SERVING" : "OFFLINE"}`;
   }
   const primaryMetrics = worker ? `
         <div class="metric"><strong>${bitsRate(fabricRx)}</strong><label>fabric receive</label></div>
@@ -74,8 +195,8 @@ function nodeTemplate(name, node, index) {
         <div class="metric"><strong>${rate(rates.prompt_tokens_per_second)}</strong><label>cluster prompt tok/s</label></div>`;
   const thirdBar = worker ? `
         <div>
-          <div class="bar-head"><span>Headless TP rank</span><span>${v.healthy ? "active" : "not running"}</span></div>
-          <div class="track"><div class="fill" style="width:${v.healthy ? "100%" : "0%"}"></div></div>
+          <div class="bar-head"><span>Headless TP rank</span><span>${nodeHealthy ? "active" : "not running"}</span></div>
+          <div class="track"><div class="fill" style="width:${nodeHealthy ? "100%" : "0%"}"></div></div>
         </div>` : `
         <div>
           <div class="bar-head"><span>KV cache</span><span>${pct(v.kv_cache_usage_percent)}</span></div>
@@ -104,13 +225,13 @@ function nodeTemplate(name, node, index) {
         <div class="mini"><strong>${temperature(therm.connectx_asic_max_c)}</strong><label>hottest ConnectX ASIC</label></div>
         <div class="mini"><strong>${temperature(therm.memory_c)}</strong><label>LPDDR5X temperature</label></div>`;
   return `
-    <article class="node-card">
+    <article class="node-card ${nodeHealthy ? "" : "node-card--offline"}">
       <div class="node-head">
         <div class="node-title">
           <span class="node-index">0${index}</span>
           <div><h2>${s.hostname || name}</h2><p class="endpoint mono">${endpoint}</p></div>
         </div>
-        <span class="state ${v.healthy ? "online" : "offline"}">${stateLabel}</span>
+        <span class="state ${nodeHealthy ? "online" : "offline"}">${stateLabel}</span>
       </div>
       ${error ? `<p class="error-line">${String(error).slice(0, 150)}</p>` : ""}
       <div class="metric-major">
@@ -235,11 +356,57 @@ function drawCharts() {
   drawTemperatureChart();
 }
 
+let healthApiFailureStartedAt = null;
+let lastHealthAnnouncement = "";
+
+function renderClusterHealth(model) {
+  const banner = q("cluster-health");
+  banner.className = `cluster-health cluster-health--${model.state}`;
+  q("health-state").textContent = model.label;
+  q("health-title").textContent = model.title;
+  q("health-reason").textContent = model.reason;
+
+  const affectedItem = q("health-affected-item");
+  const affected = model.affected || [];
+  affectedItem.hidden = affected.length === 0 || model.state === "serving";
+  q("health-affected-label").textContent = affected.length === 1 ? "Affected node" : "Affected nodes";
+  q("health-affected").textContent = affected.join(", ") || "—";
+
+  const elapsedItem = q("health-elapsed-item");
+  elapsedItem.hidden = model.elapsedLabel === null || model.outageElapsed === null;
+  q("health-elapsed-label").textContent = model.elapsedLabel || "Elapsed";
+  q("health-elapsed").textContent = formatDuration(model.outageElapsed);
+
+  const recoveryItem = q("health-recovery-item");
+  recoveryItem.hidden = model.state !== "recovering" || model.recoveryElapsed === null;
+  q("health-recovery").textContent = formatDuration(model.recoveryElapsed);
+
+  const statusPrefix = model.state === "serving" ? "" : `${model.label}. `;
+  const affectedText = affected.length ? ` Affected: ${affected.join(", ")}.` : "";
+  const announcement = `${statusPrefix}${model.title}.${affectedText} ${model.reason}`.trim();
+  if (announcement !== lastHealthAnnouncement) {
+    q("health-announcer").textContent = announcement;
+    lastHealthAnnouncement = announcement;
+  }
+
+  const titlePrefixes = {
+    down: "DOWN",
+    degraded: "DEGRADED",
+    recovering: "RECOVERING",
+    starting: "STARTING",
+    stale: "STALE",
+  };
+  document.title = titlePrefixes[model.state]
+    ? `${titlePrefixes[model.state]} · Spark Array`
+    : "Spark Array";
+}
+
 async function refresh() {
   try {
     const response = await fetch("/api/status", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json(), nodes = data.nodes || {}, router = data.router || {};
+    healthApiFailureStartedAt = null;
     q("nodes").innerHTML = ["spark1", "spark2"].map((name, i) => nodeTemplate(name, nodes[name] || {}, i + 1)).join("");
     q("endpoint-eyebrow").textContent = router.mode === "direct" ? "TENSOR-PARALLEL API" : "UNIFIED ENDPOINT";
     q("endpoint-title").textContent = router.label || (router.mode === "direct" ? "TP2 aggregate endpoint" : "Router");
@@ -258,17 +425,38 @@ async function refresh() {
     state.className = `state ${router.healthy ? "online" : router.state === "starting" ? "" : "offline"}`;
     loadHistory(data, nodes, router);
     drawCharts();
-    const stamp = data.generated_at ? new Date(data.generated_at) : null;
+    const parsedStamp = data.generated_at ? new Date(data.generated_at) : null;
+    const stamp = parsedStamp && Number.isFinite(parsedStamp.getTime()) ? parsedStamp : null;
     const age = stamp ? (Date.now() - stamp.getTime()) / 1000 : Infinity;
+    const health = healthViewModel(data);
+    renderClusterHealth(age >= 8 && health.state === "serving" ? staleHealthViewModel(age) : health);
     const fresh = q("freshness");
     fresh.className = `freshness ${age < 8 ? "live" : "stale"}`;
     fresh.querySelector("span").textContent = age < 8 ? `Live · ${stamp.toLocaleTimeString()}` : `Stale · ${num(age, 0)}s`;
   } catch (error) {
+    if (healthApiFailureStartedAt === null) healthApiFailureStartedAt = Date.now();
+    renderClusterHealth(unavailableHealthViewModel(
+      error,
+      (Date.now() - healthApiFailureStartedAt) / 1000,
+    ));
     const fresh = q("freshness");
     fresh.className = "freshness stale";
     fresh.querySelector("span").textContent = `Dashboard unavailable · ${error.message}`;
   }
 }
-window.addEventListener("resize", drawCharts);
-refresh();
-setInterval(refresh, 2000);
+
+if (typeof globalThis !== "undefined") {
+  globalThis.DashboardHealthUI = Object.freeze({
+    formatDuration,
+    healthViewModel,
+    renderClusterHealth,
+    staleHealthViewModel,
+    unavailableHealthViewModel,
+  });
+}
+
+if (typeof window !== "undefined" && typeof document !== "undefined") {
+  window.addEventListener("resize", drawCharts);
+  refresh();
+  setInterval(refresh, 2000);
+}

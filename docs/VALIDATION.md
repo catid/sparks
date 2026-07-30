@@ -9,7 +9,7 @@ model failures are not collapsed into one “server is up” result.
 From the repository root, check shell syntax and deterministic tests:
 
 ```bash
-find bin scripts dspark_mia/bin dspark_mia/tests openclaw tests \
+find bin scripts dashboard dspark_mia/bin dspark_mia/tests openclaw tests \
   -type f -name '*.sh' -print0 |
   xargs -0 -r -n1 bash -n
 
@@ -23,6 +23,8 @@ MIA_ENV_FILE=mia-agent.local.env \
 MIA_ENV_FILE=mia-agent.local.env \
   ./scripts/install-dspark-supervisor.sh verify
 ./scripts/install-dashboard.sh verify --web
+./scripts/install-dashboard-probe.sh verify
+./scripts/install-dashboard.sh verify --remote-collector
 
 (cd dspark_mia && \
   MIA_ENV_FILE=mia-throughput.env ./tests/test-profile-selection.sh)

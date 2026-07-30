@@ -128,6 +128,18 @@ isolated LAN.
 Installing or testing repository files does not mutate the running dashboard.
 Only the installer's `start` action restarts the collector.
 
+## Dedicated collector host
+
+The dashboard can later move to a third Linux host so neither Spark carries
+its process or in-memory plot history. Set `SPARK1_SSH_HOST` to opt into
+read-only SSH collection for Spark 1; Spark 2 remains remote as before. The
+sanitized `dashboard.remote.env.example`, fixed-command SSH probe, hardened
+systemd install flow, host-key pinning, firewall guidance, and cutover/rollback
+procedure are documented in
+[`docs/REMOTE_DASHBOARD.md`](../docs/REMOTE_DASHBOARD.md).
+
+Leaving `SPARK1_SSH_HOST` unset preserves the current on-Spark behavior.
+
 ## API
 
 `GET /api/status` returns the exact JSON used by the UI. All probes are

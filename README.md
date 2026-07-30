@@ -104,6 +104,7 @@ qualitative agent evaluation are in
 - [Container and checkpoint provenance](docs/CONTAINERS.md)
 - [vLLM and DSpark tuning](docs/VLLM_TUNING.md)
 - [Boot, recovery, dashboard, and routine operations](docs/OPERATIONS.md)
+- [Move the dashboard to a dedicated Linux host](docs/REMOTE_DASHBOARD.md)
 - [Validation and benchmarks](docs/VALIDATION.md)
 - [Installed-file map](docs/INSTALLED_ARTIFACTS.md)
 - [Public-repository safety policy](PUBLIC_REPOSITORY.md)

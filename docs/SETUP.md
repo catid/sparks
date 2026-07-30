@@ -380,6 +380,12 @@ explicitly before any direct non-loopback collector bind.
 See [`OPERATIONS.md`](OPERATIONS.md) and
 [`dashboard/README.md`](../dashboard/README.md).
 
+To keep the dashboard process and plot history off both Sparks, install the
+same collector on a third Linux host after the pair is healthy. The
+fixed-command SSH key, sanitized remote environment, systemd flow, and safe
+cutover are in [`REMOTE_DASHBOARD.md`](REMOTE_DASHBOARD.md). The default above
+remains the supported on-Spark mode.
+
 ## 12. Remove broad sudo and review network exposure
 
 **Both:**

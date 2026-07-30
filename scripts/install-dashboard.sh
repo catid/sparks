@@ -8,13 +8,14 @@ if (($#)); then
   shift
 fi
 service_user="${SPARK_SERVICE_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
-environment_source="${DASHBOARD_ENV_FILE:-${root_dir}/dashboard/dashboard.env.example}"
+environment_source="${DASHBOARD_ENV_FILE:-}"
 environment_target="/etc/default/dgx-spark-laguna-dashboard"
 unit_target="/etc/systemd/system/dgx-spark-laguna-dashboard.service"
 install_web=0
 replace_environment=0
 allow_unauthenticated_web=0
 generated_credentials=0
+remote_collector=0
 
 usage() {
   cat <<'EOF'
@@ -26,7 +27,8 @@ enable   Install and enable it for future boots.
 start    Install, enable, and restart it now.
 
 Options:
-  --web                        Install Nginx HTTP/HTTPS access for spark1.lan.
+  --web                        Install Nginx HTTP/HTTPS access.
+  --remote-collector           Install on a third host that SSH-polls both Sparks.
   --replace-environment        Replace an existing /etc/default environment.
   --allow-unauthenticated-web  Explicitly expose --web without Basic auth.
 
@@ -34,11 +36,13 @@ Environment:
   SPARK_SERVICE_USER  Account that owns the checkout and cluster SSH key.
   DASHBOARD_ENV_FILE  Source environment (default: dashboard.env.example).
   DASHBOARD_AUTH      Optional user:password written with mode 0600.
+  DASHBOARD_WEB_HOST  HTTPS hostname (default: spark1.lan).
   DASHBOARD_LAN_IP    Optional IP SAN passed to the TLS certificate installer.
 
 On a fresh --web install, a random operator password is generated when
 DASHBOARD_AUTH is unset. Existing environment files are preserved unless
---replace-environment is explicit.
+--replace-environment is explicit. --remote-collector selects the sanitized
+dashboard.remote.env.example when DASHBOARD_ENV_FILE is unset.
 EOF
 }
 
@@ -57,6 +61,7 @@ esac
 while (($#)); do
   case "$1" in
     --web) install_web=1 ;;
+    --remote-collector) remote_collector=1 ;;
     --replace-environment) replace_environment=1 ;;
     --allow-unauthenticated-web) allow_unauthenticated_web=1 ;;
     -h|--help)
@@ -71,12 +76,23 @@ while (($#)); do
   shift
 done
 
+if [[ -z "${environment_source}" ]]; then
+  if [[ "${remote_collector}" == "1" ]]; then
+    environment_source="${root_dir}/dashboard/dashboard.remote.env.example"
+  else
+    environment_source="${root_dir}/dashboard/dashboard.env.example"
+  fi
+fi
+
 if [[ "${allow_unauthenticated_web}" == "1" && "${install_web}" != "1" ]]; then
   echo "--allow-unauthenticated-web is valid only with --web." >&2
   exit 2
 fi
-if [[ "${action}" != "verify" && "$(hostname -s)" != "spark1" ]]; then
+if [[ "${action}" != "verify" &&
+      "${remote_collector}" != "1" &&
+      "$(hostname -s)" != "spark1" ]]; then
   echo "Install the pair dashboard on spark1." >&2
+  echo "Use --remote-collector for a dedicated third-host collector." >&2
   exit 2
 fi
 if [[ ! "${service_user}" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
@@ -155,6 +171,24 @@ sed \
   -e "s|@HOME@|${home_escaped}|g" \
   "${environment_source}" >"${environment_rendered}"
 
+if [[ "${remote_collector}" == "1" ]]; then
+  for required_name in \
+    SPARK1_SSH_HOST SPARK1_SSH_KEY \
+    SPARK2_SSH_HOST SPARK2_SSH_KEY \
+    DASHBOARD_SSH_KNOWN_HOSTS SPARK1_VLLM_URL; do
+    if ! grep -Eq "^${required_name}=[^[:space:]#]+$" \
+      "${environment_rendered}"; then
+      echo "Remote collector environment requires ${required_name}." >&2
+      exit 2
+    fi
+  done
+  if grep -Eq '^SPARK1_VLLM_URL=http://(127\.0\.0\.1|localhost|\[?::1\]?)' \
+    "${environment_rendered}"; then
+    echo "Remote SPARK1_VLLM_URL cannot point at collector loopback." >&2
+    exit 2
+  fi
+fi
+
 if [[ -n "${DASHBOARD_AUTH:-}" ]]; then
   sed -i \
     -e '/^DASHBOARD_AUTH=/d' \
@@ -195,6 +229,26 @@ if [[ "${action}" == "verify" ]]; then
 fi
 
 if [[ -e "${environment_target}" && "${replace_environment}" != "1" ]]; then
+  if [[ "${remote_collector}" == "1" ]]; then
+    for required_name in \
+      SPARK1_SSH_HOST SPARK1_SSH_KEY \
+      SPARK2_SSH_HOST SPARK2_SSH_KEY \
+      DASHBOARD_SSH_KNOWN_HOSTS SPARK1_VLLM_URL; do
+      if ! sudo grep -Eq "^${required_name}=[^[:space:]#]+$" \
+        "${environment_target}"; then
+        echo "Existing ${environment_target} is not a remote-collector config." >&2
+        echo "Missing ${required_name}; use --replace-environment deliberately." >&2
+        exit 1
+      fi
+    done
+    if sudo grep -Eq \
+      '^SPARK1_VLLM_URL=http://(127\.0\.0\.1|localhost|\[?::1\]?)' \
+      "${environment_target}"; then
+      echo "Existing remote SPARK1_VLLM_URL points at collector loopback." >&2
+      echo "Use --replace-environment with a corrected remote config." >&2
+      exit 1
+    fi
+  fi
   if [[ "${install_web}" == "1" &&
         "${allow_unauthenticated_web}" != "1" ]] &&
      ! sudo grep -Eq '^DASHBOARD_AUTH=[^:[:space:]]+:[^[:space:]#]{16,}$' \
@@ -228,5 +282,6 @@ fi
 
 echo "Dashboard service installed for user ${service_user}."
 if [[ "${install_web}" == "1" ]]; then
-  echo "Web endpoint: https://spark1.lan (HTTP redirects to self-signed HTTPS)"
+  echo "Web endpoint: https://${DASHBOARD_WEB_HOST:-spark1.lan}"
+  echo "(HTTP redirects to self-signed HTTPS.)"
 fi
