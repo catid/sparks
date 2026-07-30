@@ -172,8 +172,8 @@ The validated headless macOS deployment adds:
 | `${HOME}/.openclaw/openclaw.json` | merge `openclaw/scenefit-ds4f.patch.json` into local config | private active config; do not copy back into Git |
 | `${HOME}/.openclaw/.env` | no tracked equivalent | mode 0600 provider/channel credentials |
 | `${HOME}/.openclaw/workspace/AGENTS.md` | append `openclaw/AGENTS-routing.md` | local-to-Sol escalation policy |
-| `${HOME}/.openclaw/workspace/news-digest/{news_digest.py,news-digest.py,digest-poster.py}` | `openclaw/news-digest/` | deterministic collector and transactional Slack poster |
-| `${HOME}/.openclaw/workspace/news-digest/.news_digest.sqlite3` | no tracked equivalent | mode 0600 pending/emitted queue, successful-run watermark, and selected ArXiv cache |
+| `${HOME}/.openclaw/workspace/news-digest/{news_digest.py,news_briefing.py,news-digest.py,digest-poster.py}` | `openclaw/news-digest/` | deterministic collector, tool-free OpenClaw prioritizer, and transactional Slack poster |
+| `${HOME}/.openclaw/workspace/news-digest/.news_digest.sqlite3` | no tracked equivalent | mode 0600 pending/emitted queue, immutable delivery manifests, successful-run watermark, and selected ArXiv cache |
 | `${HOME}/.openclaw/workspace/news-digest/.x_creds.json` | no tracked equivalent | optional mode 0600 X credentials; never copy into Git |
 
 The LaunchDaemon plist contains paths and service identity but no provider

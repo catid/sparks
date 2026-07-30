@@ -1150,6 +1150,20 @@ class StateDB:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS deliveries (
+                delivery_key TEXT PRIMARY KEY,
+                channel TEXT NOT NULL,
+                manifest TEXT NOT NULL,
+                integrity TEXT NOT NULL,
+                root_ts TEXT,
+                completed_sections TEXT NOT NULL DEFAULT '[]',
+                created_at REAL NOT NULL,
+                completed_at REAL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS deliveries_active_channel_idx
+                ON deliveries(channel) WHERE completed_at IS NULL;
+            CREATE INDEX IF NOT EXISTS deliveries_completed_idx
+                ON deliveries(completed_at);
             """
         )
         columns = {
@@ -1251,6 +1265,249 @@ class StateDB:
         )
         self.connection.commit()
 
+    @staticmethod
+    def _delivery_integrity(manifest_text: str) -> str:
+        return hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _decode_delivery_row(row: Sequence[Any]) -> Dict[str, Any]:
+        (
+            delivery_key,
+            channel,
+            manifest_text,
+            integrity,
+            root_ts,
+            completed_text,
+            created_at,
+        ) = row
+        expected = StateDB._delivery_integrity(str(manifest_text))
+        if not hmac.compare_digest(str(integrity), expected):
+            raise ValueError("delivery manifest integrity check failed")
+        try:
+            manifest = json.loads(str(manifest_text))
+            completed_raw = json.loads(str(completed_text))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("delivery manifest is invalid") from exc
+        if not isinstance(manifest, dict) or not isinstance(completed_raw, list):
+            raise ValueError("delivery manifest is invalid")
+        completed = []
+        for value in completed_raw:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("delivery progress is invalid")
+            if value not in completed:
+                completed.append(value)
+        return {
+            "delivery_key": str(delivery_key),
+            "channel": str(channel),
+            "manifest": manifest,
+            "root_ts": str(root_ts or ""),
+            "completed_sections": completed,
+            "created_at": float(created_at),
+        }
+
+    def save_delivery_manifest(
+        self,
+        delivery_key: str,
+        channel: str,
+        manifest: Mapping[str, Any],
+        created_at: Optional[float] = None,
+    ) -> None:
+        """Persist an immutable rendered delivery before its first API call."""
+
+        if not delivery_key or not channel or not isinstance(manifest, Mapping):
+            raise ValueError("delivery manifest identity is invalid")
+        manifest_text = json.dumps(
+            dict(manifest),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        integrity = self._delivery_integrity(manifest_text)
+        timestamp = created_at if created_at is not None else time.time()
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO deliveries(
+                    delivery_key, channel, manifest, integrity,
+                    completed_sections, created_at
+                )
+                VALUES (?, ?, ?, ?, '[]', ?)
+                """,
+                (
+                    str(delivery_key),
+                    str(channel),
+                    manifest_text,
+                    integrity,
+                    float(timestamp),
+                ),
+            )
+            self.connection.commit()
+        except sqlite3.IntegrityError as exc:
+            self.connection.rollback()
+            existing = self.connection.execute(
+                """
+                SELECT delivery_key, channel, manifest, integrity, root_ts,
+                       completed_sections, created_at
+                FROM deliveries WHERE delivery_key=?
+                """,
+                (str(delivery_key),),
+            ).fetchone()
+            if existing is not None:
+                decoded = self._decode_delivery_row(existing)
+                if (
+                    decoded["channel"] == str(channel)
+                    and decoded["manifest"] == dict(manifest)
+                ):
+                    return
+            raise ValueError(
+                "another delivery is already active for this channel"
+            ) from exc
+
+    def load_active_delivery(self, channel: str) -> Optional[Dict[str, Any]]:
+        row = self.connection.execute(
+            """
+            SELECT delivery_key, channel, manifest, integrity, root_ts,
+                   completed_sections, created_at
+            FROM deliveries
+            WHERE channel=? AND completed_at IS NULL
+            ORDER BY created_at ASC LIMIT 1
+            """,
+            (str(channel),),
+        ).fetchone()
+        return self._decode_delivery_row(row) if row is not None else None
+
+    def set_delivery_root_ts(self, delivery_key: str, root_ts: str) -> None:
+        if not root_ts:
+            raise ValueError("delivery root timestamp is empty")
+        self.connection.execute(
+            """
+            UPDATE deliveries SET root_ts=?
+            WHERE delivery_key=? AND completed_at IS NULL AND root_ts IS NULL
+            """,
+            (str(root_ts), str(delivery_key)),
+        )
+        row = self.connection.execute(
+            "SELECT root_ts FROM deliveries WHERE delivery_key=?",
+            (str(delivery_key),),
+        ).fetchone()
+        if row is None or str(row[0] or "") != str(root_ts):
+            self.connection.rollback()
+            raise ValueError("delivery root timestamp conflicts with state")
+        self.connection.commit()
+
+    def mark_delivery_section(
+        self,
+        delivery_key: str,
+        section_index: int,
+        emitted_at: Optional[float] = None,
+    ) -> None:
+        if (
+            isinstance(section_index, bool)
+            or not isinstance(section_index, int)
+            or section_index < 0
+        ):
+            raise ValueError("delivery section index is invalid")
+        timestamp = emitted_at if emitted_at is not None else time.time()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                """
+                SELECT delivery_key, channel, manifest, integrity, root_ts,
+                       completed_sections, created_at
+                FROM deliveries
+                WHERE delivery_key=? AND completed_at IS NULL
+                """,
+                (str(delivery_key),),
+            ).fetchone()
+            if row is None:
+                raise ValueError("active delivery was not found")
+            decoded = self._decode_delivery_row(row)
+            sections = decoded["manifest"].get("sections")
+            if not isinstance(sections, list) or section_index >= len(sections):
+                raise ValueError("delivery section index is invalid")
+            section = sections[section_index]
+            if not isinstance(section, dict) or not isinstance(
+                section.get("uids"), list
+            ):
+                raise ValueError("delivery section is invalid")
+            completed = decoded["completed_sections"]
+            if section_index in completed:
+                self.connection.commit()
+                return
+            uids = [
+                str(uid) for uid in section["uids"]
+                if isinstance(uid, str) and uid
+            ]
+            if len(uids) != len(section["uids"]) or len(uids) != len(set(uids)):
+                raise ValueError("delivery section item IDs are invalid")
+            self.connection.executemany(
+                "UPDATE items SET emitted_at=? WHERE uid=?",
+                [(float(timestamp), uid) for uid in uids],
+            )
+            completed.append(section_index)
+            completed.sort()
+            self.connection.execute(
+                """
+                UPDATE deliveries SET completed_sections=?
+                WHERE delivery_key=? AND completed_at IS NULL
+                """,
+                (
+                    json.dumps(completed, separators=(",", ":")),
+                    str(delivery_key),
+                ),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def complete_delivery(
+        self,
+        delivery_key: str,
+        completed_through: float,
+        completed_at: Optional[float] = None,
+    ) -> None:
+        timestamp = completed_at if completed_at is not None else time.time()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                """
+                SELECT delivery_key, channel, manifest, integrity, root_ts,
+                       completed_sections, created_at
+                FROM deliveries
+                WHERE delivery_key=? AND completed_at IS NULL
+                """,
+                (str(delivery_key),),
+            ).fetchone()
+            if row is None:
+                raise ValueError("active delivery was not found")
+            decoded = self._decode_delivery_row(row)
+            sections = decoded["manifest"].get("sections")
+            if not isinstance(sections, list):
+                raise ValueError("delivery manifest sections are invalid")
+            if set(decoded["completed_sections"]) != set(range(len(sections))):
+                raise ValueError("delivery has incomplete sections")
+            watermark = max(self.last_completed_at(), float(completed_through))
+            self.connection.execute(
+                """
+                INSERT INTO metadata(key, value)
+                VALUES ('last_completed_at', ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (repr(watermark),),
+            )
+            self.connection.execute(
+                """
+                UPDATE deliveries SET completed_at=?
+                WHERE delivery_key=? AND completed_at IS NULL
+                """,
+                (float(timestamp), str(delivery_key)),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
     def pending_items(self, cutoff: float) -> List[Item]:
         completed_through = self.last_completed_at()
         items = []
@@ -1301,6 +1558,13 @@ class StateDB:
         )
         self.connection.execute(
             "DELETE FROM arxiv_cache WHERE fetched_at < ?", (cutoff,)
+        )
+        self.connection.execute(
+            """
+            DELETE FROM deliveries
+            WHERE completed_at IS NOT NULL AND completed_at < ?
+            """,
+            (cutoff,),
         )
         self.connection.commit()
         return int(cursor.rowcount or 0)

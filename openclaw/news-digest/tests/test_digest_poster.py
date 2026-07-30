@@ -192,48 +192,61 @@ class TransactionalDeliveryTests(unittest.TestCase):
         with StateDB(self.state_path) as state:
             self.assertEqual(digest.generated_at, state.last_completed_at())
 
-    def test_client_message_ids_are_stable_across_retries(self):
+    def test_manifest_reuses_exact_chunks_and_ids_across_retry(self):
         items = [_item(index, long_summary=True) for index in range(10)]
         digest = _digest({"Stable section": items})
         self._discover(items)
-        first_client = RecordingClient(root_ts="111.1")
+        first_client = RecordingClient(root_ts="111.1", fail_at=3)
         second_client = RecordingClient(root_ts="222.2")
 
-        digest_poster.deliver_digest(
-            digest, self.state_path, "C_TEST", first_client,
-        )
-        digest_poster.deliver_digest(
-            digest, self.state_path, "C_TEST", second_client,
-        )
-
-        first_ids = [call["client_msg_id"] for call in first_client.calls]
-        second_ids = [call["client_msg_id"] for call in second_client.calls]
-        self.assertEqual(first_ids, second_ids)
-        self.assertEqual(len(first_ids), len(set(first_ids)))
-        self.assertTrue(all(value for value in first_ids))
-        self.assertTrue(all(
-            str(uuid.UUID(value)) == value for value in first_ids
-        ))
-
-        sorted_uids = ",".join(sorted(item.uid for item in items))
-        expected_root_id = str(uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            "sparks-news-digest:root:" + sorted_uids,
-        ))
-        section_text = render_slack_sections(digest)[0][1]
-        expected_section_ids = [
-            str(uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                "sparks-news-digest:section:Stable section:%s:%d"
-                % (sorted_uids, index),
-            ))
-            for index, _chunk in enumerate(
-                digest_poster.split_slack_text(section_text)
+        with self.assertRaises(digest_poster.DeliveryError):
+            digest_poster.deliver_digest(
+                digest, self.state_path, "C_TEST", first_client,
             )
-        ]
+        with StateDB(self.state_path) as state:
+            active = state.load_active_delivery("C_TEST")
+        self.assertIsNotNone(active)
+        digest_poster.deliver_manifest(
+            active, self.state_path, "C_TEST", second_client,
+        )
+
+        first_section_calls = first_client.calls[1:]
+        self.assertGreaterEqual(
+            len(second_client.calls), len(first_section_calls)
+        )
         self.assertEqual(
-            [expected_root_id] + expected_section_ids,
-            first_ids,
+            first_section_calls,
+            second_client.calls[:len(first_section_calls)],
+        )
+        self.assertTrue(all(
+            call["thread_ts"] == "111.1" for call in second_client.calls
+        ))
+        all_ids = [
+            call["client_msg_id"]
+            for call in first_client.calls[:1] + second_client.calls
+        ]
+        self.assertTrue(all(value for value in all_ids))
+        self.assertTrue(all(str(uuid.UUID(value)) == value for value in all_ids))
+        self.assertTrue(all(self._emitted(items).values()))
+        with StateDB(self.state_path) as state:
+            self.assertIsNone(state.load_active_delivery("C_TEST"))
+
+    def test_manifest_ids_are_channel_scoped(self):
+        items = [_item(1)]
+        digest = _digest({"Fixture": items})
+        sections = render_slack_sections(digest)
+
+        first_key, first = digest_poster.compile_delivery_manifest(
+            digest, "C_ONE", "Overview", sections, "deterministic",
+        )
+        second_key, second = digest_poster.compile_delivery_manifest(
+            digest, "C_TWO", "Overview", sections, "deterministic",
+        )
+
+        self.assertNotEqual(first_key, second_key)
+        self.assertNotEqual(
+            first["root"]["client_msg_id"],
+            second["root"]["client_msg_id"],
         )
 
 

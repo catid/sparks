@@ -565,6 +565,72 @@ class StateDBTests(unittest.TestCase):
 
         self.assertEqual(1_234.5, self.store.last_completed_at())
 
+    def test_delivery_manifest_resumes_and_commits_sections_atomically(self):
+        first = _item("First", "https://example.test/first", "fixture", 100)
+        second = _item("Second", "https://example.test/second", "fixture", 99)
+        self.store.upsert_discovered([first, second], now=1_000)
+        manifest = {
+            "version": 2,
+            "sections": [
+                {"uids": [first.uid], "chunks": [{"text": "first"}]},
+                {"uids": [second.uid], "chunks": [{"text": "second"}]},
+            ],
+        }
+
+        self.store.save_delivery_manifest(
+            "a" * 64, "C_TEST", manifest, created_at=1_001
+        )
+        self.store.set_delivery_root_ts("a" * 64, "123.456")
+        self.store.mark_delivery_section("a" * 64, 0, emitted_at=1_002)
+
+        active = self.store.load_active_delivery("C_TEST")
+        self.assertEqual("123.456", active["root_ts"])
+        self.assertEqual([0], active["completed_sections"])
+        self.assertTrue(self.store.is_emitted(first.uid))
+        self.assertFalse(self.store.is_emitted(second.uid))
+        with self.assertRaises(ValueError):
+            self.store.complete_delivery(
+                "a" * 64, completed_through=1_000, completed_at=1_003
+            )
+
+        self.store.mark_delivery_section("a" * 64, 1, emitted_at=1_004)
+        self.store.complete_delivery(
+            "a" * 64, completed_through=1_000, completed_at=1_005
+        )
+
+        self.assertIsNone(self.store.load_active_delivery("C_TEST"))
+        self.assertTrue(self.store.is_emitted(second.uid))
+        self.assertEqual(1_000, self.store.last_completed_at())
+
+    def test_delivery_manifest_detects_content_tampering(self):
+        manifest = {
+            "version": 2,
+            "sections": [{"uids": [], "chunks": [{"text": "original"}]}],
+        }
+        self.store.save_delivery_manifest("b" * 64, "C_TEST", manifest)
+        self.store.connection.execute(
+            "UPDATE deliveries SET manifest=? WHERE delivery_key=?",
+            ('{"changed":true}', "b" * 64),
+        )
+        self.store.connection.commit()
+
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            self.store.load_active_delivery("C_TEST")
+
+    def test_only_one_delivery_can_be_active_per_channel(self):
+        first = {
+            "version": 2,
+            "sections": [{"uids": [], "chunks": [{"text": "first"}]}],
+        }
+        second = {
+            "version": 2,
+            "sections": [{"uids": [], "chunks": [{"text": "second"}]}],
+        }
+        self.store.save_delivery_manifest("c" * 64, "C_TEST", first)
+
+        with self.assertRaisesRegex(ValueError, "already active"):
+            self.store.save_delivery_manifest("d" * 64, "C_TEST", second)
+
     def test_inferred_date_is_stable_across_rediscovery(self):
         first = dataclasses.replace(
             _item("Undated", "https://example.test/undated", "fixture", 100),

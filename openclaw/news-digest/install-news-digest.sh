@@ -67,6 +67,7 @@ fi
 
 required_files=(
   news_digest.py
+  news_briefing.py
   news-digest.py
   digest-poster.py
 )
@@ -111,6 +112,7 @@ done
 PYTHONPYCACHEPREFIX="${stage_dir}/pycache" \
   "${PYTHON_BIN}" -m py_compile \
   "${stage_dir}/news_digest.py" \
+  "${stage_dir}/news_briefing.py" \
   "${stage_dir}/news-digest.py" \
   "${stage_dir}/digest-poster.py"
 PYTHONPATH="${stage_dir}" PYTHONPYCACHEPREFIX="${stage_dir}/pycache" \
@@ -134,6 +136,7 @@ done
 
 install -d -m 0700 -- "${DEST_DIR}"
 install -m 0644 -- "${stage_dir}/news_digest.py" "${DEST_DIR}/news_digest.py"
+install -m 0644 -- "${stage_dir}/news_briefing.py" "${DEST_DIR}/news_briefing.py"
 install -m 0755 -- "${stage_dir}/news-digest.py" "${DEST_DIR}/news-digest.py"
 install -m 0755 -- "${stage_dir}/digest-poster.py" "${DEST_DIR}/digest-poster.py"
 if [[ -f "${stage_dir}/README.md" ]]; then

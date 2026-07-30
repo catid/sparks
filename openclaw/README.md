@@ -195,12 +195,16 @@ repository.
 ## Transactional news digest
 
 The optional [`news-digest/`](./news-digest/) collector runs on the OpenClaw
-control host. It fetches and ranks feeds without involving the local model,
-posts one Slack overview with threaded sections, and marks SQLite items
-emitted only after confirmed delivery. A successful-run watermark prevents
-later polls from draining lower-ranked leftovers from an already delivered
-collection window. Its installer backs up the deployed scripts without
-copying credentials or runtime state.
+control host. It deterministically shortlists feeds, then can use OpenClaw's
+stateless, tool-free DS4F inference surface to write a top-item briefing and
+globally prioritize the detailed thread. Exact rendered messages are
+persisted before posting, and SQLite items are emitted only after confirmed
+delivery. A successful-run watermark prevents later polls from draining
+lower-ranked leftovers from an already delivered collection window. Its
+installer backs up deployed scripts without copying credentials or runtime
+state. See the
+[`OpenClaw prioritization`](./news-digest/README.md#openclaw-prioritization)
+contract for ranking, strict validation, bounded repair, and fallback details.
 
 Use direct `digest-poster.py --post` delivery with OpenClaw cron fallback
 delivery disabled. Otherwise the cron runner can post the command's JSON
