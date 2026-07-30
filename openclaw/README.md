@@ -136,6 +136,38 @@ curl -fsS http://127.0.0.1:18789/ >/dev/null
 Do not leave `~/Library/LaunchAgents/ai.openclaw.gateway.plist` installed at
 the same time; a later GUI login would start a second gateway on the same port.
 
+## Slack liveness heartbeat
+
+OpenClaw's stock Slack `progress` mode edits one preview into the final answer,
+but version 2026.7.1 does not periodically refresh an otherwise silent turn.
+The guarded adapter patch under
+[`slack-heartbeat/`](./slack-heartbeat/) adds a deliberately content-free
+heartbeat: it posts `thinking.` immediately and appends one dot every five
+seconds. The final answer replaces that same message. Reasoning, commentary,
+partial answer tokens, and raw tool commands remain hidden.
+
+Install and verify it on the OpenClaw host:
+
+```bash
+openclaw/slack-heartbeat/install-slack-heartbeat.sh install
+sudo launchctl kickstart -k system/ai.openclaw.gateway.headless
+openclaw/slack-heartbeat/install-slack-heartbeat.sh verify
+```
+
+The patcher refuses any Slack plugin version or pre-/post-patch bundle hash
+other than the qualified `@openclaw/slack` 2026.7.1 build. It patches the npm
+base project when OpenClaw still retains it and always patches the active
+generated copy. OpenClaw may garbage-collect the base project after restart;
+that is expected and verification then checks the active copy. The patcher
+backs up changed files, writes atomically, checks for concurrent replacement,
+checks JavaScript syntax, and is idempotent. Run the installer again after a
+plugin reinstall; after an OpenClaw/Slack-plugin upgrade, qualify the new
+source before updating the guards. A force-killed gateway or failed turn can
+leave its most recent preview behind; frozen dots then serve as the requested
+visible failure signal. The patch deliberately does not delete a preview on
+the generic dispatch-error path because a late post-delivery hook failure must
+never delete an already finalized answer.
+
 ## Tool and channel boundary
 
 The live control host intentionally gives the local model the `coding` tool

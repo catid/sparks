@@ -310,6 +310,19 @@ Routine turns and compaction remain local. See
 [`openclaw/README.md`](../openclaw/README.md) for deployment, credential
 isolation, launchd recovery, and end-to-end verifier checks.
 
+On the qualified 2026.7.1 Slack plugin, verify the five-second liveness
+heartbeat after a plugin install or upgrade:
+
+```bash
+~/.openclaw/ops/slack-heartbeat/install-slack-heartbeat.sh verify
+```
+
+The verifier failing after an upgrade is intentional: do not patch a changed
+compiled adapter until its new lifecycle has been reviewed. The Slack config
+uses progress-preview delivery only so the editable `thinking...` heartbeat
+can become the final response; it does not expose model reasoning, partial
+answer tokens, commentary, or raw tool commands.
+
 This integration does not erase the model-quality caveat. The earlier
 max-context coding-agent trial produced safe tool calls and passing tests but
 still failed the task semantically; see

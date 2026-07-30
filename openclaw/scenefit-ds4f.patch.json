@@ -141,7 +141,17 @@
   "channels": {
     "slack": {
       "dmPolicy": "pairing",
-      "groupPolicy": "allowlist"
+      "groupPolicy": "allowlist",
+      "streaming": {
+        "mode": "progress",
+        "nativeTransport": false,
+        "progress": {
+          "label": false,
+          "toolProgress": false,
+          "commentary": false,
+          "commandText": "status"
+        }
+      }
     }
   },
   "plugins": {

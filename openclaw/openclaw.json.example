@@ -167,7 +167,17 @@
         "id": "SLACK_BOT_TOKEN"
       },
       "dmPolicy": "pairing",
-      "groupPolicy": "disabled"
+      "groupPolicy": "disabled",
+      "streaming": {
+        "mode": "progress",
+        "nativeTransport": false,
+        "progress": {
+          "label": false,
+          "toolProgress": false,
+          "commentary": false,
+          "commandText": "status"
+        }
+      }
     }
   },
   "plugins": {

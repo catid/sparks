@@ -170,6 +170,8 @@ The validated headless macOS deployment adds:
 | `/Library/LaunchDaemons/ai.openclaw.gateway.headless.plist` | rendered from `openclaw/ai.openclaw.gateway.headless.plist.in` | system-domain service; runs as the unprivileged OpenClaw user |
 | `${HOME}/.openclaw/ops/install-headless-macos.sh` | `openclaw/install-headless-macos.sh` | verifier/installer copied beside private state |
 | `${HOME}/.openclaw/openclaw.json` | merge `openclaw/scenefit-ds4f.patch.json` into local config | private active config; do not copy back into Git |
+| `${HOME}/.openclaw/ops/slack-heartbeat/` | `openclaw/slack-heartbeat/` | guarded `@openclaw/slack` 2026.7.1 five-second liveness patcher and verifier |
+| `${HOME}/.openclaw/backups/slack-thinking-heartbeat/` | no tracked equivalent | owner-only backups of locally patched Slack adapter bundles |
 | `${HOME}/.openclaw/.env` | no tracked equivalent | mode 0600 provider/channel credentials |
 | `${HOME}/.openclaw/workspace/AGENTS.md` | append `openclaw/AGENTS-routing.md` | local-to-Sol escalation policy |
 | `${HOME}/.openclaw/workspace/news-digest/{news_digest.py,news_briefing.py,news-digest.py,digest-poster.py}` | `openclaw/news-digest/` | deterministic collector, tool-free OpenClaw prioritizer, and transactional Slack poster |
