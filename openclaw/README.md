@@ -191,3 +191,17 @@ does not source executable shell credentials or select a rootless Docker
 socket. Active OpenClaw state under `~/.openclaw/` contains device identity,
 sessions, history, and credentials and must never be copied into this public
 repository.
+
+## Transactional news digest
+
+The optional [`news-digest/`](./news-digest/) collector runs on the OpenClaw
+control host. It fetches and ranks feeds without involving the local model,
+posts one Slack overview with threaded sections, and marks SQLite items
+emitted only after confirmed delivery. A successful-run watermark prevents
+later polls from draining lower-ranked leftovers from an already delivered
+collection window. Its installer backs up the deployed scripts without
+copying credentials or runtime state.
+
+Use direct `digest-poster.py --post` delivery with OpenClaw cron fallback
+delivery disabled. Otherwise the cron runner can post the command's JSON
+status as a duplicate message.
