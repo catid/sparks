@@ -28,6 +28,7 @@ MIA_ENV_FILE=mia-agent.local.env \
 
 (cd dspark_mia && \
   MIA_ENV_FILE=mia-throughput.env ./tests/test-profile-selection.sh)
+(cd dspark_mia && ./tests/test-model-lock-selection.sh)
 (cd dspark_mia && ./tests/test-profile-renderer.sh)
 (cd dspark_mia && ./tests/test-model-catalog.sh)
 (cd dspark_mia && \

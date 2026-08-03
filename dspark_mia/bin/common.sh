@@ -44,6 +44,31 @@ MIA_ENV_FILE="${canonical_env_file}"
 MIA_ENV_BASENAME="${canonical_env_basename}"
 export MIA_ENV_FILE MIA_ENV_BASENAME
 
+# Profiles may select an alternate pinned checkpoint lock, but the lock must
+# remain a regular JSON file shipped directly beside the integration. This
+# keeps local and worker resolution identical and prevents accidental use of
+# an unrelated host path.
+requested_model_lock="${MIA_MODEL_LOCK}"
+case "${requested_model_lock}" in
+  /*) candidate_model_lock="${requested_model_lock}" ;;
+  *) candidate_model_lock="${MIA_ROOT}/${requested_model_lock}" ;;
+esac
+if [[ ! -f "${candidate_model_lock}" || -L "${candidate_model_lock}" ]]; then
+  echo "Model lock must be a regular, non-symlink file: ${candidate_model_lock}" >&2
+  exit 2
+fi
+MIA_MODEL_LOCK="$(readlink -f -- "${candidate_model_lock}")"
+if [[ "$(dirname "${MIA_MODEL_LOCK}")" != "${MIA_ROOT}" ]]; then
+  echo "Model lock must be directly inside ${MIA_ROOT}: ${MIA_MODEL_LOCK}" >&2
+  exit 2
+fi
+MIA_MODEL_LOCK_BASENAME="$(basename "${MIA_MODEL_LOCK}")"
+if [[ ! "${MIA_MODEL_LOCK_BASENAME}" =~ ^[A-Za-z0-9._-]+\.json$ ]]; then
+  echo "Model lock basename must end in .json and contain only safe characters." >&2
+  exit 2
+fi
+export MIA_MODEL_LOCK MIA_MODEL_LOCK_BASENAME
+
 # An inherited scalar GID must never leak into this multi-HCA profile.
 unset NCCL_IB_GID_INDEX
 

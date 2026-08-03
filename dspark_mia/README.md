@@ -24,9 +24,11 @@ changes live beside it in this directory.
 
 `MODEL.lock.json` records the default path hint, HF revision, checkpoint index
 and config hashes, 48-shard count, and total Safetensors bytes. The selected
-profile supplies the actual host path. Serving is offline and the checkpoint
-is mounted read-only. `scripts/download-pinned-model.sh` performs an explicit
-pinned download; lifecycle commands never download model data.
+profile supplies the actual host path and may select another lock with
+`MIA_MODEL_LOCK=NAME.json`. A selected lock must be a regular, non-symlink
+JSON file directly inside this directory. Serving is offline and the
+checkpoint is mounted read-only. `scripts/download-pinned-model.sh` honors the
+selected profile and lock; lifecycle commands never download model data.
 
 Static rendering does not pretend that artifacts exist. `bin/preflight.sh`
 separately requires the exact image digest and complete pinned checkpoint on
@@ -72,9 +74,11 @@ give capture more headroom.
 ## Low-concurrency agent profile
 
 `mia-agent.env.example` is the OpenClaw-oriented alternative to the C32
-throughput profile. It retains the same pinned model/image, TP2/PP1 placement,
-native DSpark k5 proposer, one-million-token per-request ceiling, thinking
-mode, four-rail transport, API port, and public model ID. Its isolated
+throughput profile. It retains the default pinned model/image, TP2/PP1
+placement, native DSpark k5 proposer, one-million-token per-request ceiling,
+thinking mode, four-rail transport, API port, and public model ID. The tracked
+installed `mia-agent.env` currently selects the separately pinned abliterated
+FP8 lock while retaining those client-facing IDs. Its isolated
 Compose/rendezvous/tmp identity and reduced scheduler are:
 
 | Setting | Agent value |
@@ -321,6 +325,7 @@ modify the retired port-8000 units.
 - `upstream/`: pristine detached Git checkout at the locked commit
 - `UPSTREAM.lock`: source tree, image digest, and model revision provenance
 - `MODEL.lock.json`: location-independent checkpoint metadata and path hint
+- `MODEL.abliterated-fp8.lock.json`: alternate agent-profile checkpoint pin
 - `mia.env`: pinned cluster and runtime values
 - `mia-agent.env`: audited C8 / 1M-context agent profile for this checkout
 - `mia-agent.env.example`: portable input for `--profile agent`
@@ -328,4 +333,4 @@ modify the retired port-8000 units.
 - `mia-throughput.env.example`: portable input to the profile renderer
 - `compose.mia.override.yml`: local four-rail/thinking/image/model override
 - `bin/`: validation, readiness, lifecycle wrappers, health probe, and supervisor
-- `tests/`: profile propagation, rollback, and deterministic supervisor tests
+- `tests/`: profile/lock propagation, rollback, and deterministic supervisor tests

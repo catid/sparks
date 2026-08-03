@@ -281,18 +281,24 @@ MIA_ENV_FILE="${MIA_ENV_FILE}" \
   scripts/sync-pinned-model-multirail.sh --sync
 ```
 
-The first script requests the exact revision in `MODEL.lock.json`. The second
+The first script requests the exact revision in the selected profile's model
+lock (`MODEL.lock.json` by default). A profile may select another regular JSON
+lock directly inside `dspark_mia` with `MIA_MODEL_LOCK=NAME.json`. The second
 copies metadata once and stripes the 48 Safetensors shards round-robin over
 all four direct links. Logs are written under the user's state directory,
 outside the repository.
 
-The validator requires:
+For the default lock, the validator requires:
 
 - revision `62af8fffb2f7030cac4de2f0169f5b8d1101b646`;
 - 48 indexed Safetensors shards;
 - exactly `166886535336` Safetensors bytes;
 - locked SHA-256 and byte sizes for `config.json` and the checkpoint index;
 - a DeepSeek V4 DSpark configuration with a 1,048,576-token position limit.
+
+Alternate profile locks supply their own repository, revision, byte totals,
+and key-file hashes; the same shard, metadata, and DeepSeek V4 structural
+checks still apply.
 
 Re-run local and remote validation:
 

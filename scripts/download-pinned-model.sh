@@ -10,23 +10,17 @@ elif [[ -f "${root_dir}/dspark_mia/mia-throughput.local.env" ]]; then
 else
   requested_profile="mia-throughput.env"
 fi
-case "${requested_profile}" in
-  /*) profile="${requested_profile}" ;;
-  *) profile="${root_dir}/dspark_mia/${requested_profile}" ;;
-esac
-if [[ ! -f "${profile}" || -L "${profile}" ]]; then
-  echo "MIA_ENV_FILE must name a regular profile file." >&2
-  exit 2
-fi
+MIA_ENV_FILE="${requested_profile}"
+export MIA_ENV_FILE
 action="${1:-describe}"
 
-set -a
+# common.sh applies the same profile and model-lock containment rules used by
+# validation and lifecycle commands.
 # shellcheck source=/dev/null
-source "${profile}"
-set +a
+source "${root_dir}/dspark_mia/bin/common.sh"
 
-repo="$(jq -er '.repo_id' "${root_dir}/dspark_mia/MODEL.lock.json")"
-revision="$(jq -er '.revision' "${root_dir}/dspark_mia/MODEL.lock.json")"
+repo="$(jq -er '.repo_id' "${MIA_MODEL_LOCK}")"
+revision="$(jq -er '.revision' "${MIA_MODEL_LOCK}")"
 destination="${MODEL_DIR:-${DSPARK_MODEL_HOST_PATH}}"
 
 case "${action}" in
@@ -46,16 +40,17 @@ case "${action}" in
     hf download "${repo}" \
       --revision "${revision}" \
       --local-dir "${destination}"
-    MIA_ENV_FILE="${profile}" \
+    MIA_ENV_FILE="${MIA_ENV_FILE}" \
       "${root_dir}/dspark_mia/bin/validate-model.sh"
     ;;
   -h|--help)
     cat <<'EOF'
 Usage: download-pinned-model.sh [describe|--download]
 
-Downloads the exact MODEL.lock.json revision to DSPARK_MODEL_HOST_PATH using
-the logged-in Hugging Face CLI. Tokens remain in the user's HF credential
-store and are never written into this repository or a command argument.
+Downloads the selected profile's exact pinned model-lock revision to
+DSPARK_MODEL_HOST_PATH using the logged-in Hugging Face CLI. Tokens remain in
+the user's HF credential store and are never written into this repository or
+a command argument.
 
 Install the CLI with `pipx install huggingface-hub`, then authenticate once
 with `hf auth login`.
