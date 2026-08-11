@@ -24,6 +24,8 @@ REQUIRED = frozenset(
         "C3_DASHBOARD_VLLM_METRICS_URL",
         "C3_DASHBOARD_SSH_KEY",
         "C3_DASHBOARD_SSH_KNOWN_HOSTS",
+        "C3_DASHBOARD_VOICE_STATUS_PATH",
+        "C3_DASHBOARD_VOICE_STALE_SECONDS",
         "C3_KIOSK_URL",
         "C3_KIOSK_OUTPUT",
         "C3_KIOSK_MODE",
@@ -139,6 +141,23 @@ def validate(values: dict[str, str]) -> None:
             or any(char.isspace() for char in values[name])
         ):
             fail(f"{name} must be an expanded absolute path")
+
+    voice_status = pathlib.PurePath(values["C3_DASHBOARD_VOICE_STATUS_PATH"])
+    if (
+        not voice_status.is_absolute()
+        or len(voice_status.parts) < 3
+        or voice_status.parts[1] != "run"
+        or ".." in voice_status.parts
+        or any(char.isspace() for char in values["C3_DASHBOARD_VOICE_STATUS_PATH"])
+    ):
+        fail("C3_DASHBOARD_VOICE_STATUS_PATH must be an absolute path below /run")
+    try:
+        voice_stale = float(values["C3_DASHBOARD_VOICE_STALE_SECONDS"])
+    except ValueError as exc:
+        fail("C3_DASHBOARD_VOICE_STALE_SECONDS must be numeric")
+        raise AssertionError from exc
+    if not 5 <= voice_stale <= 300:
+        fail("C3_DASHBOARD_VOICE_STALE_SECONDS must be between 5 and 300")
 
     kiosk = validated_url(values["C3_KIOSK_URL"], "C3_KIOSK_URL")
     kiosk_port = 80 if kiosk.port is None else kiosk.port

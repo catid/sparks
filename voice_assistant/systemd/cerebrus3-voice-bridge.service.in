@@ -1,5 +1,5 @@
 [Unit]
-Description=Cerebrus 3 wake-word voice bridge
+Description=Cerberus voice bridge on cerebrus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
 Wants=cerebrus3-openclaw-voice.service cerebrus3-qwen3-asr.service cerebrus3-audio8.service
 After=cerebrus3-openclaw-voice.service cerebrus3-qwen3-asr.service cerebrus3-audio8.service
@@ -22,7 +22,7 @@ Environment=VOICE_OPENCLAW_USER=cerebrus3-voice
 Environment=VOICE_TTS_URL=http://127.0.0.1:8010/v1/audio/speech
 Environment=VOICE_CAPTURE_DEVICE=plughw:CARD=CP900,DEV=0
 Environment=VOICE_PLAYBACK_DEVICE=plughw:CARD=CP900,DEV=0
-Environment=VOICE_STATE_DIR=%S/cerebrus3-voice-bridge
+Environment=VOICE_STATE_DIR=%t/cerebrus3-voice-bridge
 EnvironmentFile=@SECRET_ENV@
 EnvironmentFile=-/etc/default/cerebrus3-voice-bridge
 ExecStart=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/voice_bridge.py
@@ -30,8 +30,8 @@ Restart=always
 RestartSec=3s
 TimeoutStartSec=30s
 TimeoutStopSec=20s
-StateDirectory=cerebrus3-voice-bridge
-StateDirectoryMode=0700
+RuntimeDirectory=cerebrus3-voice-bridge
+RuntimeDirectoryMode=0700
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

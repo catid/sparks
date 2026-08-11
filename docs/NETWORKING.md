@@ -44,7 +44,7 @@ Do not infer 400 Gb/s of application bandwidth per cable by adding the two
 logical link rates. Effective bandwidth depends on the collective, message
 size, direction, and the hardware's shared physical path.
 
-## Cerebrus3 port-map variants
+## Cerberus node 3 (`cerebrus3`) port-map variants
 
 Only the two cable ends at C3 differ between these profiles. C1 and C2 keep
 their existing cables, ports, addresses, and Netplan files.

@@ -22,7 +22,8 @@ LISTEN_PORT = int(os.environ.get("QWEN_ASR_PORT", "8020"))
 LANGUAGE = os.environ.get("QWEN_ASR_LANGUAGE", "en").strip() or None
 VOCABULARY_PROMPT = os.environ.get(
     "QWEN_ASR_VOCABULARY_PROMPT",
-    "Vocabulary: Cerberus, Cerebrus, Cerebrus One, Cerebrus Two, Cerebrus Three.",
+    "Vocabulary: Cerberus, Cerberus One, Cerberus Two, Cerberus Three, "
+    "cerebrus1, cerebrus2, cerebrus3.",
 ).strip()
 MAX_AUDIO_SECONDS = float(os.environ.get("QWEN_ASR_MAX_AUDIO_SECONDS", "35"))
 MIN_AUDIO_SECONDS = float(os.environ.get("QWEN_ASR_MIN_AUDIO_SECONDS", "0.15"))
@@ -161,7 +162,7 @@ class QwenAsrRuntime:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CerebrusQwenASR/1"
+    server_version = "CerberusQwenASR/1"
 
     def log_message(self, format_string: str, *args: Any) -> None:
         # Never emit request bodies or transcriptions.

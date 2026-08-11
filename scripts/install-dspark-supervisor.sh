@@ -22,9 +22,9 @@ Select a profile with MIA_ENV_FILE=<basename>. The file must be a regular,
 non-symlink *.env directly inside dspark_mia/. If unset, the installer prefers
 mia-throughput.local.env when it exists and otherwise uses mia-throughput.env.
 
-Run this only on cerebrus1. Cerebrus1 owns both ranks; cerebrus2 must not
-enable an independent model service. The exact spark1 hostname remains a
-transitional alias.
+Run this only on host cerebrus1. Cerberus node 1 owns both ranks; cerebrus2
+must not enable an independent model service. The exact spark1 hostname
+remains a transitional alias.
 EOF
 }
 

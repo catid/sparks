@@ -20,6 +20,8 @@ import urllib.request
 import wave
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -32,6 +34,9 @@ TRIM_AFTER_WAKE = " \t\r\n,.:;!?—–-"
 MAX_SPOKEN_CHARACTERS = 2_000
 MAX_TTS_CHUNKS = 16
 TTS_CHUNK_CHARACTERS = 140
+STATUS_FILENAME = "status.json"
+STATUS_MAX_BYTES = 16 * 1024
+STATUS_HEARTBEAT_SECONDS = 2.0
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -125,6 +130,7 @@ class Settings:
     openclaw_timeout_seconds: float
     tts_timeout_seconds: float
     log_transcripts: bool
+    state_dir: str | None
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -188,7 +194,468 @@ class Settings:
             ),
             tts_timeout_seconds=env_float("VOICE_TTS_TIMEOUT_SECONDS", 240, 10, 900),
             log_transcripts=os.environ.get("VOICE_LOG_TRANSCRIPTS", "0") == "1",
+            state_dir=os.environ.get("VOICE_STATE_DIR", "").strip() or None,
         )
+
+
+def utc_timestamp(epoch: float | None = None) -> str:
+    """Return a compact, unambiguous UTC timestamp for the status API."""
+    when = time.time() if epoch is None else epoch
+    return (
+        datetime.fromtimestamp(when, timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+class StatusPublisher:
+    """Publish a bounded, content-free snapshot for the local dashboard.
+
+    The public document has a deliberately closed schema. Callers can only set
+    enumerated pipeline states, timestamps, durations, and numeric chunk
+    progress; microphone text and model output have no field through which to
+    enter the document.
+    """
+
+    OVERALL_STATES = frozenset(
+        {"starting", "ready", "busy", "armed", "degraded", "stopping", "stopped"}
+    )
+    OVERALL_STAGES = frozenset(
+        {
+            "starting",
+            "listening",
+            "speech_detected",
+            "asr",
+            "watchword",
+            "openclaw",
+            "tts_synthesis",
+            "tts_playback",
+            "cooldown",
+            "retry_wait",
+            "stopping",
+            "stopped",
+        }
+    )
+    WAKE_STATES = frozenset(
+        {"listening", "checking", "armed", "triggered", "not_detected", "stopped"}
+    )
+    COMPONENT_STATES = {
+        "asr": frozenset({"idle", "processing", "ok", "error"}),
+        "openclaw": frozenset({"idle", "thinking", "ok", "error"}),
+        "tts": frozenset(
+            {"idle", "synthesizing", "playing", "cooldown", "ok", "error"}
+        ),
+    }
+    ERROR_STAGES = frozenset(
+        {"capture", "asr", "watchword", "openclaw", "tts_synthesis", "tts_playback"}
+    )
+
+    def __init__(
+        self,
+        state_dir: str | None,
+        heartbeat_seconds: float = STATUS_HEARTBEAT_SECONDS,
+    ) -> None:
+        if not 0.25 <= heartbeat_seconds <= 30:
+            raise ValueError("status heartbeat must be between 0.25 and 30 seconds")
+        self.path: Path | None = None
+        if state_dir:
+            candidate = Path(state_dir)
+            if not candidate.is_absolute():
+                raise RuntimeError("VOICE_STATE_DIR must be an absolute path")
+            self.path = candidate / STATUS_FILENAME
+        self.heartbeat_seconds = heartbeat_seconds
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started = False
+        self._sequence = 0
+        self._temporary_sequence = 0
+        self._component_started: dict[str, float] = {}
+        self._tts_started_monotonic: float | None = None
+        self._last_write_error_type: str | None = None
+        now_epoch = time.time()
+        now_text = utc_timestamp(now_epoch)
+        self._document: dict[str, Any] = {
+            "schema": 1,
+            "service": "cerberus-voice",
+            "device": "Cerberus",
+            "pid": os.getpid(),
+            "instance_id": f"{os.getpid()}-{int(now_epoch * 1000)}",
+            "sequence": 0,
+            "started_at": now_text,
+            "stopped_at": None,
+            "updated_at": now_text,
+            "updated_at_epoch": now_epoch,
+            "heartbeat_at": now_text,
+            "overall": {
+                "state": "starting",
+                "stage": "starting",
+                "stage_started_at": now_text,
+            },
+            "wake_word": {
+                "state": "listening",
+                "last_trigger_at": None,
+                "armed_until": None,
+            },
+            "asr": self._new_component("idle"),
+            "openclaw": self._new_component("idle"),
+            "tts": {
+                **self._new_component("idle"),
+                "chunk_index": 0,
+                "chunk_total": 0,
+                "chunk_started_at": None,
+            },
+            "last_error": None,
+        }
+
+    @staticmethod
+    def _new_component(state: str) -> dict[str, Any]:
+        return {
+            "state": state,
+            "started_at": None,
+            "completed_at": None,
+            "duration_seconds": None,
+            "last_success_at": None,
+        }
+
+    @staticmethod
+    def _safe_error_type(error: BaseException) -> str:
+        # Class names are useful operationally but error messages can contain a
+        # request, response, URL query, or other private content.
+        name = type(error).__name__[:80]
+        return name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) else "Exception"
+
+    @staticmethod
+    def _duration(started: float | None) -> float | None:
+        if started is None:
+            return None
+        return round(max(0.0, time.monotonic() - started), 3)
+
+    def start(self) -> None:
+        if self.path is None:
+            return
+        with self._lock:
+            if self._started:
+                return
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._started = True
+            self._publish_locked()
+            self._thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name="voice-status-heartbeat",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop.wait(self.heartbeat_seconds):
+            with self._lock:
+                wake = self._document["wake_word"]
+                armed_until = wake["armed_until"]
+                if (
+                    wake["state"] == "armed"
+                    and isinstance(armed_until, str)
+                    and self._armed_timestamp_expired(armed_until)
+                ):
+                    wake["state"] = "listening"
+                    wake["armed_until"] = None
+                    if self._document["overall"]["stage"] == "listening":
+                        self._set_overall_locked("ready", "listening")
+                self._publish_locked()
+
+    @staticmethod
+    def _armed_timestamp_expired(timestamp: str) -> bool:
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return parsed.timestamp() <= time.time()
+
+    def _publish_locked(self) -> None:
+        if not self._started or self.path is None:
+            return
+        self._sequence += 1
+        now = time.time()
+        self._document["sequence"] = self._sequence
+        self._document["updated_at"] = utc_timestamp(now)
+        self._document["updated_at_epoch"] = now
+        self._document["heartbeat_at"] = self._document["updated_at"]
+        encoded = (
+            json.dumps(self._document, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        if len(encoded) > STATUS_MAX_BYTES:
+            raise RuntimeError("voice status document exceeded its fixed size limit")
+
+        self._temporary_sequence += 1
+        temporary = self.path.with_name(
+            f".{STATUS_FILENAME}.{os.getpid()}.{self._temporary_sequence}.tmp"
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd: int | None = None
+        try:
+            fd = os.open(temporary, flags, 0o600)
+            with os.fdopen(fd, "wb", closefd=True) as destination:
+                fd = None
+                destination.write(encoded)
+                destination.flush()
+                os.fsync(destination.fileno())
+            os.replace(temporary, self.path)
+            self._last_write_error_type = None
+        except OSError as error:
+            error_type = self._safe_error_type(error)
+            if error_type != self._last_write_error_type:
+                print(f"Voice status publication failed: {error_type}", flush=True)
+                self._last_write_error_type = error_type
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def _set_overall_locked(self, state: str, stage: str) -> None:
+        if state not in self.OVERALL_STATES or stage not in self.OVERALL_STAGES:
+            raise ValueError("invalid voice status transition")
+        overall = self._document["overall"]
+        if overall["stage"] != stage:
+            overall["stage_started_at"] = utc_timestamp()
+        overall["state"] = state
+        overall["stage"] = stage
+
+    def _clear_error_locked(self, *stages: str) -> None:
+        """Clear a retained failure only after that same operation recovers."""
+        last_error = self._document.get("last_error")
+        if isinstance(last_error, dict) and last_error.get("stage") in stages:
+            self._document["last_error"] = None
+
+    def _transition(self, state: str, stage: str) -> None:
+        with self._lock:
+            self._set_overall_locked(state, stage)
+            self._publish_locked()
+
+    def ready(self) -> None:
+        with self._lock:
+            self._document["wake_word"]["state"] = "listening"
+            self._document["wake_word"]["armed_until"] = None
+            self._set_overall_locked("ready", "listening")
+            self._publish_locked()
+
+    def resume_listening(self) -> None:
+        """Recover from a rejected VAD burst without discarding a live arm."""
+        with self._lock:
+            wake = self._document["wake_word"]
+            armed_until = wake.get("armed_until")
+            armed = (
+                isinstance(armed_until, str)
+                and not self._armed_timestamp_expired(armed_until)
+                and wake.get("state") not in {"triggered", "stopped"}
+            )
+            if armed:
+                wake["state"] = "armed"
+                self._set_overall_locked("armed", "listening")
+            else:
+                wake["state"] = "listening"
+                wake["armed_until"] = None
+                self._set_overall_locked("ready", "listening")
+            self._publish_locked()
+
+    def speech_detected(self) -> None:
+        self._transition("busy", "speech_detected")
+
+    def begin_asr(self) -> None:
+        with self._lock:
+            # Reaching ASR proves capture recovered from any prior device/read
+            # failure. Preserve unrelated failures until their own stage wins.
+            self._clear_error_locked("capture")
+        self._begin_component("asr", "processing", "asr")
+        with self._lock:
+            self._document["wake_word"]["state"] = "checking"
+            self._publish_locked()
+
+    def begin_openclaw(self) -> None:
+        self._begin_component("openclaw", "thinking", "openclaw")
+
+    def begin_tts(self, chunk_total: int) -> None:
+        if not 0 <= chunk_total <= MAX_TTS_CHUNKS:
+            raise ValueError("invalid TTS chunk count")
+        with self._lock:
+            now = utc_timestamp()
+            self._tts_started_monotonic = time.monotonic()
+            tts = self._document["tts"]
+            tts.update(
+                {
+                    "state": "synthesizing" if chunk_total else "ok",
+                    "started_at": now,
+                    "completed_at": None,
+                    "duration_seconds": None,
+                    "chunk_index": 1 if chunk_total else 0,
+                    "chunk_total": chunk_total,
+                    "chunk_started_at": now if chunk_total else None,
+                }
+            )
+            self._set_overall_locked(
+                "busy" if chunk_total else "ready",
+                "tts_synthesis" if chunk_total else "listening",
+            )
+            self._publish_locked()
+
+    def tts_phase(self, state: str, chunk_index: int) -> None:
+        if state not in {"synthesizing", "playing"}:
+            raise ValueError("invalid TTS phase")
+        with self._lock:
+            tts = self._document["tts"]
+            total = tts["chunk_total"]
+            if not isinstance(total, int) or not 1 <= chunk_index <= total:
+                raise ValueError("invalid TTS chunk progress")
+            tts["state"] = state
+            tts["chunk_index"] = chunk_index
+            tts["chunk_started_at"] = utc_timestamp()
+            self._set_overall_locked(
+                "busy", "tts_synthesis" if state == "synthesizing" else "tts_playback"
+            )
+            self._publish_locked()
+
+    def begin_cooldown(self) -> None:
+        with self._lock:
+            self._document["tts"]["state"] = "cooldown"
+            self._document["tts"]["chunk_started_at"] = utc_timestamp()
+            self._set_overall_locked("busy", "cooldown")
+            self._publish_locked()
+
+    def finish_tts(self) -> None:
+        with self._lock:
+            now = utc_timestamp()
+            tts = self._document["tts"]
+            tts["state"] = "ok"
+            tts["completed_at"] = now
+            tts["duration_seconds"] = self._duration(self._tts_started_monotonic)
+            tts["last_success_at"] = now
+            tts["chunk_started_at"] = None
+            self._tts_started_monotonic = None
+            if tts["chunk_total"]:
+                self._clear_error_locked("tts_synthesis", "tts_playback")
+            self._publish_locked()
+
+    def wake_not_detected(self) -> None:
+        with self._lock:
+            self._document["wake_word"].update(
+                {"state": "not_detected", "armed_until": None}
+            )
+            self._clear_error_locked("watchword")
+            self._set_overall_locked("ready", "listening")
+            self._publish_locked()
+
+    def wake_armed(self, seconds: float) -> None:
+        with self._lock:
+            now = time.time()
+            wake = self._document["wake_word"]
+            wake.update(
+                {
+                    "state": "armed",
+                    "last_trigger_at": utc_timestamp(now),
+                    "armed_until": utc_timestamp(now + seconds),
+                }
+            )
+            self._clear_error_locked("watchword")
+            self._set_overall_locked("armed", "listening")
+            self._publish_locked()
+
+    def wake_triggered(self, heard_now: bool) -> None:
+        with self._lock:
+            wake = self._document["wake_word"]
+            wake["state"] = "triggered"
+            wake["armed_until"] = None
+            if heard_now or wake["last_trigger_at"] is None:
+                wake["last_trigger_at"] = utc_timestamp()
+            self._clear_error_locked("watchword")
+            self._set_overall_locked("busy", "watchword")
+            self._publish_locked()
+
+    def _begin_component(self, component: str, state: str, stage: str) -> None:
+        if state not in self.COMPONENT_STATES[component]:
+            raise ValueError("invalid component state")
+        with self._lock:
+            now = utc_timestamp()
+            self._component_started[component] = time.monotonic()
+            details = self._document[component]
+            details.update(
+                {
+                    "state": state,
+                    "started_at": now,
+                    "completed_at": None,
+                    "duration_seconds": None,
+                }
+            )
+            self._set_overall_locked("busy", stage)
+            self._publish_locked()
+
+    def component_ok(self, component: str) -> None:
+        if component not in {"asr", "openclaw"}:
+            raise ValueError("invalid status component")
+        with self._lock:
+            now = utc_timestamp()
+            details = self._document[component]
+            details["state"] = "ok"
+            details["completed_at"] = now
+            details["duration_seconds"] = self._duration(
+                self._component_started.pop(component, None)
+            )
+            details["last_success_at"] = now
+            self._clear_error_locked(component)
+            self._publish_locked()
+
+    def fail(self, stage: str, error: BaseException) -> None:
+        if stage not in self.ERROR_STAGES:
+            raise ValueError("invalid failure stage")
+        with self._lock:
+            now = utc_timestamp()
+            component = (
+                "asr"
+                if stage == "asr"
+                else "openclaw"
+                if stage == "openclaw"
+                else "tts"
+                if stage.startswith("tts_")
+                else None
+            )
+            if component:
+                details = self._document[component]
+                details["state"] = "error"
+                details["completed_at"] = now
+                started = (
+                    self._tts_started_monotonic
+                    if component == "tts"
+                    else self._component_started.pop(component, None)
+                )
+                details["duration_seconds"] = self._duration(started)
+            self._document["last_error"] = {
+                "stage": stage,
+                "type": self._safe_error_type(error),
+                "at": now,
+            }
+            self._set_overall_locked("degraded", "retry_wait")
+            self._publish_locked()
+
+    def stop(self) -> None:
+        if self.path is None:
+            return
+        with self._lock:
+            if not self._started:
+                return
+            self._set_overall_locked("stopping", "stopping")
+            self._publish_locked()
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=max(1.0, self.heartbeat_seconds * 2))
+        with self._lock:
+            now = utc_timestamp()
+            self._document["wake_word"]["state"] = "stopped"
+            self._document["stopped_at"] = now
+            self._set_overall_locked("stopped", "stopped")
+            self._publish_locked()
 
 
 def pcm16_rms(frame: bytes) -> float:
@@ -331,7 +798,7 @@ def post_json(url: str, payload: dict[str, Any], timeout: float, token: str = ""
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "CerebrusVoiceBridge/1",
+        "User-Agent": "CerberusVoiceBridge/1",
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -354,7 +821,7 @@ def transcribe_wav(settings: Settings, wav_bytes: bytes) -> str:
         headers={
             "Content-Type": "audio/wav",
             "Accept": "application/json",
-            "User-Agent": "CerebrusVoiceBridge/1",
+            "User-Agent": "CerberusVoiceBridge/1",
         },
         method="POST",
     )
@@ -495,7 +962,7 @@ def synthesize(settings: Settings, text: str) -> bytes:
         headers={
             "Content-Type": "application/json",
             "Accept": "audio/wav",
-            "User-Agent": "CerebrusVoiceBridge/1",
+            "User-Agent": "CerberusVoiceBridge/1",
         },
         method="POST",
     )
@@ -586,6 +1053,7 @@ class VoiceBridge:
         self.router = WakeWordRouter(settings.armed_seconds)
         self.stop_event = threading.Event()
         self.recorder: Recorder | None = None
+        self.status = StatusPublisher(settings.state_dir)
 
     def log_text(self, label: str, text: str) -> None:
         if self.settings.log_transcripts:
@@ -599,21 +1067,40 @@ class VoiceBridge:
             self.recorder.stop()
 
     def handle_utterance(self, pcm: bytes) -> bool:
-        transcript = transcribe_wav(self.settings, pcm16_to_wav(pcm))
+        self.status.begin_asr()
+        try:
+            transcript = transcribe_wav(self.settings, pcm16_to_wav(pcm))
+        except Exception as error:
+            self.status.fail("asr", error)
+            raise
+        self.status.component_ok("asr")
         if not transcript:
             print("ASR returned no speech", flush=True)
+            # An empty transcription does not consume the router's armed
+            # follow-up utterance. Keep the published arm coherent with it.
+            self.status.resume_listening()
             return False
         self.log_text("ASR utterance", transcript)
+        heard_wake_word = self.router.wake_match(transcript) is not None
         command, state = self.router.route(transcript)
         if state == "ignored":
             print("Wake word absent; utterance ignored", flush=True)
+            self.status.wake_not_detected()
             return False
         if state == "armed":
             print("Wake word heard; listening for one request", flush=True)
+            self.status.wake_armed(self.settings.armed_seconds)
             return False
         assert command is not None
+        self.status.wake_triggered(heard_wake_word)
         self.log_text("Voice request accepted", command)
-        answer = ask_openclaw(self.settings, command)
+        self.status.begin_openclaw()
+        try:
+            answer = ask_openclaw(self.settings, command)
+        except Exception as error:
+            self.status.fail("openclaw", error)
+            raise
+        self.status.component_ok("openclaw")
         chunks, truncated = bounded_spoken_chunks(answer)
         if truncated:
             print(
@@ -626,52 +1113,100 @@ class VoiceBridge:
             f"{len(chunks)} chunks",
             flush=True,
         )
-        for chunk in chunks:
+        self.status.begin_tts(len(chunks))
+        if not chunks:
+            self.status.finish_tts()
+            self.status.ready()
+            return False
+        for index, chunk in enumerate(chunks, start=1):
             if self.stop_event.is_set():
                 break
-            play_wav(self.settings, synthesize(self.settings, chunk))
+            self.status.tts_phase("synthesizing", index)
+            try:
+                wav_bytes = synthesize(self.settings, chunk)
+            except Exception as error:
+                self.status.fail("tts_synthesis", error)
+                raise
+            self.status.tts_phase("playing", index)
+            try:
+                play_wav(self.settings, wav_bytes)
+            except Exception as error:
+                self.status.fail("tts_playback", error)
+                raise
         return bool(chunks)
 
     def capture_one(self) -> bool:
         vad = EnergyVad(self.settings)
-        self.recorder = Recorder(self.settings)
+        utterance: bytes | None = None
         try:
+            self.recorder = Recorder(self.settings)
             while not self.stop_event.is_set():
+                was_active = vad.active_frames is not None
                 utterance = vad.feed(self.recorder.read_frame())
+                if not was_active and vad.active_frames is not None:
+                    self.status.speech_detected()
+                elif was_active and vad.active_frames is None and utterance is None:
+                    # A short impulse can enter VAD-active state and then be
+                    # rejected for insufficient voiced frames. Return the
+                    # dashboard to listening (or its still-live armed state)
+                    # while capture continues.
+                    self.status.resume_listening()
                 if utterance is not None:
                     self.recorder.stop()
                     self.recorder = None
-                    return self.handle_utterance(utterance)
+                    break
+        except Exception as error:
+            if not self.stop_event.is_set():
+                self.status.fail("capture", error)
+            raise
         finally:
             if self.recorder is not None:
                 self.recorder.stop()
                 self.recorder = None
-        return False
+        return self.handle_utterance(utterance) if utterance is not None else False
 
     def run(self) -> None:
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
+        self.status.start()
+        self.status.ready()
         print(
             "Voice bridge ready; raw microphone audio and transcripts are not persisted",
             flush=True,
         )
-        while not self.stop_event.is_set():
-            try:
-                played = self.capture_one()
-                if played and self.stop_event.wait(
-                    self.settings.playback_cooldown_seconds
-                ):
-                    break
-            except urllib.error.HTTPError as error:
-                print(f"Local voice API returned HTTP {error.code}; retrying", flush=True)
-                self.stop_event.wait(2)
-            except urllib.error.URLError:
-                print("Local voice API is unavailable; retrying", flush=True)
-                self.stop_event.wait(2)
-            except Exception as error:
-                if not self.stop_event.is_set():
-                    print(f"Voice bridge error: {type(error).__name__}; retrying", flush=True)
-                    self.stop_event.wait(2)
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    played = self.capture_one()
+                    if played:
+                        self.status.begin_cooldown()
+                        if self.stop_event.wait(
+                            self.settings.playback_cooldown_seconds
+                        ):
+                            break
+                        self.status.finish_tts()
+                        self.status.ready()
+                except urllib.error.HTTPError as error:
+                    print(
+                        f"Local voice API returned HTTP {error.code}; retrying",
+                        flush=True,
+                    )
+                    if not self.stop_event.wait(2):
+                        self.status.resume_listening()
+                except urllib.error.URLError:
+                    print("Local voice API is unavailable; retrying", flush=True)
+                    if not self.stop_event.wait(2):
+                        self.status.resume_listening()
+                except Exception as error:
+                    if not self.stop_event.is_set():
+                        print(
+                            f"Voice bridge error: {type(error).__name__}; retrying",
+                            flush=True,
+                        )
+                        if not self.stop_event.wait(2):
+                            self.status.resume_listening()
+        finally:
+            self.status.stop()
 
 
 def main() -> None:

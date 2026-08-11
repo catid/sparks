@@ -93,6 +93,13 @@ rg -q '^Environment=VOICE_ASR_URL=http://127\.0\.0\.1:8020/transcribe$' "${bridg
 rg -q '^Environment=VOICE_TTS_URL=http://127\.0\.0\.1:8010/v1/audio/speech$' "${bridge_unit}"
 rg -q '^SupplementaryGroups=audio$' "${bridge_unit}"
 rg -q '^DeviceAllow=char-alsa rw$' "${bridge_unit}"
+rg -q '^Environment=VOICE_STATE_DIR=%t/cerebrus3-voice-bridge$' "${bridge_unit}"
+rg -q '^RuntimeDirectory=cerebrus3-voice-bridge$' "${bridge_unit}"
+rg -q '^RuntimeDirectoryMode=0700$' "${bridge_unit}"
+if rg -q '^StateDirectory=' "${bridge_unit}"; then
+  echo "ephemeral voice status must not use a persistent StateDirectory" >&2
+  exit 1
+fi
 rg -q '^InaccessiblePaths=.*docker\.sock.*@HOME@/\.ssh' "${bridge_unit}"
 rg -q '^InaccessiblePaths=.*docker\.sock.*@HOME@/\.ssh' \
   "${voice_dir}/systemd/cerebrus3-openclaw-voice.service.in"

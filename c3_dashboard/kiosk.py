@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tiny GTK4/WebKit kiosk for the Cerebrus 3 status display.
+"""Tiny GTK4/WebKit kiosk for the Cerberus C3 status display.
 
 The X server is owned by the companion systemd service.  This process only
 creates one undecorated, screen-sized WebKit view and permits top-level

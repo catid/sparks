@@ -17,9 +17,9 @@ Those values are installation details, not public defaults.
 
 | Host | Active project responsibility |
 | --- | --- |
-| Cerebrus 1 | DSpark supervisor, TP rank 0/API, TP2-edge readiness, dashboard, optional Nginx |
-| Cerebrus 2 | TP rank 1 container controlled from C1; no autonomous model supervisor |
-| Cerebrus 3 | physical ring member, independent rack telemetry/kiosk and Audio8 TTS; no rank in the active DSpark service |
+| Cerberus node 1 (`cerebrus1`) | DSpark supervisor, TP rank 0/API, TP2-edge readiness, dashboard, optional Nginx |
+| Cerberus node 2 (`cerebrus2`) | TP rank 1 container controlled from C1; no autonomous model supervisor |
+| Cerberus node 3 (`cerebrus3`) | physical ring member, independent rack telemetry/kiosk and Audio8 TTS; no rank in the active DSpark service |
 
 On C1, `dgx-spark-dspark-mia.service` and
 `dgx-spark-laguna-dashboard.service` were enabled and active. The rail gate is
@@ -235,7 +235,7 @@ Use read-only comparisons before changing a live host:
 ```bash
 # Choose the correct canonical role file on each host.
 sudo cmp --silent netplan/cerebrus1-40-cx7.yaml /etc/netplan/40-cx7.yaml \
-  && echo "Cerebrus 1 Netplan matches"
+  && echo "Cerberus node 1 Netplan matches"
 
 systemctl cat dgx-spark-dspark-mia.service
 systemctl show dgx-spark-dspark-mia.service \

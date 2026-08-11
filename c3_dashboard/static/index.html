@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
-  <title>Cerebrus Cluster Pulse</title>
+  <title>Cerberus Cluster Pulse</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,10 +12,10 @@
     <canvas id="ambient-canvas" class="ambient-canvas" width="178" height="35" aria-hidden="true"></canvas>
 
     <header class="topbar">
-      <div class="brand" aria-label="Cerebrus three-node cluster">
+      <div class="brand" aria-label="Cerberus three-node cluster">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
         <div class="brand-copy">
-          <strong>CEREBRUS</strong>
+          <strong>CERBERUS</strong>
           <span>NODE PULSE</span>
         </div>
       </div>
@@ -39,7 +39,7 @@
       <article class="metric-card metric-card--cpu" data-metric="cpu" data-state="waiting">
         <header class="metric-heading">
           <span><i aria-hidden="true"></i>CPU LOAD</span>
-          <small>PER NODE · %</small>
+          <small>UTIL % · TEMP °C</small>
         </header>
         <div class="trace-stack" aria-label="Per-node CPU utilization">
           <div id="cpu-c1-row" class="trace-row trace-row--c1" data-state="unknown">
@@ -50,6 +50,12 @@
               <path id="cpu-c1-line" class="chart-line"></path>
               <circle id="cpu-c1-dot" class="chart-dot" r="2.5" hidden></circle>
             </svg>
+            <output id="cpu-temp-c1-value" class="trace-temp-value" aria-label="C1 CPU temperature">—</output><span class="trace-unit trace-unit--temp">°C</span>
+            <svg id="cpu-temp-c1-chart" class="mini-chart mini-chart--temp" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C1 CPU temperature history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="cpu-temp-c1-line" class="chart-line"></path>
+              <circle id="cpu-temp-c1-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
           </div>
           <div id="cpu-c2-row" class="trace-row trace-row--c2" data-state="unknown">
             <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C2</b></span>
@@ -58,6 +64,12 @@
               <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
               <path id="cpu-c2-line" class="chart-line"></path>
               <circle id="cpu-c2-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+            <output id="cpu-temp-c2-value" class="trace-temp-value" aria-label="C2 CPU temperature">—</output><span class="trace-unit trace-unit--temp">°C</span>
+            <svg id="cpu-temp-c2-chart" class="mini-chart mini-chart--temp" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C2 CPU temperature history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="cpu-temp-c2-line" class="chart-line"></path>
+              <circle id="cpu-temp-c2-dot" class="chart-dot" r="2.5" hidden></circle>
             </svg>
           </div>
           <div id="cpu-c3-row" class="trace-row trace-row--c3" data-state="unknown">
@@ -68,6 +80,12 @@
               <path id="cpu-c3-line" class="chart-line"></path>
               <circle id="cpu-c3-dot" class="chart-dot" r="2.5" hidden></circle>
             </svg>
+            <output id="cpu-temp-c3-value" class="trace-temp-value" aria-label="C3 CPU temperature">—</output><span class="trace-unit trace-unit--temp">°C</span>
+            <svg id="cpu-temp-c3-chart" class="mini-chart mini-chart--temp" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C3 CPU temperature history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="cpu-temp-c3-line" class="chart-line"></path>
+              <circle id="cpu-temp-c3-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
           </div>
         </div>
         <footer><span>5 MIN ROLLING</span><span>THREE INDEPENDENT TRACES</span></footer>
@@ -76,7 +94,7 @@
       <article class="metric-card metric-card--gpu" data-metric="gpu" data-state="waiting">
         <header class="metric-heading">
           <span><i aria-hidden="true"></i>GPU LOAD</span>
-          <small>PER NODE · %</small>
+          <small>UTIL % · TEMP °C</small>
         </header>
         <div class="trace-stack" aria-label="Per-node GPU utilization">
           <div id="gpu-c1-row" class="trace-row trace-row--c1" data-state="unknown">
@@ -87,6 +105,12 @@
               <path id="gpu-c1-line" class="chart-line"></path>
               <circle id="gpu-c1-dot" class="chart-dot" r="2.5" hidden></circle>
             </svg>
+            <output id="gpu-temp-c1-value" class="trace-temp-value" aria-label="C1 GPU temperature">—</output><span class="trace-unit trace-unit--temp">°C</span>
+            <svg id="gpu-temp-c1-chart" class="mini-chart mini-chart--temp" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C1 GPU temperature history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="gpu-temp-c1-line" class="chart-line"></path>
+              <circle id="gpu-temp-c1-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
           </div>
           <div id="gpu-c2-row" class="trace-row trace-row--c2" data-state="unknown">
             <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C2</b></span>
@@ -95,6 +119,12 @@
               <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
               <path id="gpu-c2-line" class="chart-line"></path>
               <circle id="gpu-c2-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+            <output id="gpu-temp-c2-value" class="trace-temp-value" aria-label="C2 GPU temperature">—</output><span class="trace-unit trace-unit--temp">°C</span>
+            <svg id="gpu-temp-c2-chart" class="mini-chart mini-chart--temp" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C2 GPU temperature history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="gpu-temp-c2-line" class="chart-line"></path>
+              <circle id="gpu-temp-c2-dot" class="chart-dot" r="2.5" hidden></circle>
             </svg>
           </div>
           <div id="gpu-c3-row" class="trace-row trace-row--c3" data-state="unknown">
@@ -105,6 +135,12 @@
               <path id="gpu-c3-line" class="chart-line"></path>
               <circle id="gpu-c3-dot" class="chart-dot" r="2.5" hidden></circle>
             </svg>
+            <output id="gpu-temp-c3-value" class="trace-temp-value" aria-label="C3 GPU temperature">—</output><span class="trace-unit trace-unit--temp">°C</span>
+            <svg id="gpu-temp-c3-chart" class="mini-chart mini-chart--temp" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C3 GPU temperature history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="gpu-temp-c3-line" class="chart-line"></path>
+              <circle id="gpu-temp-c3-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
           </div>
         </div>
         <footer><span>5 MIN ROLLING</span><span>THREE INDEPENDENT TRACES</span></footer>
@@ -113,7 +149,7 @@
       <article class="metric-card metric-card--ram" data-metric="ram" data-state="waiting">
         <header class="metric-heading">
           <span><i aria-hidden="true"></i>UNIFIED RAM</span>
-          <small>PER NODE · %</small>
+          <small>UTIL % · SOC TEMP °C</small>
         </header>
         <div class="trace-stack" aria-label="Per-node RAM utilization">
           <div id="ram-c1-row" class="trace-row trace-row--c1" data-state="unknown">
@@ -124,6 +160,12 @@
               <path id="ram-c1-line" class="chart-line"></path>
               <circle id="ram-c1-dot" class="chart-dot" r="2.5" hidden></circle>
             </svg>
+            <output id="ram-soc-c1-value" class="trace-temp-value" aria-label="C1 SoC temperature">—</output><span class="trace-unit trace-unit--temp">°C</span>
+            <svg id="ram-soc-c1-chart" class="mini-chart mini-chart--temp" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C1 SoC temperature history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="ram-soc-c1-line" class="chart-line"></path>
+              <circle id="ram-soc-c1-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
           </div>
           <div id="ram-c2-row" class="trace-row trace-row--c2" data-state="unknown">
             <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C2</b></span>
@@ -132,6 +174,12 @@
               <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
               <path id="ram-c2-line" class="chart-line"></path>
               <circle id="ram-c2-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+            <output id="ram-soc-c2-value" class="trace-temp-value" aria-label="C2 SoC temperature">—</output><span class="trace-unit trace-unit--temp">°C</span>
+            <svg id="ram-soc-c2-chart" class="mini-chart mini-chart--temp" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C2 SoC temperature history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="ram-soc-c2-line" class="chart-line"></path>
+              <circle id="ram-soc-c2-dot" class="chart-dot" r="2.5" hidden></circle>
             </svg>
           </div>
           <div id="ram-c3-row" class="trace-row trace-row--c3" data-state="unknown">
@@ -142,9 +190,15 @@
               <path id="ram-c3-line" class="chart-line"></path>
               <circle id="ram-c3-dot" class="chart-dot" r="2.5" hidden></circle>
             </svg>
+            <output id="ram-soc-c3-value" class="trace-temp-value" aria-label="C3 SoC temperature">—</output><span class="trace-unit trace-unit--temp">°C</span>
+            <svg id="ram-soc-c3-chart" class="mini-chart mini-chart--temp" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C3 SoC temperature history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="ram-soc-c3-line" class="chart-line"></path>
+              <circle id="ram-soc-c3-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
           </div>
         </div>
-        <footer><span>5 MIN ROLLING</span><span>THREE INDEPENDENT TRACES</span></footer>
+        <footer><span>5 MIN ROLLING</span><span>SOC TEMP · NO LPDDR SENSOR</span></footer>
       </article>
 
       <article class="metric-card metric-card--tokens" data-metric="tokens" data-state="waiting">
@@ -169,6 +223,32 @@
         <footer>
           <span id="tokens-range">MIN — · MAX —</span>
           <span id="tokens-delta">NOT PER NODE</span>
+        </footer>
+      </article>
+
+      <article id="voice-card" class="metric-card metric-card--voice" data-metric="voice" data-state="waiting">
+        <header class="metric-heading">
+          <span><i aria-hidden="true"></i>VOICE AGENT</span>
+          <small id="voice-state">WAITING</small>
+        </header>
+        <div class="voice-pipeline" role="list" aria-label="Cerberus voice request pipeline">
+          <span id="voice-asr-step" class="voice-step" data-state="unknown" role="listitem"><i aria-hidden="true"></i><b>ASR</b><small id="voice-asr-state">—</small></span>
+          <span id="voice-watchword-step" class="voice-step" data-state="unknown" role="listitem"><i aria-hidden="true"></i><b>WAKE</b><small id="voice-watchword-state">—</small></span>
+          <span id="voice-openclaw-step" class="voice-step" data-state="unknown" role="listitem"><i aria-hidden="true"></i><b>CLAW</b><small id="voice-openclaw-state">—</small></span>
+          <span id="voice-tts-step" class="voice-step" data-state="unknown" role="listitem"><i aria-hidden="true"></i><b>TTS</b><small id="voice-tts-state">—</small></span>
+          <span id="voice-playback-step" class="voice-step" data-state="unknown" role="listitem"><i aria-hidden="true"></i><b>PLAY</b><small id="voice-playback-state">—</small></span>
+        </div>
+        <div class="voice-focus" role="status" aria-live="polite">
+          <strong id="voice-stage">STATUS WAITING</strong>
+          <output id="voice-elapsed" aria-label="Current voice stage duration">—</output>
+        </div>
+        <div class="voice-diagnostics">
+          <p id="voice-detail">Waiting for Cerberus voice heartbeat…</p>
+          <p id="voice-error" aria-live="assertive" hidden></p>
+        </div>
+        <footer>
+          <span id="voice-heartbeat">NO HEARTBEAT</span>
+          <span id="voice-last-event">NO TRIGGER</span>
         </footer>
       </article>
     </main>

@@ -1,5 +1,5 @@
 [Unit]
-Description=Cerebrus 3 always-on local voice assistant
+Description=Cerberus always-on local voice assistant on cerebrus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
 Wants=cerebrus3-openclaw-voice.service cerebrus3-qwen3-asr.service cerebrus3-audio8.service
 Requires=cerebrus3-voice-bridge.service

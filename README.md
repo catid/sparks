@@ -129,9 +129,9 @@ qualitative agent evaluation are in
 - [Container and checkpoint provenance](docs/CONTAINERS.md)
 - [vLLM and DSpark tuning](docs/VLLM_TUNING.md)
 - [Boot, recovery, dashboard, and routine operations](docs/OPERATIONS.md)
-- [Cerebrus 3 rack dashboard](c3_dashboard/README.md)
-- [Cerebrus 3 Audio8 TTS](audio8/README.md)
-- [Cerebrus 3 always-on voice assistant](voice_assistant/README.md)
+- [Cerberus node 3 rack dashboard](c3_dashboard/README.md)
+- [Cerberus node 3 Audio8 TTS](audio8/README.md)
+- [Cerberus node 3 always-on voice assistant](voice_assistant/README.md)
 - [Move the dashboard to a dedicated Linux host](docs/REMOTE_DASHBOARD.md)
 - [Validation and benchmarks](docs/VALIDATION.md)
 - [Installed-file map](docs/INSTALLED_ARTIFACTS.md)
@@ -165,9 +165,9 @@ minutes for weight loading, warm-up, and CUDA-graph capture.
 - `systemd/`, `netplan/`, `dashboard/`, `security/`, `libexec/`: installed
   artifacts plus portable templates
 - `c3_dashboard/`: lightweight three-host collector and 1424x280 rootless-X
-  rack kiosk for Cerebrus 3
+  rack kiosk for Cerberus node 3 (`cerebrus3`)
 - `audio8/`: pinned Audio8 0.6B BF16 TTS container and service wrapper for
-  Cerebrus 3; reference media remains private
+  Cerberus node 3 (`cerebrus3`); reference media remains private
 - `voice_assistant/`: pinned Qwen3-ASR, RAM-only CP900 wake bridge, isolated
   OpenClaw voice agent, and boot-persistent C3 systemd units
 - `deepseek_v4_bench/`: fixed-length realistic streaming benchmark

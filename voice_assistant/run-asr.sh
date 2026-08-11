@@ -87,7 +87,7 @@ exec docker run --rm \
   --env QWEN_ASR_HOST=127.0.0.1 \
   --env "QWEN_ASR_PORT=${port}" \
   --env "QWEN_ASR_LANGUAGE=${QWEN_ASR_LANGUAGE:-en}" \
-  --env "QWEN_ASR_VOCABULARY_PROMPT=${QWEN_ASR_VOCABULARY_PROMPT:-Vocabulary: Cerberus, Cerebrus, Cerebrus One, Cerebrus Two, Cerebrus Three.}" \
+  --env "QWEN_ASR_VOCABULARY_PROMPT=${QWEN_ASR_VOCABULARY_PROMPT:-Vocabulary: Cerberus, Cerberus One, Cerberus Two, Cerberus Three, cerebrus1, cerebrus2, cerebrus3.}" \
   --env "QWEN_ASR_MAX_AUDIO_SECONDS=${QWEN_ASR_MAX_AUDIO_SECONDS:-35}" \
   --env "QWEN_ASR_MAX_NEW_TOKENS=${QWEN_ASR_MAX_NEW_TOKENS:-256}" \
   --volume "${model_dir}:/models/qwen-asr:ro" \

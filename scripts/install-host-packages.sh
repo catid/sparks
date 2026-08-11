@@ -7,8 +7,8 @@ if [[ "${1:-}" != "--install" ]]; then
 This installs the small host-side tool set used by the playbook. It does not
 replace the DGX OS kernel, NVIDIA driver, CUDA, firmware, or Docker packages.
 Common SSH/RDMA/validation tools are installed on both nodes. Nginx is added
-only on Cerebrus 1 (short hostname cerebrus1, or legacy spark1), which owns
-the optional dashboard.
+only on Cerberus node 1 (short hostname cerebrus1, or legacy spark1), which
+owns the optional dashboard.
 
 Review, then run:
 
@@ -60,7 +60,7 @@ fi
 
 echo "Host-side playbook dependencies are installed."
 if ((dashboard_host)); then
-  echo "Cerebrus 1 dashboard dependency installed: nginx"
+  echo "Cerberus node 1 dashboard dependency installed: nginx"
 else
   echo "Nginx was not installed; the dashboard web front end belongs on cerebrus1."
 fi

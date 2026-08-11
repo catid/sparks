@@ -21,7 +21,7 @@ curl --fail-with-body --silent --show-error \
   -o "${temporary}" <<'JSON'
 {
   "model": "audio8/tts-0.6b",
-  "input": "He just started talking in one very long unbroken sentence, while Cerebrus Three watched the cluster and tried not to look too pleased with itself.",
+  "input": "He just started talking in one very long unbroken sentence, while Cerberus Three watched the cluster and tried not to look too pleased with itself.",
   "response_format": "wav",
   "max_new_tokens": 512,
   "temperature": 0.8,

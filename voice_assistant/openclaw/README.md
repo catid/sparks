@@ -1,8 +1,8 @@
-# C3 voice OpenClaw service
+# Cerberus voice OpenClaw service
 
 This directory contains the public, credential-free OpenClaw portion of the
-Cerebrus 3 voice stack. It pins Node `24.15.0` for Linux arm64 and OpenClaw
-`2026.7.1-2`, exposes OpenClaw's Chat Completions endpoint only on
+Cerberus voice stack on host `cerebrus3`. It pins Node `24.15.0` for Linux
+arm64 and OpenClaw `2026.7.1-2`, exposes OpenClaw's Chat Completions endpoint only on
 `127.0.0.1:18789`, and routes `openclaw/voice` to the C1-C2 DeepSeek V4 Flash
 service at `http://cerebrus1:8889/v1`.
 
@@ -14,7 +14,7 @@ keeps answers short enough for TTS and prevents secrets from being spoken.
 
 ## Installation
 
-Run the umbrella installer from the repository checkout on Cerebrus 3:
+Run the umbrella installer from the repository checkout on `cerebrus3`:
 
 ```bash
 voice_assistant/scripts/install-voice-stack.sh verify

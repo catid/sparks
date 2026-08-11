@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small, single-GPU OpenAI-compatible Audio8 TTS server for Cerebrus 3."""
+"""Small, single-GPU OpenAI-compatible Audio8 TTS server for Cerberus node 3."""
 
 from __future__ import annotations
 
@@ -160,7 +160,7 @@ RUNTIME: Audio8Runtime | None = None
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CerebrusAudio8/1"
+    server_version = "CerberusAudio8/1"
 
     def log_message(self, format_string: str, *args: Any) -> None:
         print(f"{self.client_address[0]} {format_string % args}", flush=True)

@@ -3,9 +3,12 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import pathlib
 import struct
 import sys
+import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -55,6 +58,7 @@ class BridgeTestCase(unittest.TestCase):
             "openclaw_timeout_seconds": 900,
             "tts_timeout_seconds": 240,
             "log_transcripts": False,
+            "state_dir": None,
         }
         values.update(overrides)
         return self.module.Settings(**values)
@@ -116,6 +120,49 @@ class VadTests(BridgeTestCase):
         for amplitude in [20] * 15 + [4_000] * 4 + [20] * 35:
             results.append(vad.feed(self.frame(amplitude)))
         self.assertTrue(all(result is None for result in results))
+
+    def test_capture_restores_status_after_rejected_burst_then_continues(self) -> None:
+        class FakeVad:
+            def __init__(self, _settings):
+                self.active_frames = None
+                self.calls = 0
+
+            def feed(self, frame):
+                self.calls += 1
+                if self.calls == 1:
+                    self.active_frames = [frame]
+                    return None
+                if self.calls == 2:
+                    self.active_frames = None
+                    return None
+                if self.calls == 3:
+                    self.active_frames = [frame]
+                    return None
+                self.active_frames = None
+                return b"accepted-pcm"
+
+        class FakeRecorder:
+            def __init__(self, _settings):
+                self.stopped = False
+
+            def read_frame(self):
+                return b"frame"
+
+            def stop(self):
+                self.stopped = True
+
+        bridge = self.module.VoiceBridge(self.settings())
+        bridge.status = mock.Mock(spec=self.module.StatusPublisher)
+        with (
+            mock.patch.object(self.module, "EnergyVad", FakeVad),
+            mock.patch.object(self.module, "Recorder", FakeRecorder),
+            mock.patch.object(bridge, "handle_utterance", return_value=True) as handle,
+        ):
+            self.assertTrue(bridge.capture_one())
+
+        self.assertEqual(bridge.status.speech_detected.call_count, 2)
+        bridge.status.resume_listening.assert_called_once_with()
+        handle.assert_called_once_with(b"accepted-pcm")
 
 
 class ResponseTests(BridgeTestCase):
@@ -246,6 +293,366 @@ class ResponseTests(BridgeTestCase):
         logged = output.getvalue()
         self.assertIn("response truncated for speech", logged)
         self.assertNotIn("private-model-output", logged)
+
+
+class StatusPublisherTests(BridgeTestCase):
+    @staticmethod
+    def read_status(directory: str) -> tuple[dict, bytes]:
+        raw = (pathlib.Path(directory) / "status.json").read_bytes()
+        return json.loads(raw), raw
+
+    def test_atomic_bounded_schema_and_normal_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = self.module.StatusPublisher(directory, heartbeat_seconds=30)
+            publisher.start()
+            first_inode = (pathlib.Path(directory) / "status.json").stat().st_ino
+            publisher.ready()
+            status, raw = self.read_status(directory)
+            second_inode = (pathlib.Path(directory) / "status.json").stat().st_ino
+
+            self.assertNotEqual(first_inode, second_inode)
+            self.assertLessEqual(len(raw), self.module.STATUS_MAX_BYTES)
+            self.assertEqual(status["schema"], 1)
+            self.assertEqual(status["service"], "cerberus-voice")
+            self.assertEqual(status["device"], "Cerberus")
+            self.assertEqual(status["overall"]["state"], "ready")
+            self.assertEqual(status["overall"]["stage"], "listening")
+            self.assertRegex(status["instance_id"], r"^\d+-\d+$")
+            self.assertEqual(status["heartbeat_at"], status["updated_at"])
+            self.assertFalse(list(pathlib.Path(directory).glob("*.tmp")))
+
+            publisher.stop()
+            stopped, _ = self.read_status(directory)
+            self.assertEqual(stopped["overall"]["state"], "stopped")
+            self.assertEqual(stopped["overall"]["stage"], "stopped")
+            self.assertEqual(stopped["wake_word"]["state"], "stopped")
+            self.assertIsNotNone(stopped["stopped_at"])
+
+    def test_heartbeat_advances_without_resetting_stage_start(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = self.module.StatusPublisher(directory, heartbeat_seconds=0.25)
+            publisher.start()
+            publisher.begin_openclaw()
+            before, _ = self.read_status(directory)
+            deadline = time.monotonic() + 1.5
+            after = before
+            while after["sequence"] == before["sequence"] and time.monotonic() < deadline:
+                time.sleep(0.05)
+                after, _ = self.read_status(directory)
+            publisher.stop()
+
+            self.assertGreater(after["sequence"], before["sequence"])
+            self.assertGreater(after["updated_at_epoch"], before["updated_at_epoch"])
+            self.assertEqual(
+                after["overall"]["stage_started_at"],
+                before["overall"]["stage_started_at"],
+            )
+            self.assertEqual(after["openclaw"]["state"], "thinking")
+
+    def test_status_never_contains_private_pipeline_content(self) -> None:
+        private_transcript = "Cerberus PRIVATE SPOKEN COMMAND 91a6"
+        private_answer = "PRIVATE MODEL ANSWER 782b"
+        private_token = "PRIVATE-BEARER-TOKEN-5c0d"
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = self.module.VoiceBridge(
+                self.settings(state_dir=directory, openclaw_token=private_token)
+            )
+            bridge.status.start()
+
+            observed = []
+
+            def at_asr(*_args):
+                current, _ = self.read_status(directory)
+                observed.append(
+                    (
+                        current["overall"]["stage"],
+                        current["wake_word"]["state"],
+                        current["asr"]["state"],
+                    )
+                )
+                return private_transcript
+
+            def at_openclaw(*_args):
+                current, _ = self.read_status(directory)
+                observed.append(
+                    (current["overall"]["stage"], current["openclaw"]["state"])
+                )
+                return private_answer
+
+            def at_synthesis(*_args):
+                current, _ = self.read_status(directory)
+                observed.append(
+                    (
+                        current["overall"]["stage"],
+                        current["tts"]["state"],
+                        current["tts"]["chunk_index"],
+                        current["tts"]["chunk_total"],
+                    )
+                )
+                return b"wav"
+
+            def at_playback(*_args):
+                current, _ = self.read_status(directory)
+                observed.append(
+                    (
+                        current["overall"]["stage"],
+                        current["tts"]["state"],
+                        current["tts"]["chunk_index"],
+                        current["tts"]["chunk_total"],
+                    )
+                )
+
+            with (
+                mock.patch.object(self.module, "transcribe_wav", side_effect=at_asr),
+                mock.patch.object(self.module, "ask_openclaw", side_effect=at_openclaw),
+                mock.patch.object(self.module, "synthesize", side_effect=at_synthesis),
+                mock.patch.object(self.module, "play_wav", side_effect=at_playback),
+            ):
+                self.assertTrue(bridge.handle_utterance(b"pcm"))
+            bridge.status.begin_cooldown()
+            cooldown, _ = self.read_status(directory)
+            bridge.status.finish_tts()
+            bridge.status.ready()
+            status, raw = self.read_status(directory)
+            bridge.status.stop()
+
+            serialized = raw.decode("utf-8")
+            self.assertNotIn(private_transcript, serialized)
+            self.assertNotIn(private_answer, serialized)
+            self.assertNotIn(private_token, serialized)
+            self.assertEqual(
+                observed,
+                [
+                    ("asr", "checking", "processing"),
+                    ("openclaw", "thinking"),
+                    ("tts_synthesis", "synthesizing", 1, 1),
+                    ("tts_playback", "playing", 1, 1),
+                ],
+            )
+            self.assertEqual(cooldown["overall"]["stage"], "cooldown")
+            self.assertEqual(cooldown["tts"]["state"], "cooldown")
+            self.assertEqual(status["wake_word"]["state"], "listening")
+            self.assertIsNotNone(status["wake_word"]["last_trigger_at"])
+            self.assertEqual(status["asr"]["state"], "ok")
+            self.assertEqual(status["openclaw"]["state"], "ok")
+            self.assertEqual(status["tts"]["state"], "ok")
+            self.assertEqual(status["tts"]["chunk_index"], 1)
+            self.assertEqual(status["tts"]["chunk_total"], 1)
+            self.assertIsInstance(status["tts"]["duration_seconds"], float)
+            self.assertIsNone(status["last_error"])
+
+    def test_failure_stage_and_type_are_recorded_without_error_message(self) -> None:
+        private_error = "PRIVATE ERROR BODY f17f"
+        scenarios = {
+            "asr": (
+                {"transcribe_wav": mock.Mock(side_effect=RuntimeError(private_error))},
+                "asr",
+            ),
+            "openclaw": (
+                {
+                    "transcribe_wav": mock.Mock(
+                        return_value="Cerberus private request"
+                    ),
+                    "ask_openclaw": mock.Mock(side_effect=TimeoutError(private_error)),
+                },
+                "openclaw",
+            ),
+            "tts_synthesis": (
+                {
+                    "transcribe_wav": mock.Mock(
+                        return_value="Cerberus private request"
+                    ),
+                    "ask_openclaw": mock.Mock(return_value="private answer"),
+                    "synthesize": mock.Mock(side_effect=ValueError(private_error)),
+                },
+                "tts_synthesis",
+            ),
+            "tts_playback": (
+                {
+                    "transcribe_wav": mock.Mock(
+                        return_value="Cerberus private request"
+                    ),
+                    "ask_openclaw": mock.Mock(return_value="private answer"),
+                    "synthesize": mock.Mock(return_value=b"wav"),
+                    "play_wav": mock.Mock(side_effect=OSError(private_error)),
+                },
+                "tts_playback",
+            ),
+        }
+        for name, (patches, expected_stage) in scenarios.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                bridge = self.module.VoiceBridge(self.settings(state_dir=directory))
+                bridge.status.start()
+                patchers = [mock.patch.object(self.module, key, value) for key, value in patches.items()]
+                for patcher in patchers:
+                    patcher.start()
+                try:
+                    with self.assertRaises(Exception):
+                        bridge.handle_utterance(b"pcm")
+                finally:
+                    for patcher in reversed(patchers):
+                        patcher.stop()
+                status, raw = self.read_status(directory)
+                bridge.status.stop()
+
+                self.assertEqual(status["overall"]["state"], "degraded")
+                self.assertEqual(status["overall"]["stage"], "retry_wait")
+                self.assertEqual(status["last_error"]["stage"], expected_stage)
+                self.assertRegex(status["last_error"]["type"], r"^[A-Za-z_][A-Za-z0-9_]*$")
+                self.assertNotIn(private_error, raw.decode("utf-8"))
+
+    def test_empty_spoken_chunk_set_returns_to_listening(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = self.module.VoiceBridge(self.settings(state_dir=directory))
+            bridge.status.start()
+            with (
+                mock.patch.object(
+                    self.module,
+                    "transcribe_wav",
+                    return_value="Cerberus answer silently",
+                ),
+                mock.patch.object(self.module, "ask_openclaw", return_value="answer"),
+                mock.patch.object(
+                    self.module, "bounded_spoken_chunks", return_value=([], False)
+                ),
+                mock.patch.object(self.module, "synthesize") as synthesize_mock,
+                mock.patch.object(self.module, "play_wav") as playback_mock,
+            ):
+                self.assertFalse(bridge.handle_utterance(b"pcm"))
+            status, _ = self.read_status(directory)
+            bridge.status.stop()
+
+            synthesize_mock.assert_not_called()
+            playback_mock.assert_not_called()
+            self.assertEqual(status["overall"]["state"], "ready")
+            self.assertEqual(status["overall"]["stage"], "listening")
+            self.assertEqual(status["wake_word"]["state"], "listening")
+            self.assertEqual(status["tts"]["state"], "ok")
+            self.assertEqual(status["tts"]["chunk_index"], 0)
+            self.assertEqual(status["tts"]["chunk_total"], 0)
+            self.assertIsNotNone(status["tts"]["completed_at"])
+
+    def test_empty_asr_does_not_hide_or_consume_a_live_arm(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = self.module.VoiceBridge(self.settings(state_dir=directory))
+            bridge.status.start()
+            bridge.status.ready()
+            with (
+                mock.patch.object(
+                    self.module,
+                    "transcribe_wav",
+                    side_effect=["Cerberus", "", "What is the cluster status?"],
+                ),
+                mock.patch.object(self.module, "ask_openclaw", return_value="Healthy."),
+                mock.patch.object(self.module, "synthesize", return_value=b"wav"),
+                mock.patch.object(self.module, "play_wav"),
+            ):
+                self.assertFalse(bridge.handle_utterance(b"wake"))
+                self.assertFalse(bridge.handle_utterance(b"empty"))
+                still_armed, _ = self.read_status(directory)
+                self.assertEqual(still_armed["overall"]["state"], "armed")
+                self.assertEqual(still_armed["wake_word"]["state"], "armed")
+                self.assertIsNotNone(still_armed["wake_word"]["armed_until"])
+                self.assertTrue(bridge.handle_utterance(b"command"))
+            bridge.status.stop()
+
+    def test_failed_asr_retry_can_preserve_a_live_arm(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = self.module.VoiceBridge(self.settings(state_dir=directory))
+            bridge.status.start()
+            bridge.status.ready()
+            with (
+                mock.patch.object(
+                    self.module,
+                    "transcribe_wav",
+                    side_effect=[
+                        "Cerberus",
+                        self.module.urllib.error.URLError("private"),
+                        "Report status",
+                    ],
+                ),
+                mock.patch.object(self.module, "ask_openclaw", return_value="Healthy."),
+                mock.patch.object(self.module, "synthesize", return_value=b"wav"),
+                mock.patch.object(self.module, "play_wav"),
+            ):
+                self.assertFalse(bridge.handle_utterance(b"wake"))
+                with self.assertRaises(self.module.urllib.error.URLError):
+                    bridge.handle_utterance(b"failed-asr")
+                # This is the recovery transition used by run() after its
+                # bounded retry delay.
+                bridge.status.resume_listening()
+                retry_status, _ = self.read_status(directory)
+                self.assertEqual(retry_status["overall"]["state"], "armed")
+                self.assertEqual(retry_status["last_error"]["stage"], "asr")
+                self.assertTrue(bridge.handle_utterance(b"command"))
+                recovered, _ = self.read_status(directory)
+                self.assertIsNone(recovered["last_error"])
+            bridge.status.stop()
+
+    def test_armed_state_expires_in_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = self.module.StatusPublisher(directory, heartbeat_seconds=0.25)
+            publisher.start()
+            publisher.wake_armed(0.05)
+            deadline = time.monotonic() + 1.5
+            status, _ = self.read_status(directory)
+            while status["wake_word"]["state"] == "armed" and time.monotonic() < deadline:
+                time.sleep(0.05)
+                status, _ = self.read_status(directory)
+            publisher.stop()
+            self.assertEqual(status["wake_word"]["state"], "listening")
+            self.assertIsNone(status["wake_word"]["armed_until"])
+
+    def test_relative_state_directory_is_rejected(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "absolute"):
+            self.module.StatusPublisher("relative/status")
+
+    def test_rejected_vad_burst_returns_to_listening_without_losing_arm(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = self.module.StatusPublisher(directory, heartbeat_seconds=30)
+            publisher.start()
+            publisher.ready()
+            publisher.speech_detected()
+            publisher.resume_listening()
+            listening, _ = self.read_status(directory)
+            self.assertEqual(listening["overall"], {
+                "state": "ready",
+                "stage": "listening",
+                "stage_started_at": listening["overall"]["stage_started_at"],
+            })
+            self.assertEqual(listening["wake_word"]["state"], "listening")
+
+            publisher.wake_armed(12)
+            armed_until = self.read_status(directory)[0]["wake_word"]["armed_until"]
+            publisher.speech_detected()
+            publisher.resume_listening()
+            armed, _ = self.read_status(directory)
+            publisher.stop()
+
+            self.assertEqual(armed["overall"]["state"], "armed")
+            self.assertEqual(armed["overall"]["stage"], "listening")
+            self.assertEqual(armed["wake_word"]["state"], "armed")
+            self.assertEqual(armed["wake_word"]["armed_until"], armed_until)
+
+    def test_failure_persists_until_the_same_stage_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = self.module.StatusPublisher(directory, heartbeat_seconds=30)
+            publisher.start()
+            publisher.fail("asr", TimeoutError("private"))
+            publisher.ready()
+            retained, _ = self.read_status(directory)
+            self.assertEqual(retained["last_error"]["stage"], "asr")
+
+            publisher.begin_openclaw()
+            publisher.component_ok("openclaw")
+            unrelated, _ = self.read_status(directory)
+            self.assertEqual(unrelated["last_error"]["stage"], "asr")
+
+            publisher.begin_asr()
+            publisher.component_ok("asr")
+            recovered, _ = self.read_status(directory)
+            publisher.stop()
+            self.assertIsNone(recovered["last_error"])
 
 
 if __name__ == "__main__":

@@ -23,7 +23,9 @@ class EnvironmentValidationTests(unittest.TestCase):
             return validator.parse_environment(path)
 
     def test_rendered_example_satisfies_complete_runtime_contract(self) -> None:
-        validator.validate(self.rendered_example())
+        values = self.rendered_example()
+        validator.validate(values)
+        self.assertEqual(values["C3_DASHBOARD_VOICE_STALE_SECONDS"], "6")
 
     def test_rejects_runtime_restart_loop_and_exposure_settings(self) -> None:
         cases = {
@@ -41,6 +43,18 @@ class EnvironmentValidationTests(unittest.TestCase):
             "remote metrics": (
                 "C3_DASHBOARD_VLLM_METRICS_URL",
                 "http://example.com:8889/metrics",
+            ),
+            "voice status outside runtime": (
+                "C3_DASHBOARD_VOICE_STATUS_PATH",
+                "/home/dashboard/status.json",
+            ),
+            "voice status traversal": (
+                "C3_DASHBOARD_VOICE_STATUS_PATH",
+                "/run/voice/../../etc/shadow",
+            ),
+            "voice staleness too short": (
+                "C3_DASHBOARD_VOICE_STALE_SECONDS",
+                "2",
             ),
         }
         for label, (name, value) in cases.items():

@@ -2,22 +2,26 @@
   "use strict";
 
   const API_URL = "/api/status";
+  const VOICE_API_URL = "/api/voice-status";
   const POLL_MS = 5000;
+  const VOICE_POLL_MS = 750;
   const MAX_HISTORY_POINTS = 60;
   const NODE_SLOTS = [1, 2, 3];
   const AMBIENT_SCENE_MS = 30000;
   const AMBIENT_FRAME_MS = 125;
   const AMBIENT_SCENES = 4;
   const METRICS = {
-    cpu: { field: "cpu_percent", label: "CPU utilization" },
-    gpu: { field: "gpu_percent", label: "GPU utilization" },
-    ram: { field: "ram_percent", label: "RAM utilization" },
+    cpu: { field: "cpu_percent", label: "CPU utilization", temperatureField: "cpu_temperature_c", temperatureId: "cpu-temp", temperatureLabel: "CPU temperature" },
+    gpu: { field: "gpu_percent", label: "GPU utilization", temperatureField: "gpu_temperature_c", temperatureId: "gpu-temp", temperatureLabel: "GPU temperature" },
+    ram: { field: "ram_percent", label: "RAM utilization", temperatureField: "soc_temperature_c", temperatureId: "ram-soc", temperatureLabel: "SoC temperature" },
   };
 
   let pollTimer = null;
+  let voicePollTimer = null;
   let ambientTimer = null;
   let lastPayload = null;
   let lastSuccessMs = null;
+  let voiceLastSuccessMs = null;
 
   const byId = (id) => document.getElementById(id);
 
@@ -95,6 +99,10 @@
         cpu_percent: finiteNumber(host.cpu_percent),
         gpu_percent: finiteNumber(host.gpu_percent),
         ram_percent: finiteNumber(host.ram_percent),
+        cpu_temperature_c: finiteNumber(host.cpu_temperature_c),
+        gpu_temperature_c: finiteNumber(host.gpu_temperature_c),
+        ram_temperature_c: finiteNumber(host.ram_temperature_c),
+        soc_temperature_c: finiteNumber(host.soc_temperature_c),
         ram_used_bytes: finiteNumber(host.ram_used_bytes),
         ram_total_bytes: finiteNumber(host.ram_total_bytes),
         age_seconds: finiteNumber(host.age_seconds),
@@ -140,8 +148,7 @@
     return null;
   }
 
-  function hostMetricSeries(payload, metric, slot) {
-    const field = METRICS[metric].field;
+  function hostFieldSeries(payload, field, slot) {
     const values = payload.history.slice(-MAX_HISTORY_POINTS).map((point) => {
       const host = historyHostAtSlot(point, slot);
       return host ? finiteNumber(host[field]) : null;
@@ -154,6 +161,14 @@
       values[values.length - 1] = current;
     }
     return values;
+  }
+
+  function hostMetricSeries(payload, metric, slot) {
+    return hostFieldSeries(payload, METRICS[metric].field, slot);
+  }
+
+  function hostTemperatureSeries(payload, metric, slot) {
+    return hostFieldSeries(payload, METRICS[metric].temperatureField, slot);
   }
 
   function tokenSeries(payload) {
@@ -239,6 +254,7 @@
   function formatCurrent(value, metric) {
     const number = finiteNumber(value);
     if (number === null) return "—";
+    if (metric === "temperature") return clamp(number, -50, 200).toFixed(0);
     if (metric !== "tokens") return clamp(number, 0, 100).toFixed(0);
     return new Intl.NumberFormat("en-US", {
       maximumFractionDigits: number < 100 ? 1 : 0,
@@ -273,11 +289,344 @@
     });
   }
 
+  function timestampMs(value) {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value) || value < 0) return null;
+      return value < 1e12 ? value * 1000 : value;
+    }
+    const parsed = Date.parse(String(value));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function safeStatusToken(value, fallback) {
+    const token = typeof value === "string" ? value.trim().toLowerCase() : "";
+    return /^[a-z][a-z0-9_.-]{0,63}$/.test(token)
+      ? token
+      : (arguments.length > 1 ? fallback : "unknown");
+  }
+
+  function normalizeVoiceComponent(value) {
+    const source = safeObject(value);
+    const error = safeObject(source.last_error);
+    return {
+      state: safeStatusToken(source.state),
+      started_at: source.started_at || source.started || null,
+      completed_at: source.completed_at || source.completed || null,
+      last_success_at: source.last_success_at || null,
+      duration_seconds: finiteNumber(source.duration_seconds ?? source.duration),
+      elapsed_seconds: finiteNumber(source.elapsed_seconds),
+      chunk_index: finiteNumber(source.chunk_index ?? safeObject(source.progress).current),
+      chunk_total: finiteNumber(source.chunk_total ?? safeObject(source.progress).total),
+      consecutive_failures: finiteNumber(source.consecutive_failures),
+      last_error: error.stage || error.type || error.code ? {
+        stage: safeStatusToken(error.stage),
+        error_type: safeStatusToken(error.error_type ?? error.type ?? error.code),
+        at: error.at || null,
+      } : null,
+    };
+  }
+
+  function normalizeVoiceStatus(raw) {
+    const source = safeObject(raw);
+    const overall = safeObject(source.overall);
+    const stages = safeObject(source.stages);
+    const wake = safeObject(source.watchword || source.wake_word);
+    const activeRequest = safeObject(source.active_request);
+    const lastRequest = safeObject(source.last_request);
+    const lastErrorSource = safeObject(source.last_error);
+    const heartbeat = safeObject(source.heartbeat);
+    const tts = normalizeVoiceComponent(source.tts || stages.tts);
+    const playback = normalizeVoiceComponent(stages.playback || source.playback);
+    const directError = lastErrorSource.stage || lastErrorSource.error_type
+      || lastErrorSource.type || lastErrorSource.code;
+    return {
+      device: "Cerberus",
+      state: safeStatusToken(source.state || overall.state),
+      healthy: source.healthy === true,
+      stage: safeStatusToken(
+        source.stage || overall.stage || overall.phase || activeRequest.stage,
+      ),
+      stage_started_at: source.stage_started_at || overall.stage_started_at
+        || overall.phase_started_at || overall.phase_started || null,
+      stage_elapsed_seconds: finiteNumber(source.stage_elapsed_seconds),
+      updated_at: source.updated_at || heartbeat.at || heartbeat.updated_at || null,
+      age_seconds: finiteNumber(source.age_seconds),
+      stale_after_seconds: finiteNumber(source.stale_after_seconds),
+      status_error: safeStatusToken(source.status_error, null),
+      watchword: {
+        state: safeStatusToken(wake.state),
+        last_triggered_at: wake.last_triggered_at || wake.last_trigger_at || null,
+        armed_until: wake.armed_until || null,
+        armed_remaining_seconds: finiteNumber(wake.armed_remaining_seconds),
+      },
+      asr: normalizeVoiceComponent(source.asr || stages.asr),
+      openclaw: normalizeVoiceComponent(source.openclaw || stages.openclaw),
+      tts,
+      playback,
+      last_error: directError ? {
+        stage: safeStatusToken(lastErrorSource.stage),
+        error_type: safeStatusToken(
+          lastErrorSource.error_type ?? lastErrorSource.type ?? lastErrorSource.code,
+        ),
+        at: lastErrorSource.at || null,
+      } : null,
+      last_request: {
+        result: safeStatusToken(lastRequest.result),
+        failed_stage: safeStatusToken(lastRequest.failed_stage, null),
+        tts_chunks: finiteNumber(lastRequest.tts_chunks),
+      },
+    };
+  }
+
+  function formatVoiceDuration(value) {
+    const seconds = finiteNumber(value);
+    if (seconds === null) return "—";
+    const clamped = Math.max(0, seconds);
+    if (clamped < 10) return `${clamped.toFixed(1)}S`;
+    if (clamped < 60) return `${Math.round(clamped)}S`;
+    const minutes = Math.floor(clamped / 60);
+    const remainder = Math.floor(clamped % 60);
+    return `${minutes}M${String(remainder).padStart(2, "0")}S`;
+  }
+
+  function compactAge(timestamp, nowMs) {
+    const parsed = timestampMs(timestamp);
+    if (parsed === null) return null;
+    const seconds = Math.max(0, (nowMs - parsed) / 1000);
+    if (seconds < 2) return "NOW";
+    if (seconds < 60) return `${Math.floor(seconds)}S AGO`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}M AGO`;
+    return `${Math.floor(seconds / 3600)}H AGO`;
+  }
+
+  function voiceCardState(voice) {
+    if (voice.status_error === "stale" || voice.state === "stale") return "stale";
+    if (["down", "stopped"].includes(voice.state) || voice.status_error) return "down";
+    if (voice.state === "degraded") return "error";
+    if (["starting", "stopping", "unknown"].includes(voice.state)) return "starting";
+    if (voice.state === "armed" || voice.watchword.state === "armed") return "armed";
+    if (voice.state === "busy") return "busy";
+    return "ready";
+  }
+
+  function voiceStep(kind, component, currentStage) {
+    const state = safeStatusToken(component.state);
+    const activeStages = {
+      watchword: ["speech_detected", "watchword"],
+      asr: ["asr"],
+      openclaw: ["openclaw"],
+      tts: ["tts_synthesis"],
+      playback: ["tts_playback", "cooldown"],
+    };
+    const labelMaps = {
+      watchword: {
+        listening: "LISTEN", checking: "CHECK", armed: "ARMED", triggered: "HIT",
+        not_detected: "MISS", stopped: "STOP", unknown: "—",
+      },
+      asr: { idle: "IDLE", processing: "RUN", ok: "OK", error: "FAIL", unknown: "—" },
+      openclaw: { idle: "IDLE", thinking: "THINK", ok: "OK", error: "FAIL", unknown: "—" },
+      tts: {
+        idle: "IDLE", synthesizing: "SYNTH", playing: "DONE", cooldown: "DONE",
+        ok: "OK", error: "FAIL", unknown: "—",
+      },
+      playback: {
+        idle: "IDLE", synthesizing: "WAIT", playing: "PLAY", cooldown: "COOL",
+        ok: "OK", error: "FAIL", unknown: "—",
+      },
+    };
+    let viewState = "idle";
+    if (["error", "failed"].includes(state)) viewState = "error";
+    else if (["stopped", "down"].includes(state)) viewState = "down";
+    else if (kind === "watchword" && state === "armed") viewState = "armed";
+    else if (
+      activeStages[kind].includes(currentStage)
+      && !["ok", "error", "stopped", "down"].includes(state)
+    ) viewState = "active";
+    else if (["checking", "processing", "thinking", "synthesizing", "playing", "cooldown"].includes(state)) viewState = "active";
+    else if (["ok", "triggered"].includes(state)) viewState = "complete";
+    else if (state === "unknown") viewState = "unknown";
+    const waitingForAsr = kind === "watchword" && state === "checking" && currentStage === "asr";
+    if (waitingForAsr) viewState = "idle";
+    const label = waitingForAsr
+      ? "WAIT"
+      : (labelMaps[kind] && labelMaps[kind][state]) || state.slice(0, 6).toUpperCase() || "—";
+    return { state: viewState, label };
+  }
+
+  function voiceViewModel(raw, nowMs) {
+    const voice = normalizeVoiceStatus(raw);
+    const now = finiteNumber(nowMs) ?? Date.now();
+    const state = voiceCardState(voice);
+    const stageLabels = {
+      starting: "STARTING VOICE STACK", listening: "LISTENING FOR CERBERUS",
+      speech_detected: "SPEECH DETECTED", asr: "ASR TRANSCRIBING",
+      watchword: "CHECKING WATCHWORD", openclaw: "OPENCLAW THINKING",
+      tts_synthesis: "TTS SYNTHESIZING", tts_playback: "PLAYING RESPONSE",
+      cooldown: "MIC COOLDOWN", retry_wait: "RETRY WAIT",
+      stopping: "VOICE STACK STOPPING", stopped: "VOICE STACK STOPPED",
+      unknown: "VOICE STATUS UNKNOWN",
+    };
+    const elapsed = voice.stage_elapsed_seconds !== null
+      ? voice.stage_elapsed_seconds
+      : (() => {
+        const started = timestampMs(voice.stage_started_at);
+        const stoppedClock = state === "stale" ? timestampMs(voice.updated_at) : null;
+        const elapsedClock = stoppedClock === null ? now : stoppedClock;
+        return started === null ? null : Math.max(0, (elapsedClock - started) / 1000);
+      })();
+    const synthComponent = { ...voice.tts };
+    const playbackComponent = voice.playback.state !== "unknown"
+      ? { ...voice.playback }
+      : { ...voice.tts, state: "idle" };
+    const ttsFailureStage = voice.last_error ? voice.last_error.stage : null;
+    if (voice.tts.state === "playing") {
+      synthComponent.state = "ok";
+      playbackComponent.state = "playing";
+    } else if (voice.tts.state === "cooldown") {
+      synthComponent.state = "ok";
+      playbackComponent.state = "cooldown";
+    } else if (voice.tts.state === "ok" && voice.tts.chunk_total > 0) {
+      synthComponent.state = "ok";
+      playbackComponent.state = "ok";
+    } else if (voice.tts.state === "error") {
+      if (ttsFailureStage === "tts_playback") {
+        synthComponent.state = "ok";
+        playbackComponent.state = "error";
+      } else {
+        synthComponent.state = "error";
+        playbackComponent.state = "idle";
+      }
+    }
+    if (playbackComponent.chunk_index === null) playbackComponent.chunk_index = voice.tts.chunk_index;
+    if (playbackComponent.chunk_total === null) playbackComponent.chunk_total = voice.tts.chunk_total;
+    const chunks = voice.tts.chunk_index !== null && voice.tts.chunk_total !== null
+      ? `${Math.round(voice.tts.chunk_index)}/${Math.round(voice.tts.chunk_total)}`
+      : null;
+    const durations = [];
+    if (voice.asr.duration_seconds !== null) durations.push(`ASR ${formatVoiceDuration(voice.asr.duration_seconds)}`);
+    if (voice.openclaw.duration_seconds !== null) durations.push(`CLAW ${formatVoiceDuration(voice.openclaw.duration_seconds)}`);
+    if (voice.tts.duration_seconds !== null) durations.push(`TTS ${formatVoiceDuration(voice.tts.duration_seconds)}`);
+    if (chunks) durations.push(`CHUNK ${chunks}`);
+    let detail = durations.join(" · ");
+    if (!detail && voice.watchword.state === "armed") {
+      detail = `ARMED · ${formatVoiceDuration(voice.watchword.armed_remaining_seconds)} LEFT`;
+    }
+    if (state === "down") detail = "VOICE PIPELINE UNAVAILABLE";
+    else if (state === "stale") {
+      const frozenStage = stageLabels[voice.stage] || voice.stage.toUpperCase();
+      detail = `FROZEN AT ${frozenStage}`;
+    } else if (!detail) {
+      detail = state === "ready" ? 'SAY "CERBERUS" TO START' : "PIPELINE TELEMETRY ACTIVE";
+    }
+
+    let error = null;
+    if (voice.status_error) {
+      const statusErrors = {
+        missing: "VOICE BRIDGE DOWN · STATUS FILE MISSING",
+        unreadable: "VOICE STATUS UNREADABLE",
+        malformed: "VOICE STATUS MALFORMED",
+        invalid: "VOICE STATUS INVALID",
+        schema_mismatch: "VOICE STATUS SCHEMA MISMATCH",
+        stale: `HEARTBEAT STALE · ${formatVoiceDuration(voice.age_seconds)}`,
+      };
+      error = statusErrors[voice.status_error] || `VOICE STATUS ${voice.status_error.toUpperCase()}`;
+    } else if (["down", "stopped"].includes(voice.state)) {
+      error = voice.state === "stopped" ? "VOICE BRIDGE STOPPED" : "VOICE BRIDGE DOWN";
+    } else if (voice.last_error) {
+      const errorAge = compactAge(voice.last_error.at, now);
+      error = `LAST FAIL · ${voice.last_error.stage.toUpperCase()} · ${voice.last_error.error_type.toUpperCase()}`;
+      if (errorAge) error += ` · ${errorAge}`;
+    } else if (voice.last_request.failed_stage) {
+      error = `LAST REQUEST FAILED · ${voice.last_request.failed_stage.toUpperCase()}`;
+    }
+    const heartbeatAge = voice.age_seconds !== null
+      ? voice.age_seconds
+      : (() => {
+        const updated = timestampMs(voice.updated_at);
+        return updated === null ? null : Math.max(0, (now - updated) / 1000);
+      })();
+    const lastTrigger = compactAge(voice.watchword.last_triggered_at, now);
+    const stateLabels = {
+      ready: "READY", busy: "BUSY", armed: "ARMED", starting: "STARTING",
+      stale: "STALE", down: "DOWN", error: "ERROR",
+    };
+    return {
+      voice,
+      state,
+      stateLabel: stateLabels[state] || "UNKNOWN",
+      stageLabel: stageLabels[voice.stage] || voice.stage.toUpperCase(),
+      elapsedLabel: formatVoiceDuration(elapsed),
+      detail,
+      error,
+      heartbeatLabel: heartbeatAge === null ? "NO HEARTBEAT" : `HEARTBEAT ${formatVoiceDuration(heartbeatAge)}`,
+      lastEventLabel: lastTrigger ? `TRIGGER ${lastTrigger}` : "NO TRIGGER",
+      steps: {
+        watchword: voiceStep("watchword", voice.watchword, voice.stage),
+        asr: voiceStep("asr", voice.asr, voice.stage),
+        openclaw: voiceStep("openclaw", voice.openclaw, voice.stage),
+        tts: voiceStep("tts", synthComponent, voice.stage),
+        playback: voiceStep("playback", playbackComponent, voice.stage),
+      },
+    };
+  }
+
+  function renderVoice(raw, nowMs) {
+    const model = voiceViewModel(raw, nowMs);
+    const card = byId("voice-card");
+    card.dataset.state = model.state;
+    byId("voice-state").dataset.state = model.state;
+    byId("voice-state").textContent = model.stateLabel;
+    byId("voice-stage").textContent = model.stageLabel;
+    byId("voice-elapsed").textContent = model.elapsedLabel;
+    byId("voice-detail").textContent = model.detail;
+    byId("voice-heartbeat").textContent = model.heartbeatLabel;
+    byId("voice-last-event").textContent = model.lastEventLabel;
+    const error = byId("voice-error");
+    error.hidden = !model.error;
+    error.textContent = model.error || "";
+    for (const [name, step] of Object.entries(model.steps)) {
+      byId(`voice-${name}-step`).dataset.state = step.state;
+      byId(`voice-${name}-state`).textContent = step.label;
+    }
+    card.title = model.error || `${model.stageLabel}; ${model.detail}`;
+    voiceLastSuccessMs = finiteNumber(nowMs) ?? Date.now();
+    return model;
+  }
+
+  function renderVoiceTransportError(error) {
+    const card = byId("voice-card");
+    card.dataset.state = "down";
+    byId("voice-state").dataset.state = "down";
+    byId("voice-state").textContent = "LINK DOWN";
+    byId("voice-stage").textContent = "VOICE STATUS UNREACHABLE";
+    const elapsed = voiceLastSuccessMs === null
+      ? null
+      : Math.max(0, (Date.now() - voiceLastSuccessMs) / 1000);
+    byId("voice-elapsed").textContent = formatVoiceDuration(elapsed);
+    byId("voice-detail").textContent = "CLUSTER TELEMETRY CONTINUES INDEPENDENTLY";
+    const errorOutput = byId("voice-error");
+    errorOutput.hidden = false;
+    errorOutput.textContent = `VOICE API FAILED · ${String(error && error.message ? error.message : error).slice(0, 48)}`;
+    byId("voice-heartbeat").textContent = elapsed === null ? "NO HEARTBEAT" : `LAST GOOD ${formatVoiceDuration(elapsed)}`;
+    for (const name of ["asr", "watchword", "openclaw", "tts", "playback"]) {
+      byId(`voice-${name}-step`).dataset.state = "unknown";
+      byId(`voice-${name}-state`).textContent = "—";
+    }
+  }
+
   function renderNodeMetric(payload, metric, slot) {
     const host = hostAtSlot(payload, slot);
     const value = host ? finiteNumber(host[METRICS[metric].field]) : null;
     const values = hostMetricSeries(payload, metric, slot);
     const paths = sparklinePaths(values, { width: 220, height: 42, padding: 3, min: 0, max: 100 });
+    const temperatureField = METRICS[metric].temperatureField;
+    const temperature = host ? finiteNumber(host[temperatureField]) : null;
+    const temperatureValues = hostTemperatureSeries(payload, metric, slot);
+    const temperaturePaths = sparklinePaths(
+      temperatureValues,
+      { width: 220, height: 42, padding: 3, min: 20, max: 110 },
+    );
     const state = host ? normalizeState(host.state) : "unknown";
     const row = byId(`${metric}-c${slot}-row`);
     const output = byId(`${metric}-c${slot}-value`);
@@ -285,7 +634,10 @@
     const dot = byId(`${metric}-c${slot}-dot`);
 
     row.dataset.state = state;
-    row.title = host && host.error ? host.error : "";
+    const diagnostics = [];
+    if (host && host.error) diagnostics.push(host.error);
+    if (host && temperature === null) diagnostics.push(`C${slot} ${METRICS[metric].temperatureLabel.toLowerCase()} is unavailable.`);
+    row.title = diagnostics.join(" ");
     output.textContent = formatCurrent(value, metric);
     output.dataset.available = value === null ? "false" : "true";
     byId(`${metric}-c${slot}-line`).setAttribute("d", paths.line);
@@ -300,6 +652,25 @@
         ? `C${slot} ${METRICS[metric].label} is unavailable`
         : `C${slot} ${METRICS[metric].label}, current ${formatCurrent(value, metric)} percent`,
     );
+    const temperatureId = METRICS[metric].temperatureId;
+    const temperatureOutput = byId(`${temperatureId}-c${slot}-value`);
+    const temperatureChart = byId(`${temperatureId}-c${slot}-chart`);
+    const temperatureDot = byId(`${temperatureId}-c${slot}-dot`);
+    temperatureOutput.textContent = formatCurrent(temperature, "temperature");
+    temperatureOutput.dataset.available = temperature === null ? "false" : "true";
+    byId(`${temperatureId}-c${slot}-line`).setAttribute("d", temperaturePaths.line);
+    temperatureDot.hidden = temperature === null || temperaturePaths.latest === null;
+    if (temperaturePaths.latest) {
+      temperatureDot.setAttribute("cx", temperaturePaths.latest.x.toFixed(2));
+      temperatureDot.setAttribute("cy", temperaturePaths.latest.y.toFixed(2));
+    }
+    temperatureChart.setAttribute(
+      "aria-label",
+      temperature === null
+        ? `C${slot} ${METRICS[metric].temperatureLabel} is unavailable`
+        : `C${slot} ${METRICS[metric].temperatureLabel}, current ${formatCurrent(temperature, "temperature")} degrees Celsius`,
+    );
+    row.dataset.temperatureAvailable = temperature === null ? "false" : "true";
     return value !== null;
   }
 
@@ -425,7 +796,7 @@
       message = "WAITING FOR PER-NODE TELEMETRY";
     }
     byId("connection-message").textContent = message;
-    document.title = state === "offline" ? "OFFLINE · Cerebrus Cluster Pulse" : "Cerebrus Cluster Pulse";
+    document.title = state === "offline" ? "OFFLINE · Cerberus Cluster Pulse" : "Cerberus Cluster Pulse";
     lastPayload = payload;
     lastSuccessMs = now;
     return payload;
@@ -439,7 +810,7 @@
     const elapsed = lastSuccessMs === null ? null : Math.max(0, Math.floor((Date.now() - lastSuccessMs) / 1000));
     byId("sample-age").textContent = elapsed === null ? "NO SAMPLE" : `${elapsed}S AGO`;
     byId("connection-message").textContent = `STATUS API UNAVAILABLE · ${String(error && error.message ? error.message : error).slice(0, 90)}`;
-    document.title = "LINK LOST · Cerebrus Cluster Pulse";
+    document.title = "LINK LOST · Cerberus Cluster Pulse";
   }
 
   function ambientSceneAt(elapsedMs) {
@@ -532,11 +903,11 @@
     tick();
   }
 
-  async function fetchStatus() {
+  async function fetchJson(url, timeoutMs) {
     const controller = typeof AbortController === "function" ? new AbortController() : null;
-    const timeout = controller ? setTimeout(() => controller.abort(), 4200) : null;
+    const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
-      const response = await fetch(API_URL, {
+      const response = await fetch(url, {
         cache: "no-store",
         headers: { Accept: "application/json" },
         signal: controller ? controller.signal : undefined,
@@ -546,6 +917,14 @@
     } finally {
       if (timeout !== null) clearTimeout(timeout);
     }
+  }
+
+  function fetchStatus() {
+    return fetchJson(API_URL, 4200);
+  }
+
+  function fetchVoiceStatus() {
+    return fetchJson(VOICE_API_URL, 600);
   }
 
   async function poll() {
@@ -560,14 +939,29 @@
     }
   }
 
+  async function pollVoice() {
+    const started = Date.now();
+    try {
+      renderVoice(await fetchVoiceStatus(), Date.now());
+    } catch (error) {
+      renderVoiceTransportError(error);
+    } finally {
+      const elapsed = Date.now() - started;
+      voicePollTimer = setTimeout(pollVoice, Math.max(100, VOICE_POLL_MS - elapsed));
+    }
+  }
+
   function start() {
     if (pollTimer !== null) clearTimeout(pollTimer);
+    if (voicePollTimer !== null) clearTimeout(voicePollTimer);
     startAmbient();
     poll();
+    pollVoice();
   }
 
   global.C3DashboardUI = {
     POLL_MS,
+    VOICE_POLL_MS,
     MAX_HISTORY_POINTS,
     AMBIENT_SCENE_MS,
     finiteNumber,
@@ -576,6 +970,7 @@
     throughputViewState,
     normalizePayload,
     hostMetricSeries,
+    hostTemperatureSeries,
     tokenSeries,
     niceCeiling,
     sparklinePaths,
@@ -583,6 +978,12 @@
     formatCurrent,
     formatCompact,
     sampleAgeSeconds,
+    normalizeVoiceStatus,
+    formatVoiceDuration,
+    voiceStep,
+    voiceViewModel,
+    renderVoice,
+    renderVoiceTransportError,
     inferredClusterState,
     ambientSceneAt,
     burnInOffset,

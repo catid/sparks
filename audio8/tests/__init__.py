@@ -1,1 +1,1 @@
-"""Offline tests for the Cerebrus 3 Audio8 service."""
+"""Offline tests for the Cerberus node 3 Audio8 service."""

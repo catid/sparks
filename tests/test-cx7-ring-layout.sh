@@ -118,7 +118,7 @@ model_sync_output="$(
 /usr/bin/grep -Fq '@cerebrus2:' <<<"${model_sync_output}"
 /usr/bin/grep -Fq 'rails=192.168.0.2 192.168.1.2' <<<"${model_sync_output}"
 
-# Production TP2 remains pinned to the direct Cerebrus 1 <-> Cerebrus 2 edge
+# Production TP2 remains pinned to the direct Cerberus node 1 <-> node 2 edge
 # and must never acquire a dependency on the C3 ring selector.
 /usr/bin/grep -Fq -- '--check-once --scope tp2' \
   "${repo_root}/dspark_mia/bin/preflight.sh"

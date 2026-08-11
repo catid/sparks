@@ -37,7 +37,7 @@ assert_nginx_package() {
 
 run_host_package_install cerebrus1 "${test_root}/cerebrus1-packages.out"
 assert_nginx_package yes
-grep -Fq 'Cerebrus 1 dashboard dependency installed: nginx' \
+grep -Fq 'Cerberus node 1 dashboard dependency installed: nginx' \
   "${test_root}/cerebrus1-packages.out"
 
 run_host_package_install spark1 "${test_root}/spark1-packages.out"
@@ -74,4 +74,4 @@ set -e
 grep -Fq 'Install the cluster dashboard on cerebrus1 (legacy spark1).' \
   <<<"${rejected_output}"
 
-echo "Cerebrus 1 installer compatibility tests passed."
+echo "Cerberus node 1 installer compatibility tests passed."

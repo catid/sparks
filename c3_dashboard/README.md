@@ -1,12 +1,21 @@
-# Cerebrus 3 boot dashboard
+# Cerberus C3 boot dashboard
 
-This directory contains the dedicated 1424×280 status display for Cerebrus 3.
+This directory contains the dedicated 1424×280 status display for Cerberus C3.
 It is independent of the larger two-node operator dashboard in `dashboard/`.
-The HTTP collector samples Cerebrus 1, 2, and 3 every five seconds; the local
+The HTTP collector samples Cerberus C1, C2, and C3 every five seconds; the local
 screen shows separate current and rolling C1/C2/C3 CPU, GPU, and unified-RAM
-traces. The token panel is deliberately different: vLLM exposes one
+utilization traces with companion thermal plots. CPU temperature is the
+hottest named GB10 cluster sensor and GPU temperature comes from NVIDIA SMI.
+The RAM card's companion is explicitly labelled `SOC TEMP`; it is not presented
+as RAM temperature. The footer notes that current hardware exposes no dedicated
+LPDDR5X sensor, while the API retains a truthful null RAM-temperature field.
+The token panel is deliberately different: vLLM exposes one
 cluster-wide output counter at the C1 API, so that panel is labelled as a
 C1+C2 API aggregate and never invents per-node token attribution.
+The fifth panel follows the local Cerberus voice request through ASR,
+watchword listening/arming/classification, OpenClaw thinking, TTS synthesis, playback, and
+cooldown. It shows stage timing, TTS chunk progress, heartbeat freshness, and
+the sanitized type/stage of the last failure.
 
 The fixed 1424x280 view includes a dependency-free, 178x35 pixel canvas behind
 the telemetry. Four inexpensive software-rendered scenes rotate every 30
@@ -35,7 +44,7 @@ DRM descriptor on a headless boot whose foreground console is still VT 1.
 
 ## Verified C3 runtime
 
-A read-only audit on Cerebrus 3 found Ubuntu 24.04, systemd 255, Xorg 21.1.12,
+A read-only audit on Cerberus C3 found Ubuntu 24.04, systemd 255, Xorg 21.1.12,
 GTK 4.14.5, and WebKitGTK 2.52.3. The required `startx`, `xinit`, `xauth`,
 `mcookie`, `xrandr`, `xset`, `dbus-run-session`, Python GI, GTK4, and WebKit
 6.0 components are already installed. No package installation is part of this
@@ -69,7 +78,7 @@ is not required at runtime.
 
 ## Install on C3
 
-Sync this checkout to Cerebrus 3, then run there as the intended runtime user:
+Sync this checkout to Cerberus C3, then run there as the intended runtime user:
 
 ```bash
 c3_dashboard/scripts/install.sh install
@@ -105,10 +114,11 @@ c3_dashboard/scripts/install.sh start --replace-environment
 ```
 
 The environment is installed root-owned with mode 0600. Its defaults pin the
-five-second interval, three Cerebrus host aliases, C1's vLLM metrics URL, the
-local 9763 port, the existing cluster SSH key, C3's existing `known_hosts`, and
-the native panel mode. Host-key entries still need to be verified through a
-trusted channel before unattended use.
+five-second interval, the three historical `cerebrus1`-`cerebrus3` DNS aliases,
+C1's vLLM metrics URL, the local 9763 port, the existing cluster SSH key, C3's
+existing `known_hosts`, the voice heartbeat under `/run`, and the native panel
+mode. Host-key entries still need to be verified through a trusted channel
+before unattended use.
 
 ## Boot and failure behavior
 
@@ -154,7 +164,19 @@ systemctl status dgx-spark-c3-dashboard.service dgx-spark-c3-kiosk.service
 journalctl -u dgx-spark-c3-dashboard.service -u dgx-spark-c3-kiosk.service \
   -n 100 --no-pager
 curl -fsS http://127.0.0.1:9763/api/status | jq .
+curl -fsS http://127.0.0.1:9763/api/voice-status | jq .
 ```
+
+The voice bridge atomically updates
+`/run/cerebrus3-voice-bridge/status.json` every two seconds and at every stage
+transition. The dashboard reads it without following symlinks, caps it at 32
+KiB, accepts only schema version 1 for `cerberus-voice`, and exposes only a
+fixed operational-field allowlist. Transcripts, requests, replies, API tokens,
+and raw exception messages are neither read into nor returned by the dashboard.
+Three missed two-second heartbeats mark the voice state stale after six seconds.
+The voice panel polls its dedicated endpoint every 750 ms, independently of
+the five-second SSH/metrics collector. A voice heartbeat or endpoint failure
+therefore cannot mark the cluster telemetry offline.
 
 The kiosk logs the selected XRandR output and native mode. If more than one
 display is attached, set `C3_KIOSK_OUTPUT` in the live environment to the exact

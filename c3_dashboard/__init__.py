@@ -1,1 +1,1 @@
-"""Cerebrus 3 kiosk dashboard."""
+"""Cerberus C3 kiosk dashboard."""

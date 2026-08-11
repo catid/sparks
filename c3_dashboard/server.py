@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small, read-only cluster metrics server for the Cerebrus 3 kiosk.
+"""Small, read-only cluster metrics server for the Cerberus kiosk.
 
 The collector has no third-party dependencies.  It samples the local host
 directly, samples the other configured hosts over the existing cluster SSH
@@ -12,11 +12,13 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import copy
+import datetime
 import json
 import math
 import os
 import re
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -34,7 +36,13 @@ DEFAULT_NODES = ("cerebrus1", "cerebrus2", "cerebrus3")
 DEFAULT_INTERVAL_SECONDS = 5.0
 DEFAULT_PORT = 9763
 MAX_METRICS_BYTES = 4 * 1024 * 1024
+MAX_VOICE_STATUS_BYTES = 32 * 1024
+DEFAULT_VOICE_STATUS_PATH = "/run/cerebrus3-voice-bridge/status.json"
+DEFAULT_VOICE_STALE_SECONDS = 6.0
+MAX_STATUS_TIMESTAMP = 253_402_300_799.0  # 9999-12-31T23:59:59Z
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+STATUS_TOKEN_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+GB10_CPU_THERMAL_ZONES = frozenset({"TS0E", "TS0P", "TS1E", "TS1P"})
 PROM_SAMPLE = re.compile(
     r"^(?P<name>[A-Za-z_:][A-Za-z0-9_:]*)"
     r"(?:\{[^}]*\})?\s+"
@@ -84,10 +92,31 @@ awk '/^MemTotal:/ { total = $2 }
          printf "MEMORY=%.0f,%.0f\n", total, available
      }' /proc/meminfo
 if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=utilization.gpu \
+  nvidia-smi --query-gpu=utilization.gpu,temperature.gpu \
     --format=csv,noheader,nounits 2>/dev/null |
     sed 's/^/GPU=/' || true
 fi
+for zone in /sys/class/thermal/thermal_zone*; do
+  [ -r "$zone/device/path" ] && [ -r "$zone/temp" ] || continue
+  thermal_path=$(cat "$zone/device/path" 2>/dev/null || true)
+  thermal_value=$(cat "$zone/temp" 2>/dev/null || true)
+  [ -n "$thermal_path" ] && [ -n "$thermal_value" ] &&
+    printf 'THERMAL=%s,%s\n' "$thermal_path" "$thermal_value"
+done
+for hwmon in /sys/class/hwmon/hwmon*; do
+  [ -r "$hwmon/name" ] || continue
+  driver=$(cat "$hwmon/name" 2>/dev/null || true)
+  case "$driver" in
+    jc42|spd5118) ;;
+    *) continue ;;
+  esac
+  for input in "$hwmon"/temp*_input; do
+    [ -r "$input" ] || continue
+    thermal_value=$(cat "$input" 2>/dev/null || true)
+    [ -n "$thermal_value" ] &&
+      printf 'THERMAL=MEMORY,%s\n' "$thermal_value"
+  done
+done
 """
 
 
@@ -107,6 +136,22 @@ def percent(value: float | None) -> float | None:
     if value is None:
         return None
     return round(min(100.0, max(0.0, value)), 1)
+
+
+def celsius(value: Any) -> float | None:
+    """Accept only physically plausible direct Celsius sensor readings."""
+    parsed = finite_float(value)
+    if parsed is None or not -20 <= parsed <= 150:
+        return None
+    return round(parsed, 1)
+
+
+def millidegree_c(value: Any) -> float | None:
+    """Convert a plausible Linux thermal/hwmon millidegree value."""
+    parsed = finite_float(value)
+    if parsed is None or not -20_000 <= parsed <= 150_000:
+        return None
+    return round(parsed / 1000, 1)
 
 
 def canonical_host(host: str) -> str:
@@ -132,10 +177,18 @@ def parse_probe(text: str) -> dict[str, Any]:
         "cpu_total": None,
         "cpu_idle": None,
         "gpu_percent": None,
+        "gpu_temperature_c": None,
+        "cpu_temperature_c": None,
+        "soc_temperature_c": None,
+        "ram_temperature_c": None,
+        "memory_temperature_c": None,
+        "memory_temperature_sensor_available": False,
         "ram_total_bytes": None,
         "ram_available_bytes": None,
     }
     gpu_values: list[float] = []
+    gpu_temperatures: list[float] = []
+    thermal_samples: dict[str, list[float]] = defaultdict(list)
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if line.startswith("HOSTNAME="):
@@ -162,11 +215,52 @@ def parse_probe(text: str) -> dict[str, Any]:
                     result["ram_total_bytes"] = int(total_kib * 1024)
                     result["ram_available_bytes"] = int(available_kib * 1024)
         elif line.startswith("GPU="):
-            value = finite_float(line.split("=", 1)[1].strip())
+            fields = line.split("=", 1)[1].split(",")
+            value = finite_float(fields[0].strip())
             if value is not None and 0 <= value <= 100:
                 gpu_values.append(value)
+            if len(fields) >= 2:
+                temperature = celsius(fields[1].strip())
+                if temperature is not None:
+                    gpu_temperatures.append(temperature)
+        elif line.startswith("THERMAL="):
+            fields = line.split("=", 1)[1].rsplit(",", 1)
+            if len(fields) != 2:
+                continue
+            name = fields[0].rsplit(".", 1)[-1].upper()
+            temperature = millidegree_c(fields[1])
+            if temperature is not None and name in {
+                *GB10_CPU_THERMAL_ZONES,
+                "TSOC",
+                "TGPU",
+                "MEMORY",
+            }:
+                thermal_samples[name].append(temperature)
     if gpu_values:
         result["gpu_percent"] = percent(fmean(gpu_values))
+    if gpu_temperatures:
+        # A Spark has one GB10 GPU, but max remains the safe definition if a
+        # future nvidia-smi exposes more than one temperature row.
+        result["gpu_temperature_c"] = max(gpu_temperatures)
+    elif thermal_samples.get("TGPU"):
+        result["gpu_temperature_c"] = max(thermal_samples["TGPU"])
+
+    cpu_temperatures = [
+        value
+        for name in GB10_CPU_THERMAL_ZONES
+        for value in thermal_samples.get(name, ())
+    ]
+    if cpu_temperatures:
+        result["cpu_temperature_c"] = max(cpu_temperatures)
+    if thermal_samples.get("TSOC"):
+        result["soc_temperature_c"] = max(thermal_samples["TSOC"])
+    if thermal_samples.get("MEMORY"):
+        memory_temperature = max(thermal_samples["MEMORY"])
+        # Both names are emitted deliberately: RAM matches the utilization
+        # field/UI language, while memory is the hardware-neutral API name.
+        result["ram_temperature_c"] = memory_temperature
+        result["memory_temperature_c"] = memory_temperature
+        result["memory_temperature_sensor_available"] = True
     return result
 
 
@@ -239,6 +333,296 @@ def fetch_text(url: str, timeout: float) -> str:
     if len(body) > MAX_METRICS_BYTES:
         raise OSError("metrics response exceeded size limit")
     return body.decode("utf-8", "replace")
+
+
+def timestamp_epoch(value: Any) -> float | None:
+    """Parse an epoch or ISO-8601 timestamp without accepting booleans/NaN."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        parsed = finite_float(value)
+        return (
+            parsed
+            if parsed is not None and 0 <= parsed <= MAX_STATUS_TIMESTAMP
+            else None
+        )
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    numeric = finite_float(text)
+    if numeric is not None:
+        return numeric if 0 <= numeric <= MAX_STATUS_TIMESTAMP else None
+    try:
+        parsed_datetime = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed_datetime.tzinfo is None:
+        parsed_datetime = parsed_datetime.replace(tzinfo=datetime.timezone.utc)
+    parsed = finite_float(parsed_datetime.timestamp())
+    return (
+        parsed
+        if parsed is not None and 0 <= parsed <= MAX_STATUS_TIMESTAMP
+        else None
+    )
+
+
+def status_token(value: Any, default: str = "unknown") -> str:
+    """Return a bounded, display-safe status token, never arbitrary content."""
+    if not isinstance(value, str):
+        return default
+    token = value.strip()
+    return token.lower() if STATUS_TOKEN_PATTERN.fullmatch(token) else default
+
+
+def status_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def bounded_duration(value: Any) -> float | None:
+    parsed = finite_float(value)
+    if parsed is None or not 0 <= parsed <= 86_400:
+        return None
+    return round(parsed, 2)
+
+
+class VoiceStatusReader:
+    """Read and normalize the bridge heartbeat without exposing voice content."""
+
+    ACTIVE_COMPONENT_STATES = frozenset(
+        {"processing", "thinking", "synthesizing", "playing", "cooldown"}
+    )
+
+    def __init__(self, path: str, stale_after_seconds: float) -> None:
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            raise ValueError("voice status path must be absolute")
+        self.path = candidate
+        self.stale_after_seconds = max(5.0, stale_after_seconds)
+
+    def _empty(self, state: str, error_code: str | None) -> dict[str, Any]:
+        component = {
+            "state": "unknown",
+            "started_at": None,
+            "completed_at": None,
+            "last_success_at": None,
+            "duration_seconds": None,
+            "elapsed_seconds": None,
+        }
+        return {
+            "schema": 1,
+            "service": "cerberus-voice",
+            "device": "Cerberus",
+            "state": state,
+            "healthy": False,
+            "stage": "unknown",
+            "stage_started_at": None,
+            "stage_elapsed_seconds": None,
+            "updated_at": None,
+            "age_seconds": None,
+            "stale_after_seconds": self.stale_after_seconds,
+            "pid": None,
+            "sequence": None,
+            "watchword": {
+                "state": "unknown",
+                "last_triggered_at": None,
+                "armed_until": None,
+                "armed_remaining_seconds": None,
+            },
+            "asr": dict(component),
+            "openclaw": dict(component),
+            "tts": {**component, "chunk_index": None, "chunk_total": None},
+            "last_error": None,
+            "status_error": error_code,
+        }
+
+    def _read_json(self) -> tuple[dict[str, Any], float]:
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(self.path, flags)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("not_regular")
+            if metadata.st_size > MAX_VOICE_STATUS_BYTES:
+                raise ValueError("too_large")
+            chunks: list[bytes] = []
+            remaining = MAX_VOICE_STATUS_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(descriptor, min(8192, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            if len(payload) > MAX_VOICE_STATUS_BYTES:
+                raise ValueError("too_large")
+            decoded = json.loads(payload.decode("utf-8"))
+            if not isinstance(decoded, dict):
+                raise ValueError("not_object")
+            return decoded, metadata.st_mtime
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _public_timestamp(value: Any) -> str | None:
+        parsed = timestamp_epoch(value)
+        return utc_timestamp(parsed) if parsed is not None else None
+
+    def _component(
+        self,
+        raw: Any,
+        now: float,
+        *,
+        include_chunks: bool = False,
+    ) -> dict[str, Any]:
+        source = status_mapping(raw)
+        started = timestamp_epoch(source.get("started_at"))
+        completed = timestamp_epoch(source.get("completed_at"))
+        last_success = timestamp_epoch(source.get("last_success_at"))
+        state = status_token(source.get("state"))
+        duration = bounded_duration(source.get("duration_seconds"))
+        elapsed = None
+        if state in self.ACTIVE_COMPONENT_STATES and started is not None:
+            elapsed = round(max(0.0, now - started), 1)
+        elif duration is not None:
+            elapsed = duration
+        result: dict[str, Any] = {
+            "state": state,
+            "started_at": utc_timestamp(started) if started is not None else None,
+            "completed_at": utc_timestamp(completed) if completed is not None else None,
+            "last_success_at": (
+                utc_timestamp(last_success) if last_success is not None else None
+            ),
+            "duration_seconds": duration,
+            "elapsed_seconds": elapsed,
+        }
+        if include_chunks:
+            chunk_index = source.get("chunk_index")
+            chunk_total = source.get("chunk_total")
+            result["chunk_index"] = (
+                chunk_index
+                if isinstance(chunk_index, int)
+                and not isinstance(chunk_index, bool)
+                and 0 <= chunk_index <= 999
+                else None
+            )
+            result["chunk_total"] = (
+                chunk_total
+                if isinstance(chunk_total, int)
+                and not isinstance(chunk_total, bool)
+                and 0 <= chunk_total <= 999
+                else None
+            )
+        return result
+
+    def read(self, now: float | None = None) -> dict[str, Any]:
+        now = time.time() if now is None else now
+        try:
+            raw, modified_at = self._read_json()
+        except FileNotFoundError:
+            return self._empty("down", "missing")
+        except PermissionError:
+            return self._empty("down", "unreadable")
+        except json.JSONDecodeError:
+            return self._empty("down", "malformed")
+        except (OSError, UnicodeError, ValueError):
+            return self._empty("down", "invalid")
+
+        schema = raw.get("schema")
+        if (
+            isinstance(schema, bool)
+            or schema != 1
+            or raw.get("service") != "cerberus-voice"
+        ):
+            return self._empty("down", "schema_mismatch")
+
+        overall = status_mapping(raw.get("overall"))
+        wake_word = status_mapping(raw.get("wake_word"))
+        updated = timestamp_epoch(raw.get("updated_at_epoch"))
+        if updated is None:
+            updated = timestamp_epoch(raw.get("updated_at"))
+        if updated is None:
+            updated = modified_at
+        if updated > now + 5.0:
+            return self._empty("down", "invalid")
+        age = max(0.0, now - updated)
+        state = status_token(overall.get("state"))
+        stage = status_token(overall.get("stage"))
+        stage_started = timestamp_epoch(overall.get("stage_started_at"))
+        stale = age > self.stale_after_seconds
+        status_clock = updated if stale else now
+        healthy = state in {"ready", "busy", "armed"} and not stale
+
+        armed_until = timestamp_epoch(wake_word.get("armed_until"))
+        last_triggered = timestamp_epoch(wake_word.get("last_trigger_at"))
+        last_error_source = status_mapping(raw.get("last_error"))
+        last_error = None
+        if last_error_source:
+            error_stage = status_token(last_error_source.get("stage"))
+            error_type = status_token(last_error_source.get("type"))
+            error_at = timestamp_epoch(last_error_source.get("at"))
+            last_error = {
+                "stage": error_stage,
+                "error_type": error_type,
+                "at": utc_timestamp(error_at) if error_at is not None else None,
+            }
+
+        pid = raw.get("pid")
+        sequence = raw.get("sequence")
+        return {
+            "schema": 1,
+            "service": "cerberus-voice",
+            "device": "Cerberus",
+            "state": "stale" if stale else state,
+            "healthy": healthy,
+            "stage": stage,
+            "stage_started_at": (
+                utc_timestamp(stage_started) if stage_started is not None else None
+            ),
+            "stage_elapsed_seconds": (
+                round(max(0.0, status_clock - stage_started), 1)
+                if stage_started is not None
+                else None
+            ),
+            "updated_at": utc_timestamp(updated),
+            "age_seconds": round(age, 1),
+            "stale_after_seconds": self.stale_after_seconds,
+            "pid": (
+                pid
+                if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+                else None
+            ),
+            "sequence": (
+                sequence
+                if isinstance(sequence, int)
+                and not isinstance(sequence, bool)
+                and sequence >= 0
+                else None
+            ),
+            "watchword": {
+                "state": status_token(wake_word.get("state")),
+                "last_triggered_at": (
+                    utc_timestamp(last_triggered)
+                    if last_triggered is not None
+                    else None
+                ),
+                "armed_until": (
+                    utc_timestamp(armed_until) if armed_until is not None else None
+                ),
+                "armed_remaining_seconds": (
+                    round(max(0.0, armed_until - status_clock), 1)
+                    if armed_until is not None
+                    else None
+                ),
+            },
+            "asr": self._component(raw.get("asr"), status_clock),
+            "openclaw": self._component(raw.get("openclaw"), status_clock),
+            "tts": self._component(
+                raw.get("tts"), status_clock, include_chunks=True
+            ),
+            "last_error": last_error,
+            "status_error": "stale" if stale else None,
+        }
 
 
 class ThroughputTracker:
@@ -423,6 +807,8 @@ class Collector:
         metrics_fetcher: Callable[[str, float], str] = fetch_text,
         ssh_key: str | None = None,
         known_hosts: str | None = None,
+        voice_status_path: str = DEFAULT_VOICE_STATUS_PATH,
+        voice_stale_after_seconds: float = DEFAULT_VOICE_STALE_SECONDS,
     ) -> None:
         self.nodes = validate_nodes(nodes)
         self.interval = max(1.0, interval)
@@ -430,6 +816,9 @@ class Collector:
         self.history_points = max(2, history_points)
         self.host_prober = host_prober or HostProber(ssh_key, known_hosts)
         self.metrics_fetcher = metrics_fetcher
+        self.voice_status_reader = VoiceStatusReader(
+            voice_status_path, voice_stale_after_seconds
+        )
         self.throughput_tracker = ThroughputTracker(
             # Keep endpoint details (including any future credentials) out of
             # the public status payload.  The exact Prometheus metric remains
@@ -452,6 +841,12 @@ class Collector:
                 "cpu_percent": None,
                 "gpu_percent": None,
                 "ram_percent": None,
+                "cpu_temperature_c": None,
+                "gpu_temperature_c": None,
+                "soc_temperature_c": None,
+                "ram_temperature_c": None,
+                "memory_temperature_c": None,
+                "memory_temperature_sensor_available": False,
                 "ram_used_bytes": None,
                 "ram_total_bytes": None,
                 "sampled_at": None,
@@ -473,9 +868,24 @@ class Collector:
                 "cpu_percent": None,
                 "gpu_percent": None,
                 "ram_percent": None,
-                "sampled_hosts": {"cpu": 0, "gpu": 0, "ram": 0},
+                "cpu_temperature_c": None,
+                "gpu_temperature_c": None,
+                "soc_temperature_c": None,
+                "ram_temperature_c": None,
+                "memory_temperature_c": None,
+                "sampled_hosts": {
+                    "cpu": 0,
+                    "gpu": 0,
+                    "ram": 0,
+                    "cpu_temperature": 0,
+                    "gpu_temperature": 0,
+                    "soc_temperature": 0,
+                    "ram_temperature": 0,
+                    "memory_temperature": 0,
+                },
             },
             "throughput": self.throughput_tracker._base(time.time()),
+            "voice_agent": self.voice_status_reader.read(time.time()),
             "history": [],
         }
 
@@ -502,6 +912,12 @@ class Collector:
                 "cpu_percent": None,
                 "gpu_percent": None,
                 "ram_percent": None,
+                "cpu_temperature_c": None,
+                "gpu_temperature_c": None,
+                "soc_temperature_c": None,
+                "ram_temperature_c": None,
+                "memory_temperature_c": None,
+                "memory_temperature_sensor_available": False,
                 "ram_used_bytes": None,
                 "ram_total_bytes": None,
                 "sampled_at": None,
@@ -533,6 +949,12 @@ class Collector:
             ram = percent(ram_used / ram_total * 100)
 
         self.last_host_success[name] = now
+        memory_temperature = celsius(raw.get("memory_temperature_c"))
+        ram_temperature = celsius(raw.get("ram_temperature_c"))
+        if memory_temperature is None:
+            memory_temperature = ram_temperature
+        if ram_temperature is None:
+            ram_temperature = memory_temperature
         return {
             "name": name,
             "reported_hostname": raw.get("reported_hostname"),
@@ -540,6 +962,12 @@ class Collector:
             "cpu_percent": cpu,
             "gpu_percent": percent(finite_float(raw.get("gpu_percent"))),
             "ram_percent": ram,
+            "cpu_temperature_c": celsius(raw.get("cpu_temperature_c")),
+            "gpu_temperature_c": celsius(raw.get("gpu_temperature_c")),
+            "soc_temperature_c": celsius(raw.get("soc_temperature_c")),
+            "ram_temperature_c": ram_temperature,
+            "memory_temperature_c": memory_temperature,
+            "memory_temperature_sensor_available": memory_temperature is not None,
             "ram_used_bytes": ram_used,
             "ram_total_bytes": ram_total if isinstance(ram_total, int) else None,
             "sampled_at": utc_timestamp(now),
@@ -548,6 +976,7 @@ class Collector:
         }
 
     def collect(self, now: float | None = None) -> None:
+        fixed_test_time = now is not None
         now = time.time() if now is None else now
         raw_hosts: dict[str, dict[str, Any]] = {}
         with concurrent.futures.ThreadPoolExecutor(
@@ -574,6 +1003,21 @@ class Collector:
         cpu, cpu_count = average_field(hosts, "cpu_percent")
         gpu, gpu_count = average_field(hosts, "gpu_percent")
         ram, ram_count = average_field(hosts, "ram_percent")
+        cpu_temperature, cpu_temperature_count = average_field(
+            hosts, "cpu_temperature_c"
+        )
+        gpu_temperature, gpu_temperature_count = average_field(
+            hosts, "gpu_temperature_c"
+        )
+        soc_temperature, soc_temperature_count = average_field(
+            hosts, "soc_temperature_c"
+        )
+        ram_temperature, ram_temperature_count = average_field(
+            hosts, "ram_temperature_c"
+        )
+        memory_temperature, memory_temperature_count = average_field(
+            hosts, "memory_temperature_c"
+        )
         available = sum(host["state"] == "up" for host in hosts.values())
         cluster_state = (
             "up"
@@ -590,10 +1034,20 @@ class Collector:
             "cpu_percent": cpu,
             "gpu_percent": gpu,
             "ram_percent": ram,
+            "cpu_temperature_c": cpu_temperature,
+            "gpu_temperature_c": gpu_temperature,
+            "soc_temperature_c": soc_temperature,
+            "ram_temperature_c": ram_temperature,
+            "memory_temperature_c": memory_temperature,
             "sampled_hosts": {
                 "cpu": cpu_count,
                 "gpu": gpu_count,
                 "ram": ram_count,
+                "cpu_temperature": cpu_temperature_count,
+                "gpu_temperature": gpu_temperature_count,
+                "soc_temperature": soc_temperature_count,
+                "ram_temperature": ram_temperature_count,
+                "memory_temperature": memory_temperature_count,
             },
         }
 
@@ -605,6 +1059,10 @@ class Collector:
             throughput = self.throughput_tracker.success(
                 counter_sample["total"], counter_sample["metric"], now
             )
+        # Real collection can spend several seconds waiting on remote probes;
+        # use the current clock for this local heartbeat rather than the host
+        # sample's earlier timestamp. Tests retain their explicit fixed clock.
+        voice_agent = self.voice_status_reader.read(now if fixed_test_time else None)
 
         generated_at = utc_timestamp(now)
         history_point = {
@@ -613,6 +1071,11 @@ class Collector:
                 "cpu_percent": cluster["cpu_percent"],
                 "gpu_percent": cluster["gpu_percent"],
                 "ram_percent": cluster["ram_percent"],
+                "cpu_temperature_c": cluster["cpu_temperature_c"],
+                "gpu_temperature_c": cluster["gpu_temperature_c"],
+                "soc_temperature_c": cluster["soc_temperature_c"],
+                "ram_temperature_c": cluster["ram_temperature_c"],
+                "memory_temperature_c": cluster["memory_temperature_c"],
             },
             "throughput": {
                 "tokens_per_second": throughput["tokens_per_second"],
@@ -623,6 +1086,11 @@ class Collector:
                     "cpu_percent": host["cpu_percent"],
                     "gpu_percent": host["gpu_percent"],
                     "ram_percent": host["ram_percent"],
+                    "cpu_temperature_c": host["cpu_temperature_c"],
+                    "gpu_temperature_c": host["gpu_temperature_c"],
+                    "soc_temperature_c": host["soc_temperature_c"],
+                    "ram_temperature_c": host["ram_temperature_c"],
+                    "memory_temperature_c": host["memory_temperature_c"],
                     "state": host["state"],
                 }
                 for name, host in hosts.items()
@@ -639,6 +1107,7 @@ class Collector:
                 "hosts": hosts,
                 "cluster": cluster,
                 "throughput": throughput,
+                "voice_agent": voice_agent,
                 "history": copy.deepcopy(self.history),
             }
 
@@ -664,6 +1133,10 @@ class Collector:
         with self.lock:
             return copy.deepcopy(self.snapshot)
 
+    def get_voice_status(self, now: float | None = None) -> dict[str, Any]:
+        """Read the fast heartbeat independently of five-second host probes."""
+        return self.voice_status_reader.read(now)
+
 
 class DashboardHandler(SimpleHTTPRequestHandler):
     server_version = "C3ClusterDashboard/1.0"
@@ -673,6 +1146,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        if path in (
+            "/api/voice-status",
+            "/api/voice-status/",
+            "/api/voice",
+            "/api/voice/",
+        ):
+            body = json.dumps(
+                getattr(self.server, "collector").get_voice_status(),
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path in ("/api/status", "/api/status/"):
             body = json.dumps(
                 getattr(self.server, "collector").get_snapshot(),
@@ -772,6 +1263,15 @@ def main() -> None:
         known_hosts=optional_path(
             "C3_DASHBOARD_SSH_KNOWN_HOSTS",
             user_ssh / "dgx_cluster_known_hosts",
+        ),
+        voice_status_path=os.environ.get(
+            "C3_DASHBOARD_VOICE_STATUS_PATH", DEFAULT_VOICE_STATUS_PATH
+        ),
+        voice_stale_after_seconds=float(
+            os.environ.get(
+                "C3_DASHBOARD_VOICE_STALE_SECONDS",
+                str(DEFAULT_VOICE_STALE_SECONDS),
+            )
         ),
     )
     collector.collect()

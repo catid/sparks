@@ -285,7 +285,7 @@ traffic on both logical links of the direct production edge: C1 P1
 (`rocep1s0f1`, `roceP2p1s0f1`) and C2 P0 (`rocep1s0f0`,
 `roceP2p1s0f0`). The other ring ports may remain idle during TP2 inference.
 
-### Cerebrus 3 rack display
+### Cerberus node 3 rack display
 
 C3 can run an independent five-second collector and a rootless-X kiosk sized
 for the attached 1424x280 rack panel. It polls all three hosts, shows current
@@ -309,7 +309,7 @@ and C3 remains on `multi-user.target`. See
 [`c3_dashboard/README.md`](../c3_dashboard/README.md) for display and SSH
 preflight details.
 
-### Cerebrus 3 Audio8 API
+### Cerberus node 3 Audio8 API
 
 The optional C3 Audio8 service is independent of DS4F and exposes an
 OpenAI-compatible speech endpoint on port 8010. Prepare the pinned model/image,
@@ -326,12 +326,14 @@ An operator-approved reference can be selected with the root-readable
 Git. The service never starts a speaker loop. See
 [`audio8/README.md`](../audio8/README.md).
 
-### Cerebrus 3 voice assistant
+### Cerberus node 3 voice assistant
 
 C3 can keep the CP900 microphone open for local speech, transcribe completed
 utterances with the pinned Qwen3-ASR 1.7B checkpoint, and accept a request only
-when `Cerberus` or `Cerebrus` occurs among the first two recognized words. The
-bridge sends accepted text to a loopback, token-authenticated OpenClaw agent;
+when `Cerberus` occurs among the first two recognized words. The bridge retains
+the historical `cerebrus` spelling only as an internal ASR-tolerance alias; it
+is not the device name. The bridge sends accepted text to a loopback,
+token-authenticated OpenClaw agent;
 that agent uses the C1-C2 DS4F API with `xhigh` thinking mapped to the model's
 maximum reasoning effort. Final text is chunked and played through Audio8 and
 the CP900. Capture remains stopped during inference, synthesis, playback, and

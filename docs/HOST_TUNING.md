@@ -95,7 +95,7 @@ systemctl is-active display-manager.service
 pgrep -a 'Xorg|Xwayland|gnome-shell'
 ```
 
-### Cerebrus3 rack-display diagnosis
+### Cerberus node 3 (`cerebrus3`) rack-display diagnosis
 
 The rack HDMI display was black before headless mode was enabled. At that
 time GDM/Xorg was healthy on display `:0`, but `xrandr` reported `HDMI-0`

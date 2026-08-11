@@ -1,5 +1,5 @@
 [Unit]
-Description=Qwen3 ASR 1.7B service on Cerebrus 3
+Description=Qwen3 ASR 1.7B service for Cerberus on cerebrus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
 Wants=network-online.target docker.service
 After=network-online.target docker.service

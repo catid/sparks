@@ -1,4 +1,4 @@
-# Audio8 TTS on Cerebrus 3
+# Audio8 TTS on Cerberus node 3
 
 This isolated service runs the Apache-2.0
 `Audio8/Audio8-TTS-Preview-0.6b` checkpoint on the otherwise independent third
@@ -47,6 +47,6 @@ Health and synthesis examples:
 ```bash
 curl http://cerebrus3.lan:8010/health
 curl --fail-with-body -H 'Content-Type: application/json' \
-  -d '{"model":"audio8/tts-0.6b","input":"Hello from Cerebrus Three."}' \
+  -d '{"model":"audio8/tts-0.6b","input":"Hello from Cerberus Three."}' \
   http://cerebrus3.lan:8010/v1/audio/speech -o speech.wav
 ```

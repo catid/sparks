@@ -1,5 +1,5 @@
 [Unit]
-Description=Cerebrus 3 voice OpenClaw gateway
+Description=Cerberus voice OpenClaw gateway on cerebrus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
 Wants=network-online.target
 After=network-online.target

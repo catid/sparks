@@ -56,7 +56,7 @@ while (($#)); do
 done
 
 fail() {
-  echo "C3 voice installer: $*" >&2
+  echo "Cerberus voice installer: $*" >&2
   exit 2
 }
 
@@ -220,7 +220,7 @@ SYSTEMD_UNIT_PATH="${temporary_dir}:/usr/local/lib/systemd/system:/usr/lib/syste
     "${temporary_dir}/cerebrus3-voice-stack.target"
 
 if [[ "${action}" == "verify" ]]; then
-  echo "Verified the C3 voice config, wrappers, Python sources, and systemd units."
+  echo "Verified the Cerberus voice config, wrappers, Python sources, and systemd units."
   exit 0
 fi
 
@@ -375,7 +375,7 @@ if [[ "${action}" == "start" ]]; then
   "${elevate[@]}" systemctl start cerebrus3-voice-stack.target
 fi
 
-echo "Installed C3 voice services for unprivileged user ${service_user}."
+echo "Installed Cerberus voice services for unprivileged user ${service_user}."
 if [[ "${action}" == "enable" || "${action}" == "start" ]]; then
   echo "The complete voice stack is enabled through multi-user.target."
 fi

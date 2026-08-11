@@ -1,7 +1,11 @@
 import importlib.util
+import json
+import os
 import pathlib
+import tempfile
 import threading
 import unittest
+import urllib.request
 
 
 SERVER = pathlib.Path(__file__).parents[1] / "server.py"
@@ -29,6 +33,13 @@ class FakeProbe:
             "cpu_total": 1000 + call * 100,
             "cpu_idle": 600 + call * 40,
             "gpu_percent": host_index * 10,
+            "cpu_temperature_c": 40 + host_index,
+            "gpu_temperature_c": 50 + host_index,
+            "soc_temperature_c": 45 + host_index,
+            # GB10 exposes no LPDDR5X temperature sensor on these hosts.
+            "ram_temperature_c": None,
+            "memory_temperature_c": None,
+            "memory_temperature_sensor_available": False,
             "ram_total_bytes": 1000,
             "ram_available_bytes": 1000 - host_index * 200,
         }
@@ -49,22 +60,206 @@ vllm:generation_tokens_total{{model_name="ds4f"}} {value}
 
 
 class ServerTests(unittest.TestCase):
+    @staticmethod
+    def voice_payload(now=100.0):
+        return {
+            "schema": 1,
+            "service": "cerberus-voice",
+            "device": "Cerberus",
+            "pid": 123,
+            "sequence": 7,
+            "updated_at": dashboard.utc_timestamp(now),
+            "updated_at_epoch": now,
+            "overall": {
+                "state": "busy",
+                "stage": "openclaw",
+                "stage_started_at": dashboard.utc_timestamp(now - 3),
+            },
+            "wake_word": {
+                "state": "triggered",
+                "last_trigger_at": dashboard.utc_timestamp(now - 5),
+                "armed_until": dashboard.utc_timestamp(now + 7),
+            },
+            "asr": {
+                "state": "ok",
+                "duration_seconds": 1.21,
+                "last_success_at": dashboard.utc_timestamp(now - 4),
+            },
+            "openclaw": {
+                "state": "thinking",
+                "started_at": dashboard.utc_timestamp(now - 3),
+            },
+            "tts": {
+                "state": "idle",
+                "chunk_index": 0,
+                "chunk_total": 0,
+            },
+            "last_error": {
+                "stage": "tts_synthesis",
+                "type": "TimeoutError",
+                "at": dashboard.utc_timestamp(now - 20),
+            },
+            # These content-bearing fields must never enter the public payload.
+            "transcript": "private microphone text",
+            "response": "private model reply",
+            "token": "private bearer token",
+        }
+
+    def test_voice_status_reader_whitelists_and_derives_live_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "status.json"
+            path.write_text(json.dumps(self.voice_payload()))
+            status = dashboard.VoiceStatusReader(str(path), 15).read(now=105)
+
+        self.assertEqual(status["device"], "Cerberus")
+        self.assertEqual(status["state"], "busy")
+        self.assertEqual(status["stage"], "openclaw")
+        self.assertEqual(status["stage_elapsed_seconds"], 8)
+        self.assertEqual(status["watchword"]["state"], "triggered")
+        self.assertEqual(status["watchword"]["armed_remaining_seconds"], 2)
+        self.assertEqual(status["asr"]["duration_seconds"], 1.21)
+        self.assertEqual(status["openclaw"]["elapsed_seconds"], 8)
+        self.assertEqual(status["last_error"]["error_type"], "timeouterror")
+        serialized = json.dumps(status)
+        self.assertNotIn("private microphone", serialized)
+        self.assertNotIn("private model", serialized)
+        self.assertNotIn("bearer token", serialized)
+
+    def test_voice_status_reader_marks_missing_malformed_stale_and_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            missing = dashboard.VoiceStatusReader(str(root / "missing.json"), 15)
+            self.assertEqual(missing.read(now=100)["status_error"], "missing")
+
+            malformed_path = root / "malformed.json"
+            malformed_path.write_text("{")
+            malformed = dashboard.VoiceStatusReader(str(malformed_path), 15)
+            self.assertEqual(malformed.read(now=100)["status_error"], "malformed")
+
+            stale_path = root / "stale.json"
+            stale_path.write_text(json.dumps(self.voice_payload(now=50)))
+            stale = dashboard.VoiceStatusReader(str(stale_path), 15).read(now=100)
+            self.assertEqual(stale["state"], "stale")
+            self.assertEqual(stale["status_error"], "stale")
+            self.assertEqual(stale["age_seconds"], 50)
+            self.assertEqual(stale["stage_elapsed_seconds"], 3)
+            self.assertEqual(
+                dashboard.VoiceStatusReader(str(stale_path), 15).read(now=200)[
+                    "stage_elapsed_seconds"
+                ],
+                3,
+            )
+
+            link_path = root / "linked.json"
+            os.symlink(stale_path, link_path)
+            linked = dashboard.VoiceStatusReader(str(link_path), 15).read(now=100)
+            self.assertEqual(linked["state"], "down")
+            self.assertEqual(linked["status_error"], "invalid")
+
+    def test_voice_status_reader_rejects_wrong_schema_and_oversize_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            schema_path = root / "schema.json"
+            schema_path.write_text(json.dumps({"schema": 2, "service": "other"}))
+            mismatch = dashboard.VoiceStatusReader(str(schema_path), 15).read(now=100)
+            self.assertEqual(mismatch["status_error"], "schema_mismatch")
+
+            schema_path.write_text(json.dumps({"schema": True, "service": "cerberus-voice"}))
+            boolean_schema = dashboard.VoiceStatusReader(str(schema_path), 15).read(now=100)
+            self.assertEqual(boolean_schema["status_error"], "schema_mismatch")
+
+            future_path = root / "future.json"
+            future_path.write_text(json.dumps(self.voice_payload(now=1_000)))
+            future = dashboard.VoiceStatusReader(str(future_path), 15).read(now=100)
+            self.assertEqual(future["status_error"], "invalid")
+
+            large_path = root / "large.json"
+            large_path.write_bytes(b"x" * (dashboard.MAX_VOICE_STATUS_BYTES + 1))
+            oversized = dashboard.VoiceStatusReader(str(large_path), 15).read(now=100)
+            self.assertEqual(oversized["status_error"], "invalid")
+
+    def test_fast_voice_endpoint_is_distinct_from_cluster_snapshot(self):
+        class FakeCollector:
+            def __init__(self):
+                self.voice_calls = 0
+
+            def get_snapshot(self):
+                return {"generated_at": "cluster-snapshot", "voice_agent": {"sequence": 1}}
+
+            def get_voice_status(self):
+                self.voice_calls += 1
+                return {"service": "cerberus-voice", "sequence": 2}
+
+        collector = FakeCollector()
+        server = dashboard.ThreadingHTTPServer(
+            ("127.0.0.1", 0), dashboard.DashboardHandler
+        )
+        server.collector = collector
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            with urllib.request.urlopen(f"{base}/api/voice-status", timeout=2) as response:
+                voice = json.load(response)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+            with urllib.request.urlopen(f"{base}/api/status", timeout=2) as response:
+                cluster = json.load(response)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(voice["sequence"], 2)
+        self.assertEqual(cluster["voice_agent"]["sequence"], 1)
+        self.assertEqual(collector.voice_calls, 1)
+
     def test_probe_parser_and_cpu_delta(self):
         parsed = dashboard.parse_probe(
             """HOSTNAME=cerebrus3
 CPU=1000,600
 MEMORY=1000,250
-GPU=25
-GPU=75
+GPU=25,46
+GPU=75,48
+THERMAL=\\_TZ_.TSOC,51200
+THERMAL=\\_TZ_.TS0E,43100
+THERMAL=\\_TZ_.TS0P,54800
+THERMAL=\\_TZ_.TS1E,42700
+THERMAL=\\_TZ_.TS1P,44000
+THERMAL=\\_TZ_.TGPU,99000
+THERMAL=MEMORY,41850
 """
         )
         self.assertEqual(parsed["reported_hostname"], "cerebrus3")
         self.assertEqual(parsed["gpu_percent"], 50)
+        # nvidia-smi wins over the firmware TGPU fallback.
+        self.assertEqual(parsed["gpu_temperature_c"], 48)
+        self.assertEqual(parsed["cpu_temperature_c"], 54.8)
+        self.assertEqual(parsed["soc_temperature_c"], 51.2)
+        self.assertEqual(parsed["ram_temperature_c"], 41.9)
+        self.assertEqual(parsed["memory_temperature_c"], 41.9)
+        self.assertTrue(parsed["memory_temperature_sensor_available"])
         self.assertEqual(parsed["ram_total_bytes"], 1000 * 1024)
         self.assertEqual(
             dashboard.cpu_percent(1100, 640, (1000, 600)),
             60,
         )
+
+    def test_probe_thermal_parser_uses_named_sensors_and_honest_missing_ram(self):
+        parsed = dashboard.parse_probe(
+            """GPU=10,[N/A]
+THERMAL=\\_TZ_.TGPU,46700
+THERMAL=\\_TZ_.TS0E,43000
+THERMAL=\\_TZ_.TS0P,44000
+THERMAL=\\_TZ_.ACPI0000,99000
+THERMAL=MEMORY,999999
+"""
+        )
+        self.assertEqual(parsed["gpu_temperature_c"], 46.7)
+        self.assertEqual(parsed["cpu_temperature_c"], 44)
+        self.assertIsNone(parsed["soc_temperature_c"])
+        self.assertIsNone(parsed["ram_temperature_c"])
+        self.assertIsNone(parsed["memory_temperature_c"])
+        self.assertFalse(parsed["memory_temperature_sensor_available"])
 
     def test_cpu_delta_rejects_first_sample_and_counter_reset(self):
         self.assertIsNone(dashboard.cpu_percent(100, 40, None))
@@ -123,30 +318,52 @@ vllm:request_generation_tokens_sum 45
         self.assertEqual(down["state"], "down")
 
     def test_collector_reports_hosts_cluster_average_history_and_rate(self):
-        collector = dashboard.Collector(
-            interval=5,
-            host_prober=FakeProbe(),
-            metrics_fetcher=FakeMetrics([100, 125]),
-            history_points=2,
-        )
-        collector.collect(now=100)
-        first = collector.get_snapshot()
-        collector.collect(now=105)
-        snapshot = collector.get_snapshot()
+        with tempfile.TemporaryDirectory() as directory:
+            voice_path = pathlib.Path(directory) / "status.json"
+            voice_path.write_text(json.dumps(self.voice_payload(now=105)))
+            collector = dashboard.Collector(
+                interval=5,
+                host_prober=FakeProbe(),
+                metrics_fetcher=FakeMetrics([100, 125]),
+                history_points=2,
+                voice_status_path=str(voice_path),
+            )
+            collector.collect(now=100)
+            first = collector.get_snapshot()
+            collector.collect(now=105)
+            snapshot = collector.get_snapshot()
 
         self.assertIsNone(first["cluster"]["cpu_percent"])
         self.assertEqual(snapshot["cluster"]["state"], "up")
         self.assertEqual(snapshot["cluster"]["cpu_percent"], 60)
         self.assertEqual(snapshot["cluster"]["gpu_percent"], 20)
         self.assertEqual(snapshot["cluster"]["ram_percent"], 40)
+        self.assertEqual(snapshot["cluster"]["cpu_temperature_c"], 42)
+        self.assertEqual(snapshot["cluster"]["gpu_temperature_c"], 52)
+        self.assertEqual(snapshot["cluster"]["soc_temperature_c"], 47)
+        self.assertIsNone(snapshot["cluster"]["ram_temperature_c"])
+        self.assertIsNone(snapshot["cluster"]["memory_temperature_c"])
+        self.assertEqual(snapshot["cluster"]["sampled_hosts"]["cpu_temperature"], 3)
+        self.assertEqual(snapshot["cluster"]["sampled_hosts"]["gpu_temperature"], 3)
+        self.assertEqual(snapshot["cluster"]["sampled_hosts"]["ram_temperature"], 0)
         self.assertEqual(snapshot["hosts"]["cerebrus2"]["ram_percent"], 40)
+        self.assertEqual(snapshot["hosts"]["cerebrus2"]["cpu_temperature_c"], 42)
+        self.assertEqual(snapshot["hosts"]["cerebrus2"]["gpu_temperature_c"], 52)
+        self.assertFalse(
+            snapshot["hosts"]["cerebrus2"]["memory_temperature_sensor_available"]
+        )
         self.assertEqual(snapshot["throughput"]["tokens_per_second"], 5)
         self.assertEqual(snapshot["throughput"]["state"], "active")
         self.assertEqual(snapshot["throughput"]["source"], "vllm")
+        self.assertEqual(snapshot["voice_agent"]["stage"], "openclaw")
         self.assertNotIn("cerebrus1:8889", str(snapshot))
         self.assertEqual(len(snapshot["history"]), 2)
         self.assertIn("cluster", snapshot["history"][-1])
         self.assertIn("hosts", snapshot["history"][-1])
+        history_host = snapshot["history"][-1]["hosts"]["cerebrus2"]
+        self.assertEqual(history_host["cpu_temperature_c"], 42)
+        self.assertEqual(history_host["gpu_temperature_c"], 52)
+        self.assertIsNone(history_host["ram_temperature_c"])
 
     def test_failed_host_is_down_and_cluster_is_degraded(self):
         collector = dashboard.Collector(

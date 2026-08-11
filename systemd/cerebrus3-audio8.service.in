@@ -1,5 +1,5 @@
 [Unit]
-Description=Audio8 0.6B synthetic TTS service on Cerebrus 3
+Description=Audio8 0.6B synthetic TTS service on Cerberus node 3 (cerebrus3)
 Documentation=file:@PROJECT_DIR@/audio8/README.md
 Wants=network-online.target docker.service
 After=network-online.target docker.service
