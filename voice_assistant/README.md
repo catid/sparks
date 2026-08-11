@@ -26,9 +26,34 @@ socket and the service account's SSH and shell startup files.
   The watch word is only recognized in the first two words.
 - Capture is stopped before OpenClaw/TTS work and remains stopped through a
   short playback cooldown, preventing the speaker from waking the microphone.
+- After an accepted command, a quiet roughly 0.6-second `Mm.` cue begins while
+  OpenClaw is thinking. The bridge asks Audio8 for that cue once during its
+  bounded startup warmup, attenuates/fades it, and keeps it only in RAM. A
+  generated quiet hum is always available if the five-second warmup fails. Cue
+  failure is non-fatal, never changes the CLAW/TTS/PLAY progress bands, and the
+  cue is drained or cancelled before answer audio starts.
 - Spoken output is hard-limited to 2,000 characters and 16 Audio8 chunks. If a
   longer OpenClaw answer is returned, the log records truncation without logging
   its content.
+
+## Overlapped synthesis and playback
+
+The bridge prestarts one persistent Audio8 client process with a deliberately
+minimal configuration containing only the loopback TTS URL, model name, and
+timeout. Its IPC payload does not contain the OpenClaw token or unrelated
+ASR/OpenClaw settings, and the spawned worker clears its inherited service
+environment before receiving model text. Answer chunk 1 is synthesized there.
+While `aplay` speaks chunk N in its own process, the client synthesizes exactly
+chunk N+1. The coordinator polls both processes, so playback failure and
+shutdown cancel synthesis promptly rather than waiting for a long HTTP timeout.
+
+There is never more than one synthesis request, one active playback process,
+and one future answer WAV. WAVs are passed to `aplay` through anonymous Linux
+`memfd` objects; no named file, temporary directory, recording, or synthesized
+answer is persisted. Playback order cannot overtake synthesis order. A failed
+future synthesis lets the current sentence end cleanly, then stops. A failed
+current playback discards its single prefetched successor. The persistent
+client is reused between turns and terminated on bridge shutdown.
 
 ## Pinned ASR runtime
 
@@ -86,12 +111,30 @@ The bounded schema identifies the process with `pid`, `instance_id`, and
 `started_at`; `sequence`, `updated_at`, `updated_at_epoch`, and `heartbeat_at`
 show freshness. `overall` reports the current state and stage. `wake_word`,
 `asr`, `openclaw`, and `tts` report their enumerated states, timestamps,
-completed durations, and bounded TTS chunk progress. `last_error` contains only
+completed durations, and bounded TTS chunk progress. TTS retains the legacy
+current `chunk_index` and also publishes separate bounded
+`synthesis_chunk_index` and `playback_chunk_index` values so concurrent work and
+failures remain unambiguous. `pipeline` is a
+turn-scoped, content-free progress view for the fixed display order
+`heard_name`, `asr`, `openclaw`, `tts`, `play`; each step is `idle`, `active`,
+`complete`, or `error`. Its mode is `idle`, `scanning`, `armed`, `request`,
+`responding`, `complete`, `error`, or `stopped`. It deliberately has no request
+identifier. `last_error` contains only
 an enumerated stage, exception class name, and timestamp. It remains visible
 through retries and clears only after that same stage succeeds, so an unrelated
 success cannot hide the fault. There are deliberately no fields for audio,
 transcripts, requests, answers, credentials, URLs, model tokens, hashes, or raw
 exception messages.
+
+Qwen ASR must finish before the bridge can know whether an utterance contains
+the name. During an unarmed utterance the honest state is therefore ASR
+`active` while `heard_name` remains `idle`. A one-utterance “Cerberus, ...”
+request completes those first two display steps together before OpenClaw
+starts. In the two-utterance form, `heard_name` remains `complete` while the
+armed follow-up ASR is `active`. TTS and playback overlap after the first chunk;
+the progress states remain monotonic, with both bands active during prefetch,
+playback active after its first chunk, and TTS complete only when the final
+chunk has synthesized.
 
 Current state values are:
 

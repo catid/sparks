@@ -7,6 +7,7 @@ import io
 import ipaddress
 import json
 import math
+import multiprocessing
 import os
 import re
 import signal
@@ -21,6 +22,7 @@ import wave
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,10 @@ TRIM_AFTER_WAKE = " \t\r\n,.:;!?—–-"
 MAX_SPOKEN_CHARACTERS = 2_000
 MAX_TTS_CHUNKS = 16
 TTS_CHUNK_CHARACTERS = 140
+THINKING_CUE_TEXT = "Mm."
+THINKING_CUE_MAX_SECONDS = 0.65
+THINKING_CUE_TARGET_PEAK = 0.07
+THINKING_CUE_FADE_SECONDS = 0.035
 STATUS_FILENAME = "status.json"
 STATUS_MAX_BYTES = 16 * 1024
 STATUS_HEARTBEAT_SECONDS = 2.0
@@ -200,6 +206,26 @@ class Settings:
         )
 
 
+@dataclass(frozen=True)
+class TtsClientSettings:
+    """The only configuration allowed across the synthesis process boundary."""
+
+    tts_url: str
+    tts_model: str
+    tts_timeout_seconds: float
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Settings | "TtsClientSettings",
+    ) -> "TtsClientSettings":
+        return cls(
+            tts_url=settings.tts_url,
+            tts_model=settings.tts_model,
+            tts_timeout_seconds=settings.tts_timeout_seconds,
+        )
+
+
 def utc_timestamp(epoch: float | None = None) -> str:
     """Return a compact, unambiguous UTC timestamp for the status API."""
     when = time.time() if epoch is None else epoch
@@ -251,6 +277,20 @@ class StatusPublisher:
     ERROR_STAGES = frozenset(
         {"capture", "asr", "watchword", "openclaw", "tts_synthesis", "tts_playback"}
     )
+    PIPELINE_MODES = frozenset(
+        {
+            "idle",
+            "scanning",
+            "armed",
+            "request",
+            "responding",
+            "complete",
+            "error",
+            "stopped",
+        }
+    )
+    PIPELINE_STEPS = ("heard_name", "asr", "openclaw", "tts", "play")
+    PIPELINE_STEP_STATES = frozenset({"idle", "active", "complete", "error"})
 
     def __init__(
         self,
@@ -305,8 +345,15 @@ class StatusPublisher:
                 **self._new_component("idle"),
                 "chunk_index": 0,
                 "chunk_total": 0,
+                "synthesis_chunk_index": 0,
+                "playback_chunk_index": 0,
                 "chunk_started_at": None,
             },
+            # Turn-scoped and deliberately content-free.  This prevents a
+            # display from mistaking component successes retained from an old
+            # request for progress on the current request.  Schema-1 readers
+            # safely ignore this backwards-compatible addition.
+            "pipeline": self._new_pipeline(),
             "last_error": None,
         }
 
@@ -318,6 +365,119 @@ class StatusPublisher:
             "completed_at": None,
             "duration_seconds": None,
             "last_success_at": None,
+        }
+
+    @classmethod
+    def _new_pipeline(cls) -> dict[str, Any]:
+        return {
+            "active": False,
+            "mode": "idle",
+            "steps": {step: "idle" for step in cls.PIPELINE_STEPS},
+        }
+
+    def _pipeline_reset_locked(
+        self,
+        *,
+        preserve_heard_name: bool = False,
+    ) -> None:
+        pipeline = self._document["pipeline"]
+        pipeline["active"] = True
+        pipeline["mode"] = "scanning"
+        pipeline["steps"] = {
+            step: (
+                "complete" if step == "heard_name" and preserve_heard_name else "idle"
+            )
+            for step in self.PIPELINE_STEPS
+        }
+
+    def _pipeline_idle_locked(self) -> None:
+        pipeline = self._document["pipeline"]
+        pipeline["active"] = False
+        pipeline["mode"] = "idle"
+        pipeline["steps"] = {step: "idle" for step in self.PIPELINE_STEPS}
+
+    def _pipeline_step_locked(self, step: str, state: str) -> None:
+        if step not in self.PIPELINE_STEPS or state not in self.PIPELINE_STEP_STATES:
+            raise ValueError("invalid pipeline progress")
+        self._document["pipeline"]["steps"][step] = state
+
+    def _pipeline_mode_locked(self, mode: str, *, active: bool = True) -> None:
+        if mode not in self.PIPELINE_MODES:
+            raise ValueError("invalid pipeline mode")
+        pipeline = self._document["pipeline"]
+        pipeline["mode"] = mode
+        pipeline["active"] = active
+
+    def _pipeline_error_locked(self, stage: str) -> None:
+        step = {
+            # Capture has no separate display band.  It prevents ASR from
+            # receiving audio, so surface it on ASR rather than showing an
+            # unhelpful generic error with every step idle.
+            "capture": "asr",
+            "asr": "asr",
+            "watchword": "heard_name",
+            "openclaw": "openclaw",
+            "tts_synthesis": "tts",
+            "tts_playback": "play",
+        }.get(stage)
+        # A failed pipeline is terminal until retry.  In particular, chunked
+        # TTS can otherwise leave TTS/PLAY marked active when the other one
+        # fails between chunks.
+        steps = self._document["pipeline"]["steps"]
+        for active_step, state in steps.items():
+            if state == "active":
+                steps[active_step] = "complete"
+        if step is not None:
+            self._pipeline_step_locked(step, "error")
+        self._pipeline_mode_locked("error", active=False)
+
+    def _pipeline_retained_error_locked(self, *, armed: bool = False) -> bool:
+        """Restore the visible failed band after an unrelated listening pass."""
+        last_error = self._document.get("last_error")
+        if not isinstance(last_error, dict):
+            return False
+        stage = last_error.get("stage")
+        failed_step = {
+            "capture": "asr",
+            "asr": "asr",
+            "watchword": "heard_name",
+            "openclaw": "openclaw",
+            "tts_synthesis": "tts",
+            "tts_playback": "play",
+        }.get(stage)
+        if failed_step is None:
+            return False
+
+        completed_before = {
+            "capture": (),
+            "asr": (),
+            "watchword": ("asr",),
+            "openclaw": ("heard_name", "asr"),
+            "tts_synthesis": ("heard_name", "asr", "openclaw"),
+            "tts_playback": ("heard_name", "asr", "openclaw", "tts"),
+        }[stage]
+        steps = {step: "idle" for step in self.PIPELINE_STEPS}
+        for completed_step in completed_before:
+            steps[completed_step] = "complete"
+        if armed:
+            steps["heard_name"] = "complete"
+        steps[failed_step] = "error"
+        pipeline = self._document["pipeline"]
+        pipeline["steps"] = steps
+        pipeline["mode"] = "armed" if armed else "error"
+        pipeline["active"] = armed
+        return True
+
+    def _pipeline_armed_locked(self) -> None:
+        pipeline = self._document["pipeline"]
+        pipeline["active"] = True
+        pipeline["mode"] = "armed"
+        pipeline["steps"] = {
+            "heard_name": "complete",
+            "asr": "idle",
+            "openclaw": "idle",
+            "tts": "idle",
+            "play": "idle",
         }
 
     @staticmethod
@@ -361,6 +521,8 @@ class StatusPublisher:
                 ):
                     wake["state"] = "listening"
                     wake["armed_until"] = None
+                    if not self._pipeline_retained_error_locked():
+                        self._pipeline_idle_locked()
                     if self._document["overall"]["stage"] == "listening":
                         self._set_overall_locked("ready", "listening")
                 self._publish_locked()
@@ -442,6 +604,8 @@ class StatusPublisher:
         with self._lock:
             self._document["wake_word"]["state"] = "listening"
             self._document["wake_word"]["armed_until"] = None
+            if not self._pipeline_retained_error_locked():
+                self._pipeline_idle_locked()
             self._set_overall_locked("ready", "listening")
             self._publish_locked()
 
@@ -457,27 +621,61 @@ class StatusPublisher:
             )
             if armed:
                 wake["state"] = "armed"
+                if not self._pipeline_retained_error_locked(armed=True):
+                    self._pipeline_armed_locked()
                 self._set_overall_locked("armed", "listening")
             else:
                 wake["state"] = "listening"
                 wake["armed_until"] = None
+                if not self._pipeline_retained_error_locked():
+                    self._pipeline_idle_locked()
                 self._set_overall_locked("ready", "listening")
             self._publish_locked()
 
     def speech_detected(self) -> None:
-        self._transition("busy", "speech_detected")
+        with self._lock:
+            wake = self._document["wake_word"]
+            armed_until = wake.get("armed_until")
+            armed = (
+                isinstance(armed_until, str)
+                and not self._armed_timestamp_expired(armed_until)
+                and wake.get("state") == "armed"
+            )
+            self._pipeline_reset_locked(
+                preserve_heard_name=armed,
+            )
+            self._set_overall_locked("busy", "speech_detected")
+            self._publish_locked()
 
     def begin_asr(self) -> None:
         with self._lock:
             # Reaching ASR proves capture recovered from any prior device/read
             # failure. Preserve unrelated failures until their own stage wins.
             self._clear_error_locked("capture")
+            wake = self._document["wake_word"]
+            armed_until = wake.get("armed_until")
+            armed = (
+                isinstance(armed_until, str)
+                and not self._armed_timestamp_expired(armed_until)
+            )
+            pipeline = self._document["pipeline"]
+            if not pipeline["active"]:
+                self._pipeline_reset_locked(
+                    preserve_heard_name=armed,
+                )
+            self._pipeline_step_locked("asr", "active")
+            self._pipeline_mode_locked("scanning")
         self._begin_component("asr", "processing", "asr")
         with self._lock:
             self._document["wake_word"]["state"] = "checking"
             self._publish_locked()
 
     def begin_openclaw(self) -> None:
+        with self._lock:
+            self._pipeline_step_locked("heard_name", "complete")
+            self._pipeline_step_locked("asr", "complete")
+            self._pipeline_step_locked("openclaw", "active")
+            self._pipeline_mode_locked("request")
         self._begin_component("openclaw", "thinking", "openclaw")
 
     def begin_tts(self, chunk_total: int) -> None:
@@ -495,8 +693,17 @@ class StatusPublisher:
                     "duration_seconds": None,
                     "chunk_index": 1 if chunk_total else 0,
                     "chunk_total": chunk_total,
+                    "synthesis_chunk_index": 1 if chunk_total else 0,
+                    "playback_chunk_index": 0,
                     "chunk_started_at": now if chunk_total else None,
                 }
+            )
+            self._pipeline_step_locked("openclaw", "complete")
+            self._pipeline_step_locked("tts", "active" if chunk_total else "complete")
+            self._pipeline_step_locked("play", "idle" if chunk_total else "complete")
+            self._pipeline_mode_locked(
+                "responding" if chunk_total else "complete",
+                active=True,
             )
             self._set_overall_locked(
                 "busy" if chunk_total else "ready",
@@ -514,7 +721,24 @@ class StatusPublisher:
                 raise ValueError("invalid TTS chunk progress")
             tts["state"] = state
             tts["chunk_index"] = chunk_index
+            tts[
+                "synthesis_chunk_index"
+                if state == "synthesizing"
+                else "playback_chunk_index"
+            ] = chunk_index
             tts["chunk_started_at"] = utc_timestamp()
+            if state == "synthesizing":
+                self._pipeline_step_locked("tts", "active")
+                # Once playback has started, keep that progress active while
+                # later chunks synthesize so the display never moves backward.
+                if chunk_index > 1:
+                    self._pipeline_step_locked("play", "active")
+            else:
+                self._pipeline_step_locked(
+                    "tts", "complete" if chunk_index == total else "active"
+                )
+                self._pipeline_step_locked("play", "active")
+            self._pipeline_mode_locked("responding")
             self._set_overall_locked(
                 "busy", "tts_synthesis" if state == "synthesizing" else "tts_playback"
             )
@@ -524,6 +748,9 @@ class StatusPublisher:
         with self._lock:
             self._document["tts"]["state"] = "cooldown"
             self._document["tts"]["chunk_started_at"] = utc_timestamp()
+            self._pipeline_step_locked("tts", "complete")
+            self._pipeline_step_locked("play", "complete")
+            self._pipeline_mode_locked("complete")
             self._set_overall_locked("busy", "cooldown")
             self._publish_locked()
 
@@ -539,6 +766,9 @@ class StatusPublisher:
             self._tts_started_monotonic = None
             if tts["chunk_total"]:
                 self._clear_error_locked("tts_synthesis", "tts_playback")
+            self._pipeline_step_locked("tts", "complete")
+            self._pipeline_step_locked("play", "complete")
+            self._pipeline_mode_locked("complete")
             self._publish_locked()
 
     def wake_not_detected(self) -> None:
@@ -547,6 +777,8 @@ class StatusPublisher:
                 {"state": "not_detected", "armed_until": None}
             )
             self._clear_error_locked("watchword")
+            if not self._pipeline_retained_error_locked():
+                self._pipeline_idle_locked()
             self._set_overall_locked("ready", "listening")
             self._publish_locked()
 
@@ -562,6 +794,8 @@ class StatusPublisher:
                 }
             )
             self._clear_error_locked("watchword")
+            if not self._pipeline_retained_error_locked(armed=True):
+                self._pipeline_armed_locked()
             self._set_overall_locked("armed", "listening")
             self._publish_locked()
 
@@ -573,6 +807,9 @@ class StatusPublisher:
             if heard_now or wake["last_trigger_at"] is None:
                 wake["last_trigger_at"] = utc_timestamp()
             self._clear_error_locked("watchword")
+            self._pipeline_step_locked("heard_name", "complete")
+            self._pipeline_step_locked("asr", "complete")
+            self._pipeline_mode_locked("request")
             self._set_overall_locked("busy", "watchword")
             self._publish_locked()
 
@@ -607,6 +844,7 @@ class StatusPublisher:
             )
             details["last_success_at"] = now
             self._clear_error_locked(component)
+            self._pipeline_step_locked(component, "complete")
             self._publish_locked()
 
     def fail(self, stage: str, error: BaseException) -> None:
@@ -638,6 +876,7 @@ class StatusPublisher:
                 "type": self._safe_error_type(error),
                 "at": now,
             }
+            self._pipeline_error_locked(stage)
             self._set_overall_locked("degraded", "retry_wait")
             self._publish_locked()
 
@@ -656,6 +895,7 @@ class StatusPublisher:
             now = utc_timestamp()
             self._document["wake_word"]["state"] = "stopped"
             self._document["stopped_at"] = now
+            self._pipeline_mode_locked("stopped", active=False)
             self._set_overall_locked("stopped", "stopped")
             self._publish_locked()
 
@@ -948,7 +1188,12 @@ def validate_tts_wav(payload: bytes) -> float:
     return duration
 
 
-def synthesize(settings: Settings, text: str) -> bytes:
+def synthesize(
+    settings: Settings | TtsClientSettings,
+    text: str,
+    *,
+    timeout_seconds: float | None = None,
+) -> bytes:
     encoded = json.dumps(
         {
             "model": settings.tts_model,
@@ -969,13 +1214,92 @@ def synthesize(settings: Settings, text: str) -> bytes:
         method="POST",
     )
     with _LOCAL_HTTP_OPENER.open(
-        request, timeout=settings.tts_timeout_seconds
+        request,
+        timeout=(
+            settings.tts_timeout_seconds
+            if timeout_seconds is None
+            else timeout_seconds
+        ),
     ) as response:
         if response.headers.get_content_type() not in {"audio/wav", "audio/x-wav"}:
             raise RuntimeError("Audio8 returned an unexpected content type")
         wav_bytes = bounded_read(response, 32 * 1024 * 1024)
     validate_tts_wav(wav_bytes)
     return wav_bytes
+
+
+def soften_thinking_cue(payload: bytes) -> bytes:
+    """Bound, attenuate, and fade the cached acknowledgement entirely in RAM."""
+    validate_tts_wav(payload)
+    with wave.open(io.BytesIO(payload), "rb") as source:
+        channels = source.getnchannels()
+        rate = source.getframerate()
+        frame_count = min(
+            source.getnframes(),
+            max(1, int(rate * THINKING_CUE_MAX_SECONDS)),
+        )
+        frames = source.readframes(frame_count)
+
+    sample_count = len(frames) // SAMPLE_WIDTH
+    samples = list(struct.unpack(f"<{sample_count}h", frames))
+    peak = max((abs(sample) for sample in samples), default=0)
+    target = int(32_767 * THINKING_CUE_TARGET_PEAK)
+    # Never amplify the conditioning voice. The additional cap keeps the cue
+    # unobtrusive even when Audio8 already produced a quiet sample.
+    gain = min(0.35, target / peak) if peak else 0.0
+    fade_frames = min(
+        max(1, int(rate * THINKING_CUE_FADE_SECONDS)),
+        max(1, frame_count // 3),
+    )
+    softened: list[int] = []
+    for sample_index, sample in enumerate(samples):
+        frame_index = sample_index // channels
+        envelope = 1.0
+        if frame_index < fade_frames:
+            envelope = frame_index / fade_frames
+        elif frame_index >= frame_count - fade_frames:
+            envelope = max(0.0, (frame_count - 1 - frame_index) / fade_frames)
+        softened.append(round(sample * gain * envelope))
+
+    destination = io.BytesIO()
+    with wave.open(destination, "wb") as output:
+        output.setnchannels(channels)
+        output.setsampwidth(SAMPLE_WIDTH)
+        output.setframerate(rate)
+        output.writeframes(struct.pack(f"<{len(softened)}h", *softened))
+    cue = destination.getvalue()
+    validate_tts_wav(cue)
+    return cue
+
+
+def fallback_thinking_cue() -> bytes:
+    """Return a quiet, speech-free nasal hum until Audio8's cue is warm."""
+    rate = SAMPLE_RATE
+    frame_count = int(rate * 0.48)
+    fade_frames = int(rate * THINKING_CUE_FADE_SECONDS)
+    samples: list[int] = []
+    for frame_index in range(frame_count):
+        elapsed = frame_index / rate
+        envelope = min(
+            1.0,
+            frame_index / max(1, fade_frames),
+            (frame_count - 1 - frame_index) / max(1, fade_frames),
+        )
+        # A low fundamental plus two soft harmonics reads as an affirmative hum
+        # without storing or imitating anyone's recorded voice.
+        value = (
+            math.sin(2 * math.pi * 132 * elapsed)
+            + 0.33 * math.sin(2 * math.pi * 264 * elapsed)
+            + 0.12 * math.sin(2 * math.pi * 396 * elapsed)
+        )
+        samples.append(round(32_767 * 0.035 * envelope * value / 1.45))
+    destination = io.BytesIO()
+    with wave.open(destination, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(SAMPLE_WIDTH)
+        output.setframerate(rate)
+        output.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    return destination.getvalue()
 
 
 class Recorder:
@@ -1024,29 +1348,256 @@ class Recorder:
             self.process.stdout.close()
 
 
-def play_wav(settings: Settings, wav_bytes: bytes) -> None:
+class PlaybackProcess:
+    """A bounded aplay child reading a WAV from an anonymous RAM-only file."""
+
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        timeout_seconds: float,
+    ) -> None:
+        self.process = process
+        self.deadline = time.monotonic() + timeout_seconds
+
+    def poll(self) -> bool:
+        return_code = self.process.poll()
+        if return_code is not None:
+            if return_code:
+                raise RuntimeError(
+                    f"CP900 playback failed with status {return_code}"
+                )
+            return True
+        if time.monotonic() >= self.deadline:
+            self.cancel()
+            raise RuntimeError("CP900 playback timed out")
+        return False
+
+    def cancel(self) -> None:
+        if self.process.poll() is not None:
+            return
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=2)
+
+    def wait(self, stop_event: threading.Event) -> bool:
+        """Return False only for deliberate bridge shutdown."""
+        while True:
+            if stop_event.is_set():
+                self.cancel()
+                return False
+            if self.poll():
+                return True
+            remaining = self.deadline - time.monotonic()
+            stop_event.wait(min(0.05, remaining))
+
+
+def start_playback(
+    settings: Settings,
+    wav_bytes: bytes,
+    *,
+    timeout_seconds: float | None = None,
+) -> PlaybackProcess:
+    """Launch playback without blocking synthesis or writing audio to disk."""
     duration = validate_tts_wav(wav_bytes)
-    process = subprocess.Popen(
-        [
-            "/usr/bin/aplay",
-            "--quiet",
-            "--device",
-            settings.playback_device,
-            "--file-type",
-            "wav",
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    if not hasattr(os, "memfd_create"):
+        raise RuntimeError("anonymous RAM playback is unavailable")
+    flags = getattr(os, "MFD_CLOEXEC", 0)
+    memory_fd = os.memfd_create("cerberus-voice-wav", flags)
     try:
-        process.communicate(wav_bytes, timeout=max(20, duration + 20))
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
-        raise RuntimeError("CP900 playback timed out")
-    if process.returncode:
-        raise RuntimeError(f"CP900 playback failed with status {process.returncode}")
+        view = memoryview(wav_bytes)
+        while view:
+            written = os.write(memory_fd, view)
+            if written <= 0:
+                raise RuntimeError("could not stage in-memory playback")
+            view = view[written:]
+        os.lseek(memory_fd, 0, os.SEEK_SET)
+        process = subprocess.Popen(
+            [
+                "/usr/bin/aplay",
+                "--quiet",
+                "--device",
+                settings.playback_device,
+                "--file-type",
+                "wav",
+            ],
+            stdin=memory_fd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    finally:
+        os.close(memory_fd)
+    return PlaybackProcess(
+        process,
+        max(20, duration + 20) if timeout_seconds is None else timeout_seconds,
+    )
+
+
+class SynthesisWorkerError(RuntimeError):
+    """A content-free error reported by the isolated Audio8 client process."""
+
+
+def _synthesis_worker_main(
+    settings: TtsClientSettings,
+    connection: Connection,
+) -> None:
+    """Serve one bounded request at a time without ever persisting its audio."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # multiprocessing inherits the service environment at exec. This worker
+    # needs no environment configuration, so discard it before receiving model
+    # text; no inherited credentials remain available during synthesis.
+    os.environ.clear()
+    try:
+        while True:
+            try:
+                text = connection.recv()
+            except EOFError:
+                return
+            if text is None:
+                return
+            try:
+                wav_bytes = synthesize(settings, text)
+            except Exception as error:
+                connection.send(
+                    ("error", StatusPublisher._safe_error_type(error))
+                )
+            else:
+                connection.send(("ok", wav_bytes))
+    finally:
+        connection.close()
+
+
+class SynthesisWorker:
+    """One persistent, cancellable Audio8 client process with one job slot."""
+
+    def __init__(self, settings: Settings | TtsClientSettings) -> None:
+        context = multiprocessing.get_context("spawn")
+        parent, child = context.Pipe(duplex=True)
+        self.connection = parent
+        self.process = context.Process(
+            target=_synthesis_worker_main,
+            args=(TtsClientSettings.from_settings(settings), child),
+            name="audio8-client",
+            daemon=True,
+        )
+        try:
+            self.process.start()
+        except Exception:
+            child.close()
+            parent.close()
+            raise
+        child.close()
+        self.timeout_seconds = settings.tts_timeout_seconds
+        self.deadline: float | None = None
+        self.busy = False
+        self.closed = False
+
+    def submit(self, text: str) -> None:
+        if self.closed or not self.process.is_alive():
+            raise SynthesisWorkerError("Audio8 client process is unavailable")
+        if self.busy:
+            raise SynthesisWorkerError("Audio8 client already has a request")
+        if not isinstance(text, str) or not 1 <= len(text) <= TTS_CHUNK_CHARACTERS:
+            raise SynthesisWorkerError("Audio8 client request is invalid")
+        try:
+            self.connection.send(text)
+        except (BrokenPipeError, EOFError, OSError) as error:
+            self.cancel()
+            raise SynthesisWorkerError(
+                "Audio8 client connection failed"
+            ) from error
+        self.deadline = time.monotonic() + self.timeout_seconds
+        self.busy = True
+
+    def poll(self) -> bytes | None:
+        if not self.busy:
+            raise SynthesisWorkerError("Audio8 client has no request")
+        try:
+            result_ready = self.connection.poll(0)
+        except (EOFError, OSError) as error:
+            self.cancel()
+            raise SynthesisWorkerError(
+                "Audio8 client connection failed"
+            ) from error
+        if result_ready:
+            try:
+                result = self.connection.recv()
+            except (EOFError, OSError) as error:
+                self.cancel()
+                raise SynthesisWorkerError(
+                    "Audio8 client exited without a result"
+                ) from error
+            self.busy = False
+            self.deadline = None
+            if (
+                not isinstance(result, tuple)
+                or len(result) != 2
+                or result[0] not in {"ok", "error"}
+            ):
+                self.cancel()
+                raise SynthesisWorkerError("Audio8 client returned an invalid result")
+            if result[0] == "error":
+                remote_type = str(result[1])[:80]
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", remote_type):
+                    remote_type = "Exception"
+                raise SynthesisWorkerError(
+                    f"Audio8 synthesis failed ({remote_type})"
+                )
+            wav_bytes = result[1]
+            if not isinstance(wav_bytes, bytes):
+                self.cancel()
+                raise SynthesisWorkerError("Audio8 client returned invalid audio")
+            try:
+                validate_tts_wav(wav_bytes)
+            except Exception as error:
+                self.cancel()
+                raise SynthesisWorkerError(
+                    "Audio8 client returned invalid audio"
+                ) from error
+            return wav_bytes
+        if not self.process.is_alive():
+            self.cancel()
+            raise SynthesisWorkerError("Audio8 client exited during synthesis")
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.cancel()
+            raise SynthesisWorkerError("Audio8 synthesis timed out")
+        return None
+
+    def cancel(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if self.process.is_alive():
+            self.process.terminate()
+        self.process.join(timeout=2)
+        if self.process.is_alive():
+            self.process.kill()
+            self.process.join(timeout=2)
+        self.connection.close()
+        self.busy = False
+        self.deadline = None
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        if self.busy:
+            self.cancel()
+            return
+        try:
+            self.connection.send(None)
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        self.process.join(timeout=1)
+        if self.process.is_alive():
+            self.process.terminate()
+            self.process.join(timeout=2)
+        if self.process.is_alive():
+            self.process.kill()
+            self.process.join(timeout=2)
+        self.connection.close()
+        self.closed = True
 
 
 class VoiceBridge:
@@ -1056,6 +1607,12 @@ class VoiceBridge:
         self.stop_event = threading.Event()
         self.recorder: Recorder | None = None
         self.status = StatusPublisher(settings.state_dir)
+        self._active_playback: PlaybackProcess | None = None
+        self._playback_lock = threading.RLock()
+        self._synthesis_worker: SynthesisWorker | None = None
+        self._synthesis_worker_lock = threading.RLock()
+        self._thinking_cue_lock = threading.Lock()
+        self._thinking_cue = fallback_thinking_cue()
 
     def log_text(self, label: str, text: str) -> None:
         if self.settings.log_transcripts:
@@ -1067,6 +1624,152 @@ class VoiceBridge:
         self.stop_event.set()
         if self.recorder is not None:
             self.recorder.stop()
+        self._cancel_playback()
+        self._cancel_synthesis_worker()
+
+    def _get_synthesis_worker(self) -> SynthesisWorker:
+        with self._synthesis_worker_lock:
+            worker = self._synthesis_worker
+            if worker is None or worker.closed:
+                if self.stop_event.is_set():
+                    raise RuntimeError("voice bridge is stopping")
+                worker = SynthesisWorker(self.settings)
+                if self.stop_event.is_set():
+                    worker.cancel()
+                    raise RuntimeError("voice bridge is stopping")
+                self._synthesis_worker = worker
+            return worker
+
+    def _cancel_synthesis_worker(self) -> None:
+        with self._synthesis_worker_lock:
+            worker = self._synthesis_worker
+            self._synthesis_worker = None
+            if worker is None:
+                return
+            try:
+                worker.cancel()
+            except Exception as error:
+                print(
+                    "Audio8 client cancellation failed: "
+                    f"{StatusPublisher._safe_error_type(error)}",
+                    flush=True,
+                )
+
+    def _close_synthesis_worker(self) -> None:
+        with self._synthesis_worker_lock:
+            worker = self._synthesis_worker
+            self._synthesis_worker = None
+            if worker is None:
+                return
+            try:
+                worker.close()
+            except Exception as error:
+                print(
+                    "Audio8 client shutdown failed: "
+                    f"{StatusPublisher._safe_error_type(error)}",
+                    flush=True,
+                )
+
+    def _warm_thinking_cue(self) -> None:
+        """Try once at startup; failure leaves the always-ready safe hum."""
+        try:
+            synthesized = synthesize(
+                self.settings,
+                THINKING_CUE_TEXT,
+                timeout_seconds=min(self.settings.tts_timeout_seconds, 5),
+            )
+            cue = soften_thinking_cue(synthesized)
+        except Exception as error:
+            print(
+                "Thinking cue warmup failed: "
+                f"{StatusPublisher._safe_error_type(error)}; using local hum",
+                flush=True,
+            )
+            return
+        if self.stop_event.is_set():
+            return
+        with self._thinking_cue_lock:
+            self._thinking_cue = cue
+
+    def _start_playback(
+        self,
+        wav_bytes: bytes,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> PlaybackProcess:
+        with self._playback_lock:
+            if self._active_playback is not None:
+                raise RuntimeError("audio playback is already active")
+            if self.stop_event.is_set():
+                raise RuntimeError("voice bridge is stopping")
+            playback = start_playback(
+                self.settings,
+                wav_bytes,
+                timeout_seconds=timeout_seconds,
+            )
+            # A signal can arrive while Popen is creating the child. Recheck
+            # under the re-entrant lock so that child can never escape stop.
+            if self.stop_event.is_set():
+                playback.cancel()
+                raise RuntimeError("voice bridge is stopping")
+            self._active_playback = playback
+            return playback
+
+    def _wait_playback(self, playback: PlaybackProcess) -> bool:
+        try:
+            return playback.wait(self.stop_event)
+        finally:
+            self._release_playback(playback)
+
+    def _release_playback(self, playback: PlaybackProcess) -> None:
+        with self._playback_lock:
+            if self._active_playback is playback:
+                self._active_playback = None
+
+    def _cancel_playback(self, playback: PlaybackProcess | None = None) -> None:
+        with self._playback_lock:
+            active = self._active_playback
+            if active is None or (playback is not None and active is not playback):
+                return
+            try:
+                active.cancel()
+            except Exception as error:
+                print(
+                    "Playback cancellation failed: "
+                    f"{StatusPublisher._safe_error_type(error)}",
+                    flush=True,
+                )
+            finally:
+                if self._active_playback is active:
+                    self._active_playback = None
+
+    def _start_thinking_cue(self) -> PlaybackProcess | None:
+        """Start the non-semantic cue without changing CLAW/TTS status."""
+        with self._thinking_cue_lock:
+            cue = self._thinking_cue
+        try:
+            return self._start_playback(cue, timeout_seconds=2.0)
+        except Exception as error:
+            print(
+                "Thinking cue playback failed: "
+                f"{StatusPublisher._safe_error_type(error)}; continuing",
+                flush=True,
+            )
+            return None
+
+    def _finish_thinking_cue(self, playback: PlaybackProcess | None) -> None:
+        if playback is None:
+            return
+        try:
+            self._wait_playback(playback)
+        except Exception as error:
+            # This courtesy sound is not part of the response pipeline. It must
+            # never fail or falsely mark an otherwise healthy OpenClaw request.
+            print(
+                "Thinking cue playback failed: "
+                f"{StatusPublisher._safe_error_type(error)}; continuing",
+                flush=True,
+            )
 
     def handle_utterance(self, pcm: bytes) -> bool:
         self.status.begin_asr()
@@ -1097,11 +1800,18 @@ class VoiceBridge:
         self.status.wake_triggered(heard_wake_word)
         self.log_text("Voice request accepted", command)
         self.status.begin_openclaw()
+        thinking_cue = self._start_thinking_cue()
         try:
             answer = ask_openclaw(self.settings, command)
         except Exception as error:
+            self._cancel_playback(thinking_cue)
             self.status.fail("openclaw", error)
             raise
+        # The cue normally finished while the model was thinking. Drain its
+        # bounded final fraction before answer audio so the two never overlap.
+        self._finish_thinking_cue(thinking_cue)
+        if self.stop_event.is_set():
+            return False
         self.status.component_ok("openclaw")
         chunks, truncated = bounded_spoken_chunks(answer)
         if truncated:
@@ -1120,21 +1830,122 @@ class VoiceBridge:
             self.status.finish_tts()
             self.status.ready()
             return False
-        for index, chunk in enumerate(chunks, start=1):
+
+        # Prime one chunk, then keep exactly one future chunk in RAM while the
+        # current chunk plays in a separate aplay process. A single persistent,
+        # cancellable Audio8 client process lets the coordinator observe stop
+        # and playback failure promptly while both external processes run.
+        try:
+            synthesis_worker = self._get_synthesis_worker()
+        except Exception as error:
             if self.stop_event.is_set():
-                break
-            self.status.tts_phase("synthesizing", index)
-            try:
-                wav_bytes = synthesize(self.settings, chunk)
-            except Exception as error:
-                self.status.fail("tts_synthesis", error)
-                raise
-            self.status.tts_phase("playing", index)
-            try:
-                play_wav(self.settings, wav_bytes)
-            except Exception as error:
-                self.status.fail("tts_playback", error)
-                raise
+                return False
+            self.status.fail("tts_synthesis", error)
+            raise
+        self.status.tts_phase("synthesizing", 1)
+        try:
+            synthesis_worker.submit(chunks[0])
+            next_wav: bytes | None = None
+            while next_wav is None:
+                if self.stop_event.is_set():
+                    synthesis_worker.cancel()
+                    return False
+                next_wav = synthesis_worker.poll()
+                if next_wav is None:
+                    self.stop_event.wait(0.02)
+        except Exception as error:
+            if self.stop_event.is_set():
+                return False
+            synthesis_worker.cancel()
+            self.status.fail("tts_synthesis", error)
+            raise
+
+        try:
+            assert next_wav is not None
+            for index in range(1, len(chunks) + 1):
+                if self.stop_event.is_set():
+                    return False
+                self.status.tts_phase("playing", index)
+                try:
+                    current_wav = next_wav
+                    next_wav = None
+                    playback = self._start_playback(current_wav)
+                    del current_wav
+                except Exception as error:
+                    if self.stop_event.is_set():
+                        return False
+                    self.status.fail("tts_playback", error)
+                    raise
+
+                if index == len(chunks):
+                    try:
+                        playback_completed = self._wait_playback(playback)
+                    except Exception as error:
+                        self.status.tts_phase("playing", index)
+                        self.status.fail("tts_playback", error)
+                        raise
+                    if not playback_completed or self.stop_event.is_set():
+                        return False
+                    continue
+
+                self.status.tts_phase("synthesizing", index + 1)
+                synthesis_error: Exception | None = None
+                try:
+                    synthesis_worker.submit(chunks[index])
+                except Exception as error:
+                    synthesis_error = error
+
+                playback_done = False
+                while not playback_done or (
+                    next_wav is None and synthesis_error is None
+                ):
+                    if self.stop_event.is_set():
+                        synthesis_worker.cancel()
+                        self._cancel_playback(playback)
+                        return False
+
+                    if next_wav is None and synthesis_error is None:
+                        try:
+                            completed_wav = synthesis_worker.poll()
+                        except Exception as error:
+                            synthesis_error = error
+                        else:
+                            if completed_wav is not None:
+                                next_wav = completed_wav
+
+                    if not playback_done:
+                        try:
+                            playback_done = playback.poll()
+                        except Exception as error:
+                            synthesis_worker.cancel()
+                            self._release_playback(playback)
+                            # Restore the diagnostic index to the chunk whose
+                            # aplay process actually failed; synthesis may have
+                            # already advanced the legacy current index.
+                            self.status.tts_phase("playing", index)
+                            self.status.fail("tts_playback", error)
+                            raise
+
+                    if not playback_done or (
+                        next_wav is None and synthesis_error is None
+                    ):
+                        self.stop_event.wait(0.02)
+
+                self._release_playback(playback)
+                if synthesis_error is not None:
+                    # The current sentence ended cleanly; the absent future
+                    # sentence is now the only failed operation.
+                    self.status.fail("tts_synthesis", synthesis_error)
+                    raise synthesis_error
+        finally:
+            if self._active_playback is not None:
+                self._cancel_playback()
+            if synthesis_worker.busy:
+                synthesis_worker.cancel()
+            if synthesis_worker.closed:
+                with self._synthesis_worker_lock:
+                    if self._synthesis_worker is synthesis_worker:
+                        self._synthesis_worker = None
         return bool(chunks)
 
     def capture_one(self) -> bool:
@@ -1171,6 +1982,20 @@ class VoiceBridge:
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         self.status.start()
+        self._warm_thinking_cue()
+        if self.stop_event.is_set():
+            self.status.stop()
+            return
+        try:
+            self._get_synthesis_worker()
+        except Exception as error:
+            # The first accepted request retries. Starting the microphone does
+            # not depend on this optional latency optimization succeeding.
+            print(
+                "Audio8 client prestart failed: "
+                f"{StatusPublisher._safe_error_type(error)}; will retry",
+                flush=True,
+            )
         self.status.ready()
         print(
             "Voice bridge ready; raw microphone audio and transcripts are not persisted",
@@ -1208,6 +2033,7 @@ class VoiceBridge:
                         if not self.stop_event.wait(2):
                             self.status.resume_listening()
         finally:
+            self._close_synthesis_worker()
             self.status.stop()
 
 

@@ -63,6 +63,55 @@ class BridgeTestCase(unittest.TestCase):
         values.update(overrides)
         return self.module.Settings(**values)
 
+    class ImmediatePlayback:
+        def __init__(self) -> None:
+            self.cancelled = False
+            self.waited = False
+
+        def wait(self, stop_event) -> bool:
+            self.waited = True
+            return not stop_event.is_set()
+
+        def poll(self) -> bool:
+            self.waited = True
+            return True
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    def immediate_playback(self, *_args, **_kwargs):
+        return self.ImmediatePlayback()
+
+    def inline_synthesis_worker_class(self):
+        tested_module = self.module
+
+        class InlineSynthesisWorker:
+            def __init__(self, settings):
+                self.settings = settings
+                self.result = None
+                self.closed = False
+                self.busy = False
+
+            def submit(self, text):
+                self.result = tested_module.synthesize(self.settings, text)
+                self.busy = True
+
+            def poll(self):
+                result = self.result
+                self.result = None
+                self.busy = False
+                return result
+
+            def cancel(self):
+                self.closed = True
+                self.busy = False
+
+            def close(self):
+                self.closed = True
+                self.busy = False
+
+        return InlineSynthesisWorker
+
 
 class WakeWordTests(BridgeTestCase):
     def test_wake_word_must_be_one_of_first_two_words(self) -> None:
@@ -264,7 +313,16 @@ class ResponseTests(BridgeTestCase):
             mock.patch.object(self.module, "transcribe_wav", return_value=private_transcript),
             mock.patch.object(self.module, "ask_openclaw", return_value=private_answer),
             mock.patch.object(self.module, "synthesize", return_value=b"wav"),
-            mock.patch.object(self.module, "play_wav"),
+            mock.patch.object(
+                self.module,
+                "start_playback",
+                side_effect=self.immediate_playback,
+            ),
+            mock.patch.object(
+                self.module,
+                "SynthesisWorker",
+                self.inline_synthesis_worker_class(),
+            ),
             contextlib.redirect_stdout(output),
         ):
             self.assertTrue(bridge.handle_utterance(b"pcm"))
@@ -292,7 +350,16 @@ class ResponseTests(BridgeTestCase):
             ),
             mock.patch.object(self.module, "ask_openclaw", return_value=private_answer),
             mock.patch.object(self.module, "synthesize", side_effect=fake_synthesize),
-            mock.patch.object(self.module, "play_wav"),
+            mock.patch.object(
+                self.module,
+                "start_playback",
+                side_effect=self.immediate_playback,
+            ),
+            mock.patch.object(
+                self.module,
+                "SynthesisWorker",
+                self.inline_synthesis_worker_class(),
+            ),
             contextlib.redirect_stdout(output),
         ):
             self.assertTrue(bridge.handle_utterance(b"pcm"))
@@ -301,6 +368,729 @@ class ResponseTests(BridgeTestCase):
         logged = output.getvalue()
         self.assertIn("response truncated for speech", logged)
         self.assertNotIn("private-model-output", logged)
+
+
+class PlaybackPrimitiveTests(BridgeTestCase):
+    class FakeProcess:
+        def __init__(self, return_code=0):
+            self.return_code = return_code
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return self.return_code
+
+        def terminate(self):
+            self.terminated = True
+            self.return_code = -15
+
+        def kill(self):
+            self.killed = True
+            self.return_code = -9
+
+        def wait(self, timeout=None):
+            del timeout
+            return self.return_code
+
+    def test_start_playback_uses_exact_ram_wav_and_closes_memfd(self) -> None:
+        payload = self.module.fallback_thinking_cue()
+        captured = {}
+        process = self.FakeProcess()
+
+        def fake_popen(argv, *, stdin, stdout, stderr):
+            captured["argv"] = argv
+            captured["fd"] = stdin
+            captured["stdout"] = stdout
+            captured["stderr"] = stderr
+            self.module.os.lseek(stdin, 0, self.module.os.SEEK_SET)
+            captured["payload"] = self.module.os.read(stdin, len(payload) + 1)
+            return process
+
+        with mock.patch.object(self.module.subprocess, "Popen", side_effect=fake_popen):
+            playback = self.module.start_playback(self.settings(), payload)
+
+        self.assertIs(playback.process, process)
+        self.assertEqual(captured["payload"], payload)
+        self.assertEqual(captured["argv"][0], "/usr/bin/aplay")
+        self.assertNotIn("/tmp", " ".join(captured["argv"]))
+        with self.assertRaises(OSError):
+            self.module.os.fstat(captured["fd"])
+
+    def test_start_playback_closes_memfd_when_aplay_cannot_start(self) -> None:
+        payload = self.module.fallback_thinking_cue()
+        captured = {}
+
+        def failed_popen(_argv, *, stdin, **_kwargs):
+            captured["fd"] = stdin
+            raise OSError("aplay unavailable")
+
+        with (
+            mock.patch.object(
+                self.module.subprocess, "Popen", side_effect=failed_popen
+            ),
+            self.assertRaises(OSError),
+        ):
+            self.module.start_playback(self.settings(), payload)
+        with self.assertRaises(OSError):
+            self.module.os.fstat(captured["fd"])
+
+    def test_playback_exit_timeout_and_stop_are_bounded(self) -> None:
+        stopped = self.module.threading.Event()
+        failed = self.FakeProcess(return_code=7)
+        with self.assertRaisesRegex(RuntimeError, "status 7"):
+            self.module.PlaybackProcess(failed, 10).wait(stopped)
+
+        timed_out = self.FakeProcess(return_code=None)
+        timeout_playback = self.module.PlaybackProcess(timed_out, 10)
+        timeout_playback.deadline = self.module.time.monotonic() - 1
+        with self.assertRaisesRegex(RuntimeError, "timed out"):
+            timeout_playback.wait(stopped)
+        self.assertTrue(timed_out.terminated)
+
+        cancelled = self.FakeProcess(return_code=None)
+        stopped.set()
+        self.assertFalse(
+            self.module.PlaybackProcess(cancelled, 10).wait(stopped)
+        )
+        self.assertTrue(cancelled.terminated)
+
+    def test_stop_during_playback_spawn_cancels_the_new_child(self) -> None:
+        bridge = self.module.VoiceBridge(self.settings())
+        playback = self.ImmediatePlayback()
+
+        def spawn_then_signal(*_args, **_kwargs):
+            bridge.request_stop()
+            return playback
+
+        with (
+            mock.patch.object(
+                self.module, "start_playback", side_effect=spawn_then_signal
+            ),
+            self.assertRaisesRegex(RuntimeError, "stopping"),
+        ):
+            bridge._start_playback(self.module.fallback_thinking_cue())
+
+        self.assertTrue(playback.cancelled)
+        self.assertIsNone(bridge._active_playback)
+
+    def test_synthesis_child_receives_tts_only_configuration(self) -> None:
+        captured = {}
+
+        class FakeConnection:
+            def send(self, _value):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self, *, target, args, name, daemon):
+                captured.update(
+                    target=target,
+                    args=args,
+                    name=name,
+                    daemon=daemon,
+                )
+                self.alive = True
+
+            def start(self):
+                pass
+
+            def is_alive(self):
+                return self.alive
+
+            def join(self, timeout=None):
+                del timeout
+                self.alive = False
+
+            def terminate(self):
+                self.alive = False
+
+            def kill(self):
+                self.alive = False
+
+        class FakeContext:
+            def Pipe(self, duplex):
+                self_test.assertTrue(duplex)
+                return FakeConnection(), FakeConnection()
+
+            def Process(self, **kwargs):
+                return FakeProcess(**kwargs)
+
+        self_test = self
+        settings = self.settings(openclaw_token="private-token")
+        with mock.patch.object(
+            self.module.multiprocessing,
+            "get_context",
+            return_value=FakeContext(),
+        ):
+            worker = self.module.SynthesisWorker(settings)
+            worker.close()
+
+        child_settings = captured["args"][0]
+        self.assertIsInstance(child_settings, self.module.TtsClientSettings)
+        self.assertEqual(
+            set(vars(child_settings)),
+            {"tts_url", "tts_model", "tts_timeout_seconds"},
+        )
+        self.assertNotIn("private-token", repr(captured["args"]))
+        self.assertEqual(captured["name"], "audio8-client")
+        self.assertTrue(captured["daemon"])
+
+    def test_synthesis_worker_success_safe_error_and_timeout(self) -> None:
+        payload = self.module.fallback_thinking_cue()
+
+        class FakeProcess:
+            def __init__(self):
+                self.alive = True
+                self.terminated = False
+
+            def is_alive(self):
+                return self.alive
+
+            def terminate(self):
+                self.terminated = True
+                self.alive = False
+
+            def kill(self):
+                self.alive = False
+
+            def join(self, timeout=None):
+                del timeout
+
+        class FakeConnection:
+            def __init__(self, result=None, ready=True):
+                self.result = result
+                self.ready = ready
+                self.closed = False
+
+            def poll(self, timeout):
+                self_test.assertEqual(timeout, 0)
+                return self.ready
+
+            def recv(self):
+                return self.result
+
+            def close(self):
+                self.closed = True
+
+        self_test = self
+
+        def worker_with(connection):
+            worker = object.__new__(self.module.SynthesisWorker)
+            worker.connection = connection
+            worker.process = FakeProcess()
+            worker.timeout_seconds = 10
+            worker.deadline = self.module.time.monotonic() + 10
+            worker.busy = True
+            worker.closed = False
+            return worker
+
+        success = worker_with(FakeConnection(("ok", payload)))
+        self.assertEqual(success.poll(), payload)
+        self.assertFalse(success.busy)
+
+        safe_error = worker_with(
+            FakeConnection(("error", "TimeoutError PRIVATE BODY MUST NOT PASS"))
+        )
+        with self.assertRaises(self.module.SynthesisWorkerError) as caught:
+            safe_error.poll()
+        self.assertNotIn("PRIVATE BODY", repr(caught.exception))
+
+        timeout_connection = FakeConnection(ready=False)
+        timed_out = worker_with(timeout_connection)
+        timed_out.deadline = self.module.time.monotonic() - 1
+        with self.assertRaisesRegex(
+            self.module.SynthesisWorkerError, "timed out"
+        ):
+            timed_out.poll()
+        self.assertTrue(timed_out.process.terminated)
+        self.assertTrue(timeout_connection.closed)
+
+    def test_real_spawned_worker_returns_a_safe_loopback_error(self) -> None:
+        # Use the canonical import name so multiprocessing's spawn method can
+        # re-import the target in its clean child interpreter.
+        canonical = importlib.import_module("voice_assistant.voice_bridge")
+        config = canonical.TtsClientSettings(
+            tts_url="http://127.0.0.1:1/v1/audio/speech",
+            tts_model="test-model",
+            tts_timeout_seconds=10,
+        )
+        worker = canonical.SynthesisWorker(config)
+        try:
+            worker.submit("bounded process smoke test")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    result = worker.poll()
+                except canonical.SynthesisWorkerError as error:
+                    self.assertNotIn("bounded process smoke test", str(error))
+                    break
+                self.assertIsNone(result)
+                time.sleep(0.02)
+            else:
+                self.fail("spawned Audio8 client did not return within five seconds")
+        finally:
+            worker.close()
+
+
+class PlaybackPipelineTests(BridgeTestCase):
+    def run_command(self, bridge, patches):
+        defaults = {
+            "transcribe_wav": mock.Mock(return_value="Cerberus run the task"),
+            "ask_openclaw": mock.Mock(return_value="answer"),
+            "SynthesisWorker": self.inline_synthesis_worker_class(),
+        }
+        defaults.update(patches)
+        patchers = [
+            mock.patch.object(self.module, name, replacement)
+            for name, replacement in defaults.items()
+        ]
+        for patcher in patchers:
+            patcher.start()
+        try:
+            return bridge.handle_utterance(b"pcm")
+        finally:
+            for patcher in reversed(patchers):
+                patcher.stop()
+
+    def test_response_pipeline_synthesizes_exactly_one_chunk_ahead(self) -> None:
+        bridge = self.module.VoiceBridge(self.settings())
+        events = []
+        active = {"chunk": None}
+
+        class FakePlayback:
+            def __init__(self, chunk):
+                self.chunk = chunk
+
+            def wait(self, stop_event):
+                self_test.assertFalse(stop_event.is_set())
+                self_test.assertEqual(active["chunk"], self.chunk)
+                events.append(("wait", self.chunk))
+                active["chunk"] = None
+                return True
+
+            def poll(self):
+                self_test.assertEqual(active["chunk"], self.chunk)
+                events.append(("wait", self.chunk))
+                active["chunk"] = None
+                return True
+
+            def cancel(self):
+                events.append(("cancel", self.chunk))
+
+        self_test = self
+
+        def fake_synthesize(_settings, text, **_kwargs):
+            chunk = int(text[-1])
+            if chunk > 1:
+                self.assertEqual(active["chunk"], chunk - 1)
+            events.append(("synthesize", chunk))
+            return f"wav-{chunk}".encode()
+
+        def fake_start(_settings, wav_bytes, **_kwargs):
+            chunk = int(wav_bytes.decode().split("-")[1])
+            self.assertIsNone(active["chunk"])
+            active["chunk"] = chunk
+            events.append(("start", chunk))
+            return FakePlayback(chunk)
+
+        with (
+            mock.patch.object(bridge, "_start_thinking_cue", return_value=None),
+            mock.patch.object(
+                self.module,
+                "bounded_spoken_chunks",
+                return_value=(["chunk1", "chunk2", "chunk3"], False),
+            ),
+        ):
+            played = self.run_command(
+                bridge,
+                {
+                    "synthesize": mock.Mock(side_effect=fake_synthesize),
+                    "start_playback": mock.Mock(side_effect=fake_start),
+                },
+            )
+
+        self.assertTrue(played)
+        self.assertIsNone(active["chunk"])
+        self.assertEqual(
+            events,
+            [
+                ("synthesize", 1),
+                ("start", 1),
+                ("synthesize", 2),
+                ("wait", 1),
+                ("start", 2),
+                ("synthesize", 3),
+                ("wait", 2),
+                ("start", 3),
+                ("wait", 3),
+            ],
+        )
+
+    def test_coordinator_interleaves_async_synthesis_and_playback_polls(self) -> None:
+        bridge = self.module.VoiceBridge(self.settings())
+        events = []
+
+        class AsyncWorker:
+            def __init__(self, _settings):
+                self.closed = False
+                self.text = None
+                self.poll_count = 0
+                self.busy = False
+
+            def submit(self, text):
+                self.text = text
+                self.poll_count = 0
+                self.busy = True
+                events.append(f"submit-{text}")
+
+            def poll(self):
+                self.poll_count += 1
+                events.append(f"synth-poll-{self.text}-{self.poll_count}")
+                if self.poll_count < 3:
+                    return None
+                self.busy = False
+                return f"wav-{self.text}".encode()
+
+            def cancel(self):
+                self.closed = True
+                self.busy = False
+
+            def close(self):
+                self.closed = True
+                self.busy = False
+
+        class FirstPlayback:
+            def __init__(self):
+                self.poll_count = 0
+
+            def poll(self):
+                self.poll_count += 1
+                events.append(f"play-poll-{self.poll_count}")
+                return self.poll_count >= 2
+
+            def wait(self, _stop_event):
+                raise AssertionError("overlapped chunk must be polled")
+
+            def cancel(self):
+                events.append("play-cancel")
+
+        def fake_start(_settings, wav_bytes, **_kwargs):
+            if wav_bytes == b"wav-first":
+                events.append("play-start-first")
+                return FirstPlayback()
+            events.append("play-start-second")
+            return self.ImmediatePlayback()
+
+        with (
+            mock.patch.object(bridge, "_start_thinking_cue", return_value=None),
+            mock.patch.object(
+                self.module,
+                "bounded_spoken_chunks",
+                return_value=(["first", "second"], False),
+            ),
+        ):
+            self.assertTrue(
+                self.run_command(
+                    bridge,
+                    {
+                        "SynthesisWorker": AsyncWorker,
+                        "start_playback": mock.Mock(side_effect=fake_start),
+                    },
+                )
+            )
+
+        first_start = events.index("play-start-first")
+        second_submit = events.index("submit-second")
+        second_start = events.index("play-start-second")
+        self.assertLess(first_start, second_submit)
+        self.assertEqual(
+            events[second_submit + 1 : second_start],
+            [
+                "synth-poll-second-1",
+                "play-poll-1",
+                "synth-poll-second-2",
+                "play-poll-2",
+                "synth-poll-second-3",
+            ],
+        )
+
+    def test_prefetch_failure_finishes_current_audio_then_stops(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = self.module.VoiceBridge(self.settings(state_dir=directory))
+            bridge.status.start()
+            events = []
+
+            class FakePlayback:
+                def wait(self, _stop_event):
+                    events.append("wait-current")
+                    return True
+
+                def poll(self):
+                    events.append("wait-current")
+                    return True
+
+                def cancel(self):
+                    events.append("cancel-current")
+
+            def fake_synthesize(_settings, text, **_kwargs):
+                events.append(f"synthesize-{text}")
+                if text == "second":
+                    raise TimeoutError("private next chunk")
+                return b"first-wav"
+
+            def fake_start(_settings, wav_bytes, **_kwargs):
+                events.append(f"start-{wav_bytes.decode()}")
+                return FakePlayback()
+
+            with (
+                mock.patch.object(bridge, "_start_thinking_cue", return_value=None),
+                mock.patch.object(
+                    self.module,
+                    "bounded_spoken_chunks",
+                    return_value=(["first", "second"], False),
+                ),
+                self.assertRaises(TimeoutError),
+            ):
+                self.run_command(
+                    bridge,
+                    {
+                        "synthesize": mock.Mock(side_effect=fake_synthesize),
+                        "start_playback": mock.Mock(side_effect=fake_start),
+                    },
+                )
+            status, _ = StatusPublisherTests.read_status(directory)
+            bridge.status.stop()
+
+        self.assertEqual(
+            events,
+            [
+                "synthesize-first",
+                "start-first-wav",
+                "synthesize-second",
+                "wait-current",
+            ],
+        )
+        self.assertEqual(status["last_error"]["stage"], "tts_synthesis")
+        self.assertEqual(status["pipeline"]["steps"]["tts"], "error")
+        self.assertEqual(status["pipeline"]["steps"]["play"], "complete")
+
+    def test_playback_failure_discards_the_single_prefetched_chunk(self) -> None:
+        bridge = self.module.VoiceBridge(self.settings())
+        events = []
+
+        class FailedPlayback:
+            def wait(self, _stop_event):
+                events.append("wait-first")
+                raise OSError("private playback detail")
+
+            def poll(self):
+                events.append("wait-first")
+                raise OSError("private playback detail")
+
+            def cancel(self):
+                events.append("cancel-first")
+
+        def fake_synthesize(_settings, text, **_kwargs):
+            events.append(f"synthesize-{text}")
+            return text.encode()
+
+        def fake_start(_settings, wav_bytes, **_kwargs):
+            events.append(f"start-{wav_bytes.decode()}")
+            return FailedPlayback()
+
+        with (
+            mock.patch.object(bridge, "_start_thinking_cue", return_value=None),
+            mock.patch.object(
+                self.module,
+                "bounded_spoken_chunks",
+                return_value=(["first", "second"], False),
+            ),
+            self.assertRaises(OSError),
+        ):
+            self.run_command(
+                bridge,
+                {
+                    "synthesize": mock.Mock(side_effect=fake_synthesize),
+                    "start_playback": mock.Mock(side_effect=fake_start),
+                },
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "synthesize-first",
+                "start-first",
+                "synthesize-second",
+                "wait-first",
+            ],
+        )
+
+    def test_stop_cancels_active_playback_and_never_starts_prefetched_audio(self) -> None:
+        bridge = self.module.VoiceBridge(self.settings())
+        events = []
+
+        class CancelledPlayback:
+            def wait(self, stop_event):
+                events.append("wait-first")
+                self_test.assertTrue(stop_event.is_set())
+                return False
+
+            def poll(self):
+                events.append("wait-first")
+                return False
+
+            def cancel(self):
+                events.append("cancel-first")
+
+        self_test = self
+
+        def fake_synthesize(_settings, text, **_kwargs):
+            events.append(f"synthesize-{text}")
+            if text == "second":
+                bridge.request_stop()
+            return text.encode()
+
+        def fake_start(_settings, wav_bytes, **_kwargs):
+            events.append(f"start-{wav_bytes.decode()}")
+            return CancelledPlayback()
+
+        with (
+            mock.patch.object(bridge, "_start_thinking_cue", return_value=None),
+            mock.patch.object(
+                self.module,
+                "bounded_spoken_chunks",
+                return_value=(["first", "second"], False),
+            ),
+        ):
+            played = self.run_command(
+                bridge,
+                {
+                    "synthesize": mock.Mock(side_effect=fake_synthesize),
+                    "start_playback": mock.Mock(side_effect=fake_start),
+                },
+            )
+
+        self.assertFalse(played)
+        self.assertIsNone(bridge._active_playback)
+        self.assertEqual(
+            events,
+            [
+                "synthesize-first",
+                "start-first",
+                "synthesize-second",
+                "cancel-first",
+            ],
+        )
+
+    def test_thinking_cue_overlaps_claw_but_not_answer_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = self.module.VoiceBridge(self.settings(state_dir=directory))
+            bridge.status.start()
+            events = []
+
+            class CuePlayback:
+                def wait(self, _stop_event):
+                    events.append("cue-wait")
+                    return True
+
+                def cancel(self):
+                    events.append("cue-cancel")
+
+            class AnswerPlayback:
+                def wait(self, _stop_event):
+                    events.append("answer-wait")
+                    return True
+
+                def cancel(self):
+                    events.append("answer-cancel")
+
+            def fake_start(_settings, wav_bytes, **_kwargs):
+                if wav_bytes == b"answer-wav":
+                    self.assertIn("cue-wait", events)
+                    events.append("answer-start")
+                    return AnswerPlayback()
+                events.append("cue-start")
+                return CuePlayback()
+
+            def fake_openclaw(*_args):
+                status, _ = StatusPublisherTests.read_status(directory)
+                self.assertEqual(status["overall"]["stage"], "openclaw")
+                self.assertEqual(status["pipeline"]["steps"]["openclaw"], "active")
+                self.assertEqual(status["pipeline"]["steps"]["tts"], "idle")
+                self.assertEqual(status["pipeline"]["steps"]["play"], "idle")
+                self.assertEqual(events, ["cue-start"])
+                events.append("claw")
+                return "answer"
+
+            played = self.run_command(
+                bridge,
+                {
+                    "ask_openclaw": mock.Mock(side_effect=fake_openclaw),
+                    "synthesize": mock.Mock(return_value=b"answer-wav"),
+                    "start_playback": mock.Mock(side_effect=fake_start),
+                },
+            )
+            status, _ = StatusPublisherTests.read_status(directory)
+            bridge.status.stop()
+
+        self.assertTrue(played)
+        self.assertEqual(
+            events,
+            ["cue-start", "claw", "cue-wait", "answer-start", "answer-wait"],
+        )
+        self.assertIsNone(status["last_error"])
+
+    def test_cue_failure_is_nonfatal_and_does_not_mark_playback_failed(self) -> None:
+        bridge = self.module.VoiceBridge(self.settings())
+        calls = 0
+
+        def fake_start(_settings, _wav_bytes, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("private cue detail")
+            return self.ImmediatePlayback()
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(
+                self.run_command(
+                    bridge,
+                    {
+                        "synthesize": mock.Mock(return_value=b"answer-wav"),
+                        "start_playback": mock.Mock(side_effect=fake_start),
+                    },
+                )
+            )
+        self.assertEqual(calls, 2)
+        self.assertIsNone(bridge.status._document["last_error"])
+        self.assertEqual(bridge.status._document["pipeline"]["steps"]["play"], "active")
+
+    def test_thinking_cue_is_bounded_quiet_and_faded(self) -> None:
+        rate = 44_100
+        frame_count = round(rate * 0.604)
+        source = io.BytesIO()
+        with self.module.wave.open(source, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(rate)
+            wav.writeframes(struct.pack(f"<{frame_count}h", *([20_000] * frame_count)))
+
+        cue = self.module.soften_thinking_cue(source.getvalue())
+        duration = self.module.validate_tts_wav(cue)
+        with self.module.wave.open(io.BytesIO(cue), "rb") as wav:
+            samples = struct.unpack(
+                f"<{wav.getnframes()}h", wav.readframes(wav.getnframes())
+            )
+
+        self.assertLessEqual(duration, self.module.THINKING_CUE_MAX_SECONDS)
+        self.assertLessEqual(
+            max(abs(sample) for sample in samples),
+            round(32_767 * self.module.THINKING_CUE_TARGET_PEAK),
+        )
+        self.assertEqual(samples[0], 0)
+        self.assertEqual(samples[-1], 0)
 
 
 class StatusPublisherTests(BridgeTestCase):
@@ -357,6 +1147,90 @@ class StatusPublisherTests(BridgeTestCase):
             )
             self.assertEqual(after["openclaw"]["state"], "thinking")
 
+    def test_pipeline_progress_is_turn_scoped_monotonic_and_content_free(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = self.module.StatusPublisher(directory, heartbeat_seconds=30)
+            publisher.start()
+            publisher.ready()
+
+            publisher.begin_asr()
+            asr, _ = self.read_status(directory)
+            publisher.component_ok("asr")
+            publisher.wake_triggered(heard_now=True)
+            accepted, _ = self.read_status(directory)
+            publisher.begin_openclaw()
+            claw, _ = self.read_status(directory)
+            publisher.component_ok("openclaw")
+            publisher.begin_tts(2)
+            synthesis_one, _ = self.read_status(directory)
+            publisher.tts_phase("playing", 1)
+            playback_one, _ = self.read_status(directory)
+            publisher.tts_phase("synthesizing", 2)
+            synthesis_two, _ = self.read_status(directory)
+            publisher.tts_phase("playing", 2)
+            playback_two, _ = self.read_status(directory)
+            publisher.begin_cooldown()
+            complete, raw = self.read_status(directory)
+            publisher.finish_tts()
+            publisher.ready()
+            idle, _ = self.read_status(directory)
+            publisher.stop()
+
+            self.assertEqual(asr["pipeline"]["steps"]["heard_name"], "idle")
+            self.assertEqual(asr["pipeline"]["steps"]["asr"], "active")
+            self.assertEqual(
+                accepted["pipeline"]["steps"],
+                {
+                    "heard_name": "complete",
+                    "asr": "complete",
+                    "openclaw": "idle",
+                    "tts": "idle",
+                    "play": "idle",
+                },
+            )
+            self.assertEqual(claw["pipeline"]["steps"]["openclaw"], "active")
+            self.assertEqual(synthesis_one["pipeline"]["steps"]["tts"], "active")
+            self.assertEqual(synthesis_one["pipeline"]["steps"]["play"], "idle")
+            self.assertEqual(playback_one["pipeline"]["steps"]["play"], "active")
+            self.assertEqual(synthesis_two["pipeline"]["steps"]["play"], "active")
+            self.assertEqual(synthesis_two["tts"]["synthesis_chunk_index"], 2)
+            self.assertEqual(synthesis_two["tts"]["playback_chunk_index"], 1)
+            self.assertEqual(playback_two["pipeline"]["steps"]["tts"], "complete")
+            self.assertEqual(playback_two["tts"]["synthesis_chunk_index"], 2)
+            self.assertEqual(playback_two["tts"]["playback_chunk_index"], 2)
+            self.assertTrue(all(
+                state == "complete"
+                for state in complete["pipeline"]["steps"].values()
+            ))
+            self.assertEqual(complete["pipeline"]["mode"], "complete")
+            self.assertFalse(idle["pipeline"]["active"])
+            self.assertEqual(idle["pipeline"]["mode"], "idle")
+            self.assertNotIn("transcript", raw.decode("utf-8"))
+            self.assertNotIn("response", raw.decode("utf-8"))
+
+    def test_pipeline_preserves_heard_name_across_armed_followup_asr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = self.module.StatusPublisher(directory, heartbeat_seconds=30)
+            publisher.start()
+            publisher.ready()
+            publisher.begin_asr()
+            publisher.component_ok("asr")
+            publisher.wake_armed(12)
+            armed, _ = self.read_status(directory)
+            publisher.begin_asr()
+            followup, _ = self.read_status(directory)
+            publisher.component_ok("asr")
+            publisher.wake_triggered(heard_now=False)
+            accepted, _ = self.read_status(directory)
+            publisher.stop()
+
+            self.assertEqual(armed["pipeline"]["mode"], "armed")
+            self.assertEqual(armed["pipeline"]["steps"]["heard_name"], "complete")
+            self.assertEqual(armed["pipeline"]["steps"]["asr"], "idle")
+            self.assertEqual(followup["pipeline"]["steps"]["heard_name"], "complete")
+            self.assertEqual(followup["pipeline"]["steps"]["asr"], "active")
+            self.assertEqual(accepted["pipeline"]["steps"]["asr"], "complete")
+
     def test_status_never_contains_private_pipeline_content(self) -> None:
         private_transcript = "Cerberus PRIVATE SPOKEN COMMAND 91a6"
         private_answer = "PRIVATE MODEL ANSWER 782b"
@@ -399,7 +1273,9 @@ class StatusPublisherTests(BridgeTestCase):
                 )
                 return b"wav"
 
-            def at_playback(*_args):
+            def at_playback(*_args, **_kwargs):
+                if _args[1] != b"wav":
+                    return self.ImmediatePlayback()
                 current, _ = self.read_status(directory)
                 observed.append(
                     (
@@ -409,12 +1285,20 @@ class StatusPublisherTests(BridgeTestCase):
                         current["tts"]["chunk_total"],
                     )
                 )
+                return self.ImmediatePlayback()
 
             with (
                 mock.patch.object(self.module, "transcribe_wav", side_effect=at_asr),
                 mock.patch.object(self.module, "ask_openclaw", side_effect=at_openclaw),
                 mock.patch.object(self.module, "synthesize", side_effect=at_synthesis),
-                mock.patch.object(self.module, "play_wav", side_effect=at_playback),
+                mock.patch.object(
+                    self.module, "start_playback", side_effect=at_playback
+                ),
+                mock.patch.object(
+                    self.module,
+                    "SynthesisWorker",
+                    self.inline_synthesis_worker_class(),
+                ),
             ):
                 self.assertTrue(bridge.handle_utterance(b"pcm"))
             bridge.status.begin_cooldown()
@@ -455,6 +1339,7 @@ class StatusPublisherTests(BridgeTestCase):
             "asr": (
                 {"transcribe_wav": mock.Mock(side_effect=RuntimeError(private_error))},
                 "asr",
+                "asr",
             ),
             "openclaw": (
                 {
@@ -462,7 +1347,11 @@ class StatusPublisherTests(BridgeTestCase):
                         return_value="Cerberus private request"
                     ),
                     "ask_openclaw": mock.Mock(side_effect=TimeoutError(private_error)),
+                    "start_playback": mock.Mock(
+                        side_effect=self.immediate_playback
+                    ),
                 },
+                "openclaw",
                 "openclaw",
             ),
             "tts_synthesis": (
@@ -472,8 +1361,12 @@ class StatusPublisherTests(BridgeTestCase):
                     ),
                     "ask_openclaw": mock.Mock(return_value="private answer"),
                     "synthesize": mock.Mock(side_effect=ValueError(private_error)),
+                    "start_playback": mock.Mock(
+                        side_effect=self.immediate_playback
+                    ),
                 },
                 "tts_synthesis",
+                "tts",
             ),
             "tts_playback": (
                 {
@@ -482,16 +1375,27 @@ class StatusPublisherTests(BridgeTestCase):
                     ),
                     "ask_openclaw": mock.Mock(return_value="private answer"),
                     "synthesize": mock.Mock(return_value=b"wav"),
-                    "play_wav": mock.Mock(side_effect=OSError(private_error)),
+                    "start_playback": mock.Mock(side_effect=OSError(private_error)),
                 },
                 "tts_playback",
+                "play",
             ),
         }
-        for name, (patches, expected_stage) in scenarios.items():
+        for name, (patches, expected_stage, expected_step) in scenarios.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 bridge = self.module.VoiceBridge(self.settings(state_dir=directory))
                 bridge.status.start()
-                patchers = [mock.patch.object(self.module, key, value) for key, value in patches.items()]
+                patchers = [
+                    mock.patch.object(self.module, key, value)
+                    for key, value in patches.items()
+                ]
+                patchers.append(
+                    mock.patch.object(
+                        self.module,
+                        "SynthesisWorker",
+                        self.inline_synthesis_worker_class(),
+                    )
+                )
                 for patcher in patchers:
                     patcher.start()
                 try:
@@ -506,6 +1410,10 @@ class StatusPublisherTests(BridgeTestCase):
                 self.assertEqual(status["overall"]["state"], "degraded")
                 self.assertEqual(status["overall"]["stage"], "retry_wait")
                 self.assertEqual(status["last_error"]["stage"], expected_stage)
+                self.assertEqual(status["pipeline"]["mode"], "error")
+                self.assertFalse(status["pipeline"]["active"])
+                self.assertEqual(status["pipeline"]["steps"][expected_step], "error")
+                self.assertNotIn("active", status["pipeline"]["steps"].values())
                 self.assertRegex(status["last_error"]["type"], r"^[A-Za-z_][A-Za-z0-9_]*$")
                 self.assertNotIn(private_error, raw.decode("utf-8"))
 
@@ -524,14 +1432,20 @@ class StatusPublisherTests(BridgeTestCase):
                     self.module, "bounded_spoken_chunks", return_value=([], False)
                 ),
                 mock.patch.object(self.module, "synthesize") as synthesize_mock,
-                mock.patch.object(self.module, "play_wav") as playback_mock,
+                mock.patch.object(
+                    self.module,
+                    "start_playback",
+                    side_effect=self.immediate_playback,
+                ) as playback_mock,
             ):
                 self.assertFalse(bridge.handle_utterance(b"pcm"))
             status, _ = self.read_status(directory)
             bridge.status.stop()
 
             synthesize_mock.assert_not_called()
-            playback_mock.assert_not_called()
+            # The courtesy cue is independent of response TTS and remains
+            # allowed even when OpenClaw returns no speakable chunks.
+            self.assertEqual(playback_mock.call_count, 1)
             self.assertEqual(status["overall"]["state"], "ready")
             self.assertEqual(status["overall"]["stage"], "listening")
             self.assertEqual(status["wake_word"]["state"], "listening")
@@ -553,7 +1467,16 @@ class StatusPublisherTests(BridgeTestCase):
                 ),
                 mock.patch.object(self.module, "ask_openclaw", return_value="Healthy."),
                 mock.patch.object(self.module, "synthesize", return_value=b"wav"),
-                mock.patch.object(self.module, "play_wav"),
+                mock.patch.object(
+                    self.module,
+                    "start_playback",
+                    side_effect=self.immediate_playback,
+                ),
+                mock.patch.object(
+                    self.module,
+                    "SynthesisWorker",
+                    self.inline_synthesis_worker_class(),
+                ),
             ):
                 self.assertFalse(bridge.handle_utterance(b"wake"))
                 self.assertFalse(bridge.handle_utterance(b"empty"))
@@ -561,6 +1484,20 @@ class StatusPublisherTests(BridgeTestCase):
                 self.assertEqual(still_armed["overall"]["state"], "armed")
                 self.assertEqual(still_armed["wake_word"]["state"], "armed")
                 self.assertIsNotNone(still_armed["wake_word"]["armed_until"])
+                self.assertEqual(
+                    still_armed["pipeline"],
+                    {
+                        "active": True,
+                        "mode": "armed",
+                        "steps": {
+                            "heard_name": "complete",
+                            "asr": "idle",
+                            "openclaw": "idle",
+                            "tts": "idle",
+                            "play": "idle",
+                        },
+                    },
+                )
                 self.assertTrue(bridge.handle_utterance(b"command"))
             bridge.status.stop()
 
@@ -581,7 +1518,16 @@ class StatusPublisherTests(BridgeTestCase):
                 ),
                 mock.patch.object(self.module, "ask_openclaw", return_value="Healthy."),
                 mock.patch.object(self.module, "synthesize", return_value=b"wav"),
-                mock.patch.object(self.module, "play_wav"),
+                mock.patch.object(
+                    self.module,
+                    "start_playback",
+                    side_effect=self.immediate_playback,
+                ),
+                mock.patch.object(
+                    self.module,
+                    "SynthesisWorker",
+                    self.inline_synthesis_worker_class(),
+                ),
             ):
                 self.assertFalse(bridge.handle_utterance(b"wake"))
                 with self.assertRaises(self.module.urllib.error.URLError):
@@ -592,9 +1538,21 @@ class StatusPublisherTests(BridgeTestCase):
                 retry_status, _ = self.read_status(directory)
                 self.assertEqual(retry_status["overall"]["state"], "armed")
                 self.assertEqual(retry_status["last_error"]["stage"], "asr")
+                self.assertEqual(retry_status["pipeline"]["mode"], "armed")
+                self.assertEqual(
+                    retry_status["pipeline"]["steps"],
+                    {
+                        "heard_name": "complete",
+                        "asr": "error",
+                        "openclaw": "idle",
+                        "tts": "idle",
+                        "play": "idle",
+                    },
+                )
                 self.assertTrue(bridge.handle_utterance(b"command"))
                 recovered, _ = self.read_status(directory)
                 self.assertIsNone(recovered["last_error"])
+                self.assertEqual(recovered["pipeline"]["steps"]["asr"], "complete")
             bridge.status.stop()
 
     def test_armed_state_expires_in_heartbeat(self) -> None:
@@ -650,6 +1608,7 @@ class StatusPublisherTests(BridgeTestCase):
             publisher.ready()
             retained, _ = self.read_status(directory)
             self.assertEqual(retained["last_error"]["stage"], "asr")
+            self.assertEqual(retained["pipeline"]["steps"]["asr"], "error")
 
             publisher.begin_openclaw()
             publisher.component_ok("openclaw")
@@ -661,6 +1620,106 @@ class StatusPublisherTests(BridgeTestCase):
             recovered, _ = self.read_status(directory)
             publisher.stop()
             self.assertIsNone(recovered["last_error"])
+
+    def test_unrelated_listening_pass_restores_retained_failed_band(self) -> None:
+        scenarios = {
+            "openclaw": "openclaw",
+            "tts_synthesis": "tts",
+            "tts_playback": "play",
+        }
+        for failure_stage, failed_step in scenarios.items():
+            with self.subTest(stage=failure_stage), tempfile.TemporaryDirectory() as directory:
+                publisher = self.module.StatusPublisher(directory, heartbeat_seconds=30)
+                publisher.start()
+                publisher.ready()
+                publisher.fail(failure_stage, TimeoutError("private"))
+
+                # An unrelated utterance reaches ASR but does not address the
+                # retained downstream failure and is then rejected.
+                publisher.begin_asr()
+                publisher.component_ok("asr")
+                publisher.wake_not_detected()
+                ignored, _ = self.read_status(directory)
+
+                # A rejected VAD burst follows the same listening recovery
+                # path and must not erase the red failed band either.
+                publisher.speech_detected()
+                publisher.resume_listening()
+                resumed, _ = self.read_status(directory)
+                publisher.stop()
+
+                for status in (ignored, resumed):
+                    self.assertEqual(status["last_error"]["stage"], failure_stage)
+                    self.assertFalse(status["pipeline"]["active"])
+                    self.assertEqual(status["pipeline"]["mode"], "error")
+                    self.assertEqual(
+                        status["pipeline"]["steps"][failed_step], "error"
+                    )
+                    self.assertNotIn("active", status["pipeline"]["steps"].values())
+
+    def test_chunked_tts_failures_leave_no_active_step(self) -> None:
+        scenarios = {
+            "tts_playback": ("play", "tts"),
+            "tts_synthesis": ("tts", "play"),
+        }
+        for failure_stage, (failed_step, completed_step) in scenarios.items():
+            with self.subTest(stage=failure_stage), tempfile.TemporaryDirectory() as directory:
+                publisher = self.module.StatusPublisher(directory, heartbeat_seconds=30)
+                publisher.start()
+                publisher.ready()
+                publisher.begin_tts(2)
+                publisher.tts_phase("playing", 1)
+                if failure_stage == "tts_synthesis":
+                    publisher.tts_phase("synthesizing", 2)
+                publisher.fail(failure_stage, TimeoutError("private"))
+                failed, _ = self.read_status(directory)
+                publisher.stop()
+
+                self.assertFalse(failed["pipeline"]["active"])
+                self.assertEqual(failed["pipeline"]["mode"], "error")
+                self.assertEqual(
+                    failed["pipeline"]["steps"][failed_step], "error"
+                )
+                self.assertEqual(
+                    failed["pipeline"]["steps"][completed_step], "complete"
+                )
+                self.assertNotIn("active", failed["pipeline"]["steps"].values())
+
+    def test_capture_failure_maps_to_asr_without_faking_wake_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = self.module.StatusPublisher(directory, heartbeat_seconds=0.25)
+            publisher.start()
+            publisher.ready()
+            publisher.speech_detected()
+            publisher.fail("capture", OSError("private device detail"))
+            publisher.resume_listening()
+            failed, _ = self.read_status(directory)
+
+            deadline = time.monotonic() + 1.5
+            heartbeat = failed
+            while (
+                heartbeat["sequence"] == failed["sequence"]
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+                heartbeat, _ = self.read_status(directory)
+
+            publisher.begin_asr()
+            recovering, _ = self.read_status(directory)
+            publisher.stop()
+
+            self.assertEqual(failed["last_error"]["stage"], "capture")
+            self.assertEqual(failed["pipeline"]["mode"], "error")
+            self.assertFalse(failed["pipeline"]["active"])
+            self.assertEqual(failed["pipeline"]["steps"]["heard_name"], "idle")
+            self.assertEqual(failed["pipeline"]["steps"]["asr"], "error")
+            self.assertIsNone(failed["wake_word"]["last_trigger_at"])
+            self.assertGreater(heartbeat["sequence"], failed["sequence"])
+            self.assertFalse(heartbeat["pipeline"]["active"])
+            self.assertIsNone(heartbeat["wake_word"]["last_trigger_at"])
+            self.assertIsNone(recovering["last_error"])
+            self.assertEqual(recovering["pipeline"]["mode"], "scanning")
+            self.assertEqual(recovering["pipeline"]["steps"]["asr"], "active")
 
 
 if __name__ == "__main__":
