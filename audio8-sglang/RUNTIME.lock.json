@@ -1,0 +1,14 @@
+{
+  "audio8_tts_commit": "9393162327a0cfb7045f55652665bcc93c9be54f",
+  "base_image": "lmsysorg/sglang@sha256:032ac5457fdff735f21abc366aed0f76ddb699d51fdbe17745c2a0e53579b6ea",
+  "image": "cerberus/audio8-sglang:9393162-sm121",
+  "model_directory": "Audio8-TTS-Preview-0.6b--f9612f13",
+  "model_revision": "f9612f13a0ab40facf3d050fc908b9e6db05c2be",
+  "served_model_name": "audio8/tts-0.6b",
+  "single_process_source_contract": {
+    "audio8_config_sha256": "7e148b75110a5a918a686d2bd95af8915fe4aed80f6b8bd90b314d5751beaa1f",
+    "sglang_compiler_sha256": "df6c355c34b42e7f22fc63ee1b5142fb6f07d1697e84f13b16cb51b403537415",
+    "sglang_launcher_sha256": "0f5c0787540fa0e1f50efa795a4bb8e5ea44d5eb1b29c7fee1caefd2ee2ed5b0"
+  },
+  "sglang_omni_commit": "68a572348837f7b004857b4b07993c20ade4c017"
+}

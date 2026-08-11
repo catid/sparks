@@ -1,0 +1,20 @@
+diff --git a/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/stages.py b/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/stages.py
+index 1393e07..24ed19f 100644
+--- a/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/stages.py
++++ b/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/stages.py
+@@ -237,11 +237,14 @@ def create_sglang_tts_engine_executor(
+         codes_only_ids.discard(payload.request_id)
+         return store_state(payload, state)
+ 
++    if stream_enabled:
++        raise RuntimeError(
++            "Audio8 streaming requires a newer SGLang Omni EngineExecutor API"
++        )
+     executor = EngineExecutor(
+         engine=engine,
+         request_builder=request_builder,
+         result_builder=result_builder,
+-        stream_enabled=stream_enabled,
+     )
+ 
+     def set_stream_fn(stream_fn: Any) -> None:

@@ -1,0 +1,44 @@
+diff --git a/sglang_omni/serve/openai_api.py b/sglang_omni/serve/openai_api.py
+index 97f5651..2421fbe 100644
+--- a/sglang_omni/serve/openai_api.py
++++ b/sglang_omni/serve/openai_api.py
+@@ -15,6 +15,7 @@ from __future__ import annotations
+ import base64
+ import json
+ import logging
++import os
+ import time
+ import uuid
+ from typing import Any
+@@ -101,12 +102,27 @@ def _register_health(app: FastAPI) -> None:
+         client: Client = app.state.client
+         info = client.health()
+         is_running = info.get("running", False)
++        audio8_runtime: dict[str, Any] | None = None
++        if os.getenv("SGLANG_OMNI_AUDIO8_ONLY", "0") == "1":
++            try:
++                from sglang_omni.models.audio8_tts.pipeline.stages import (
++                    get_runtime_attestation,
++                )
++
++                audio8_runtime = get_runtime_attestation()
++            except Exception:
++                logger.exception("Audio8 runtime attestation unavailable")
++                audio8_runtime = {"schema": 1, "ready": False}
++            is_running = bool(is_running and audio8_runtime.get("ready") is True)
+         status_code = 200 if is_running else 503
++        content = {
++            "status": "healthy" if is_running else "unhealthy",
++            **info,
++        }
++        if audio8_runtime is not None:
++            content["audio8_runtime"] = audio8_runtime
+         return JSONResponse(
+-            content={
+-                "status": "healthy" if is_running else "unhealthy",
+-                **info,
+-            },
++            content=content,
+             status_code=status_code,
+         )
+ 

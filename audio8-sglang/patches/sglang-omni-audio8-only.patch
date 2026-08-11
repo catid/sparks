@@ -1,0 +1,23 @@
+diff --git a/sglang_omni/engines/ar/sglang_backend/model_runner.py b/sglang_omni/engines/ar/sglang_backend/model_runner.py
+index 1f17b5a..be99c9c 100644
+--- a/sglang_omni/engines/ar/sglang_backend/model_runner.py
++++ b/sglang_omni/engines/ar/sglang_backend/model_runner.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import os
+ from collections.abc import Iterator
+ from typing import Any
+ 
+@@ -62,6 +63,11 @@ class SGLModelRunner(ModelRunner):
+         # Register sglang_omni model classes directly in SGLang's model registry.
+         from sglang.srt.models.registry import ModelRegistry
+ 
++        # Audio8 registers ArkttsModel before constructing this runner. Avoid
++        # importing unrelated multimodal stacks in the dedicated image.
++        if os.getenv("SGLANG_OMNI_AUDIO8_ONLY", "0") == "1":
++            return
++
+         from sglang_omni.models.fishaudio_s2_pro.sglang_model import (
+             S2ProSGLangTextModel,
+         )

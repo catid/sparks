@@ -1,0 +1,226 @@
+diff --git a/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/stages.py b/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/stages.py
+index 1393e07..092376a 100644
+--- a/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/stages.py
++++ b/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/stages.py
+@@ -7,6 +7,7 @@ import json
+ import logging
+ import os
+ import sys
++import threading
+ from pathlib import Path
+ from types import SimpleNamespace
+ from typing import Any
+@@ -29,6 +30,54 @@ from sglang_omni.models.audio8_tts.tokenizer import Audio8TokenizerAdapter, Refe
+ from sglang_omni.proto import StagePayload
+ 
+ logger = logging.getLogger(__name__)
++_RUNTIME_ATTESTATION_LOCK = threading.Lock()
++_RUNTIME_ATTESTATION: dict[str, Any] = {
++    "schema": 1,
++    "runtime_process_id": os.getpid(),
++    "engine_process_id": None,
++    "reference_process_id": None,
++    "engine_initialized": False,
++    "fixed_reference_configured": False,
++    "fixed_reference_cached": False,
++    "slow_attention_backend": None,
++    "fast_attention_backend": None,
++    "cuda_graph_requested": False,
++    "cuda_graph_active": False,
++    "cuda_graph_batches": [],
++    "torch_compile_requested": False,
++    "torch_compile_active": False,
++    "torch_compile_batches": [],
++}
++
++
++def _update_runtime_attestation(**values: Any) -> None:
++    with _RUNTIME_ATTESTATION_LOCK:
++        _RUNTIME_ATTESTATION.update(values)
++
++
++def get_runtime_attestation() -> dict[str, Any]:
++    with _RUNTIME_ATTESTATION_LOCK:
++        result = dict(_RUNTIME_ATTESTATION)
++        result["torch_compile_batches"] = list(
++            _RUNTIME_ATTESTATION["torch_compile_batches"]
++        )
++        result["cuda_graph_batches"] = list(
++            _RUNTIME_ATTESTATION["cuda_graph_batches"]
++        )
++    result["single_process_attested"] = bool(
++        result["runtime_process_id"] == os.getpid()
++        and result["engine_process_id"] == os.getpid()
++        and result["reference_process_id"] == os.getpid()
++    )
++    result["ready"] = bool(
++        result["engine_initialized"]
++        and result["fixed_reference_configured"]
++        and result["fixed_reference_cached"]
++        and result["slow_attention_backend"]
++        and result["fast_attention_backend"]
++        and result["single_process_attested"]
++    )
++    return result
+ 
+ 
+ def _load_config(model_path: str) -> SimpleNamespace:
+@@ -135,6 +184,40 @@ def create_preprocessing_executor(
+         eos_token_id=config.eos_token_id,
+     )
+     codec: Any | None = None
++    fixed_audio = os.getenv("AUDIO8_TTS_FIXED_REFERENCE_AUDIO", "").strip()
++    fixed_text_file = os.getenv(
++        "AUDIO8_TTS_FIXED_REFERENCE_TEXT_FILE", ""
++    ).strip()
++    if bool(fixed_audio) != bool(fixed_text_file):
++        raise RuntimeError(
++            "fixed reference audio and transcript must be configured together"
++        )
++    _update_runtime_attestation(fixed_reference_configured=bool(fixed_audio))
++    fixed_text: str | None = None
++    if fixed_audio:
++        audio_path = Path(fixed_audio)
++        text_path = Path(fixed_text_file)
++        if (
++            not audio_path.is_absolute()
++            or not audio_path.is_file()
++            or audio_path.is_symlink()
++            or not 1 <= audio_path.stat().st_size <= 50 * 1024 * 1024
++        ):
++            raise RuntimeError("fixed reference audio must be a regular local file")
++        if (
++            not text_path.is_absolute()
++            or not text_path.is_file()
++            or text_path.is_symlink()
++        ):
++            raise RuntimeError("fixed reference transcript must be a regular local file")
++        with text_path.open(encoding="utf-8") as source:
++            fixed_text = source.read(4097).strip()
++        if not fixed_text or len(fixed_text) > 4096:
++            raise RuntimeError(
++                "fixed reference transcript must contain 1-4096 characters"
++            )
++    fixed_reference: Reference | None = None
++    fixed_reference_lock = threading.Lock()
+ 
+     def get_codec() -> Any:
+         nonlocal codec
+@@ -143,6 +226,23 @@ def create_preprocessing_executor(
+             codec = _load_codec(model_path, device)
+         return codec
+ 
++    def get_fixed_reference() -> Reference:
++        nonlocal fixed_reference
++        assert fixed_audio and fixed_text
++        with fixed_reference_lock:
++            if fixed_reference is None:
++                logger.info("Encoding operator-fixed Audio8 reference")
++                codes = _encode_reference(get_codec(), fixed_audio, device)
++                codes = _validate_codes(
++                    codes, config.num_codebooks, config.codebook_size
++                )
++                fixed_reference = Reference(text=fixed_text, vq_codes=codes)
++                _update_runtime_attestation(
++                    fixed_reference_cached=True,
++                    reference_process_id=os.getpid(),
++                )
++        return fixed_reference
++
+     def preprocess(payload: StagePayload) -> StagePayload:
+         inputs = payload.request.inputs or {}
+         params = payload.request.params or {}
+@@ -151,18 +251,27 @@ def create_preprocessing_executor(
+         if isinstance(inputs, str):
+             inputs = {"text": inputs}
+         references: list[Reference] | None = None
+-        raw_references = inputs.get("references")
+-        if raw_references:
+-            references = []
+-            for raw in raw_references:
+-                codes = raw.get("vq_codes")
+-                if codes is None:
+-                    audio_path = raw.get("audio_path")
+-                    if not audio_path:
+-                        raise ValueError("reference requires audio_path or vq_codes")
+-                    codes = _encode_reference(get_codec(), audio_path, device)
+-                codes = _validate_codes(codes, config.num_codebooks, config.codebook_size)
+-                references.append(Reference(text=raw.get("text", ""), vq_codes=codes))
++        if fixed_audio:
++            if inputs.get("references"):
++                raise ValueError("client-supplied voice references are disabled")
++            references = [get_fixed_reference()]
++        else:
++            raw_references = inputs.get("references")
++            if raw_references:
++                references = []
++                for raw in raw_references:
++                    codes = raw.get("vq_codes")
++                    if codes is None:
++                        audio_path = raw.get("audio_path")
++                        if not audio_path:
++                            raise ValueError("reference requires audio_path or vq_codes")
++                        codes = _encode_reference(get_codec(), audio_path, device)
++                    codes = _validate_codes(
++                        codes, config.num_codebooks, config.codebook_size
++                    )
++                    references.append(
++                        Reference(text=raw.get("text", ""), vq_codes=codes)
++                    )
+         prompt = adapter.build_prompt(
+             inputs.get("text", ""),
+             references,
+@@ -184,6 +293,10 @@ def create_preprocessing_executor(
+         )
+         return store_state(payload, state)
+ 
++    # A healthy API must prove the private reference is readable and encodable,
++    # and subsequent requests must not pay that cost again.
++    if fixed_audio:
++        get_fixed_reference()
+     return PreprocessingExecutor(preprocess)
+ 
+ 
+@@ -224,6 +337,42 @@ def create_sglang_tts_engine_executor(
+         max_new_tokens=max_new_tokens,
+         stream_fn=enqueue_stream,
+     )
++    model_runner = engine.model_runner.model_worker.model_runner
++    graph_runner = model_runner.graph_runner
++    captured_graphs = getattr(graph_runner, "graphs", {}) or {}
++    graph_batches = sorted(
++        key
++        for key in captured_graphs
++        if isinstance(key, int) and not isinstance(key, bool)
++    )
++    configured_compile_batches = list(
++        getattr(graph_runner, "compile_bs", []) or []
++    )
++    compile_batches = sorted(set(configured_compile_batches) & set(graph_batches))
++    graph_active = bool(captured_graphs)
++    compile_requested = bool(model_runner.server_args.enable_torch_compile)
++    compile_active = bool(
++        graph_active
++        and compile_requested
++        and getattr(graph_runner, "enable_torch_compile", False)
++        and compile_batches
++    )
++    from sglang_omni.models.audio8_tts.attention_backend import (
++        resolve_attention_backend,
++    )
++
++    _update_runtime_attestation(
++        engine_initialized=True,
++        engine_process_id=os.getpid(),
++        slow_attention_backend=str(model_runner.server_args.attention_backend),
++        fast_attention_backend=resolve_attention_backend(),
++        cuda_graph_requested=not bool(model_runner.server_args.disable_cuda_graph),
++        cuda_graph_active=graph_active,
++        cuda_graph_batches=graph_batches,
++        torch_compile_requested=compile_requested,
++        torch_compile_active=compile_active,
++        torch_compile_batches=[int(batch) for batch in compile_batches],
++    )
+ 
+     def request_builder(payload: StagePayload):
+         state = load_state(payload)
