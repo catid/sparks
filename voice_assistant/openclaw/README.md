@@ -9,11 +9,13 @@ only on the management LAN; bare `cerberus1` is deliberately not required.
 
 The voice agent uses `xhigh` thinking, which the DS4F compatibility map sends
 as `reasoning_effort: max`. Its tool profile starts at `minimal` and adds only
-Exa web search, web fetch, and outbound Slack messages. Speech captured by a
-room microphone still cannot run shell commands, edit files, schedule
-automation, accept inbound Slack events, or control the cluster. The checked-in
-workspace guidance also keeps answers short enough for TTS and prevents secrets
-from being spoken.
+Exa web search, web fetch, the bundled weather skill, a fixed-endpoint read-only
+Cerberus health tool, and outbound Slack messages. The health plugin reads the
+loopback dashboard's sanitized current snapshot and cannot choose another URL,
+run commands, or mutate the host. Speech captured by a room microphone still
+cannot run shell commands, edit files, schedule automation, accept inbound Slack
+events, or control the cluster. The checked-in workspace guidance also keeps
+answers short enough for TTS and prevents secrets from being spoken.
 
 ## Installation
 

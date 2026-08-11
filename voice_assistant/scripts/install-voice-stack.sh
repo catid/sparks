@@ -135,6 +135,9 @@ required_files=(
   "${voice_dir}/openclaw/openclaw.json.in"
   "${voice_dir}/openclaw/AGENTS.md"
   "${voice_dir}/openclaw/gateway-wrapper.sh"
+  "${voice_dir}/openclaw/plugins/cerberus-health/index.js"
+  "${voice_dir}/openclaw/plugins/cerberus-health/openclaw.plugin.json"
+  "${voice_dir}/openclaw/plugins/cerberus-health/package.json"
   "${voice_dir}/scripts/install-openclaw-runtime.sh"
   "${voice_dir}/scripts/migrate-legacy-state.py"
   "${voice_dir}/tests/fixtures/fake-node"
@@ -202,14 +205,14 @@ fi
 
 python3 - \
   "${voice_dir}/openclaw/openclaw.json.in" \
-  "${rendered_config}" "${workspace}" <<'PY'
+  "${rendered_config}" "${workspace}" "${project_dir}" <<'PY'
 import json
 import pathlib
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-rendered = source.replace("@WORKSPACE@", sys.argv[3])
-if "@WORKSPACE@" in rendered or "@" in json.dumps(json.loads(rendered)):
+rendered = source.replace("@WORKSPACE@", sys.argv[3]).replace("@PROJECT_DIR@", sys.argv[4])
+if "@WORKSPACE@" in rendered or "@PROJECT_DIR@" in rendered:
     raise SystemExit("unresolved OpenClaw config placeholder")
 data = json.loads(rendered)
 pathlib.Path(sys.argv[2]).write_text(
@@ -468,7 +471,7 @@ for plugin_spec in "${pinned_openclaw_plugins[@]}"; do
     OPENCLAW_WORKSPACE_DIR="${workspace}" \
     XDG_CACHE_HOME="${cache_dir}" \
     PATH="${node_dir}/bin:${openclaw_release}/bin:/usr/bin:/bin" \
-    "${openclaw_release}/bin/openclaw" plugins install "${plugin_spec}"
+    "${openclaw_release}/bin/openclaw" plugins install --force "${plugin_spec}"
 done
 
 agents_target="${workspace}/AGENTS.md"

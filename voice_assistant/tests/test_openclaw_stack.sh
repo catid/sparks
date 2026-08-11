@@ -7,9 +7,14 @@ temporary_dir="$(mktemp -d)"
 trap 'rm -rf -- "${temporary_dir}"' EXIT
 
 rendered_config="${temporary_dir}/openclaw.json"
-sed 's|@WORKSPACE@|/home/test/.local/share/cerberus-voice/workspace|g' \
+sed \
+  -e 's|@WORKSPACE@|/home/test/.local/share/cerberus-voice/workspace|g' \
+  -e "s|@PROJECT_DIR@|${voice_dir%/voice_assistant}|g" \
   "${voice_dir}/openclaw/openclaw.json.in" >"${rendered_config}"
-python3 - "${rendered_config}" "${voice_dir}/openclaw/runtime.lock.json" <<'PY'
+python3 - \
+  "${rendered_config}" \
+  "${voice_dir}/openclaw/runtime.lock.json" \
+  "${voice_dir}" <<'PY'
 import json
 import pathlib
 import sys
@@ -63,8 +68,12 @@ assert slack["actions"] == {
     "emojiList": False,
 }
 
-assert config["plugins"]["allow"] == ["exa", "slack"]
+assert config["plugins"]["load"]["paths"] == [
+    str(pathlib.Path(sys.argv[3]) / "openclaw" / "plugins" / "cerberus-health")
+]
+assert config["plugins"]["allow"] == ["cerberus-health", "exa", "slack"]
 assert config["plugins"]["entries"] == {
+    "cerberus-health": {"enabled": True},
     "exa": {"enabled": True},
     "slack": {"enabled": True},
 }
@@ -77,14 +86,18 @@ voice = agents["list"][0]
 assert voice["id"] == "voice" and voice["default"] is True
 assert voice["thinkingDefault"] == "xhigh"
 assert voice["tools"]["profile"] == "minimal"
-assert voice["tools"]["alsoAllow"] == ["message", "web_fetch", "web_search"]
+assert voice["tools"]["alsoAllow"] == [
+    "cerberus_health", "message", "web_fetch", "web_search"
+]
 assert "group:runtime" in voice["tools"]["deny"]
 assert "group:fs" in voice["tools"]["deny"]
 assert "group:messaging" not in voice["tools"]["deny"]
 assert "group:web" not in voice["tools"]["deny"]
-assert voice["skills"] == []
+assert voice["skills"] == ["weather"]
 assert config["tools"]["profile"] == "minimal"
-assert config["tools"]["alsoAllow"] == ["message", "web_fetch", "web_search"]
+assert config["tools"]["alsoAllow"] == [
+    "cerberus_health", "message", "web_fetch", "web_search"
+]
 assert config["tools"]["web"]["search"]["provider"] == "exa"
 assert "exec" not in config["tools"]["alsoAllow"]
 assert "code_execution" not in config["tools"]["alsoAllow"]
@@ -176,7 +189,7 @@ if rg -n '(OPENCLAW_GATEWAY_TOKEN|VOICE_OPENCLAW_TOKEN|SLACK_BOT_TOKEN|EXA_API_K
   echo "repository contains a materialized gateway token" >&2
   exit 1
 fi
-rg -Fq '"${openclaw_release}/bin/openclaw" plugins install "${plugin_spec}"' \
+rg -Fq '"${openclaw_release}/bin/openclaw" plugins install --force "${plugin_spec}"' \
   "${voice_dir}/scripts/install-voice-stack.sh"
 rg -Fq 'SLACK_BOT_TOKEN must be provisioned in the secret dotenv' \
   "${voice_dir}/scripts/install-voice-stack.sh"
