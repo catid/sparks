@@ -24,6 +24,11 @@ MAX_WAV_BYTES = 32 * 1024 * 1024
 EXPERIMENTAL_BACKEND_URL = "http://127.0.0.1:18010/v1/audio/speech"
 EXPERIMENTAL_GATEWAY_HOST = "127.0.0.1"
 EXPERIMENTAL_GATEWAY_PORT = 18_011
+PRODUCTION_BACKEND_URL = (
+    "http://172.30.82.2:8010/v1/audio/speech"
+)
+PRODUCTION_GATEWAY_HOST = "0.0.0.0"
+PRODUCTION_GATEWAY_PORT = 8_010
 ALLOWED_FIELDS = {
     "input",
     "max_new_tokens",
@@ -121,31 +126,45 @@ class Settings:
     body_timeout_seconds: float
     write_timeout_seconds: float
     timeout_seconds: float
+    production: bool = False
 
     @classmethod
     def from_environment(cls) -> "Settings":
+        experimental = os.environ.get("AUDIO8_SGLANG_EXPERIMENTAL", "0") == "1"
+        production = os.environ.get("AUDIO8_SGLANG_PRODUCTION", "0") == "1"
+        if experimental and production:
+            raise RuntimeError("select exactly one Audio8 SGLang deployment mode")
+        if production:
+            expected_backend_url = PRODUCTION_BACKEND_URL
+            expected_gateway_host = PRODUCTION_GATEWAY_HOST
+            expected_gateway_port = PRODUCTION_GATEWAY_PORT
+            mode = "production"
+        else:
+            expected_backend_url = EXPERIMENTAL_BACKEND_URL
+            expected_gateway_host = EXPERIMENTAL_GATEWAY_HOST
+            expected_gateway_port = EXPERIMENTAL_GATEWAY_PORT
+            mode = "experimental"
         backend_url = os.environ.get(
-            "AUDIO8_SGLANG_BACKEND_URL", EXPERIMENTAL_BACKEND_URL
+            "AUDIO8_SGLANG_BACKEND_URL", expected_backend_url
         )
-        loopback_http_url(backend_url, "/v1/audio/speech")
-        if backend_url != EXPERIMENTAL_BACKEND_URL:
-            raise RuntimeError(
-                "experimental backend is fixed to 127.0.0.1:18010"
-            )
+        if not production:
+            loopback_http_url(backend_url, "/v1/audio/speech")
+        if backend_url != expected_backend_url:
+            raise RuntimeError(f"{mode} backend URL is immutable")
         parsed = urllib.parse.urlsplit(backend_url)
         backend_health_url = urllib.parse.urlunsplit(
             (parsed.scheme, parsed.netloc, "/health", "", "")
         )
         listen_host = os.environ.get(
-            "AUDIO8_SGLANG_GATEWAY_HOST", EXPERIMENTAL_GATEWAY_HOST
+            "AUDIO8_SGLANG_GATEWAY_HOST", expected_gateway_host
         )
-        if listen_host != EXPERIMENTAL_GATEWAY_HOST:
-            raise RuntimeError("experimental gateway is fixed to 127.0.0.1")
+        if listen_host != expected_gateway_host:
+            raise RuntimeError(f"{mode} gateway host is immutable")
         listen_port = positive_environment_integer(
-            "AUDIO8_SGLANG_GATEWAY_PORT", EXPERIMENTAL_GATEWAY_PORT, 65_535
+            "AUDIO8_SGLANG_GATEWAY_PORT", expected_gateway_port, 65_535
         )
-        if listen_port != EXPERIMENTAL_GATEWAY_PORT:
-            raise RuntimeError("experimental gateway is fixed to port 18011")
+        if listen_port != expected_gateway_port:
+            raise RuntimeError(f"{mode} gateway port is immutable")
         return cls(
             backend_url=backend_url,
             backend_health_url=backend_health_url,
@@ -175,6 +194,7 @@ class Settings:
             timeout_seconds=positive_environment_number(
                 "AUDIO8_SGLANG_TIMEOUT_SECONDS", 240, 900
             ),
+            production=production,
         )
 
 
@@ -360,6 +380,13 @@ class GatewayRuntime:
         ):
             raise RuntimeError("backend is not healthy")
         attestation = validate_backend_attestation(payload.get("audio8_runtime"))
+        if self.settings.production and (
+            attestation["cuda_graph_active"] is not True
+            or attestation["cuda_graph_batches"] != [1, 2]
+            or attestation["torch_compile_active"] is not True
+            or attestation["torch_compile_batches"] != [1, 2]
+        ):
+            raise RuntimeError("backend optimizations are not production-ready")
         return payload, attestation
 
     def health_document(self) -> tuple[int, dict[str, Any]]:
@@ -406,6 +433,7 @@ class GatewayRuntime:
                 "single_process_attested"
             ],
             "backend": "sglang-omni",
+            "deployment": "production" if self.settings.production else "review",
             "backend_requests": backend.get("total_requests", 0),
         }
 

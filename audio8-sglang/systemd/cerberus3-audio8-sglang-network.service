@@ -1,0 +1,29 @@
+[Unit]
+Description=Verified private networks for Cerberus 3 Audio8 SGLang
+Wants=docker.service
+After=docker.service
+Before=cerberus3-audio8-sglang-backend.service cerberus3-audio8-sglang-gateway.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/cerberus3-audio8-sglang/ensure-production-networks.sh
+RemainAfterExit=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

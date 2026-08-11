@@ -229,6 +229,164 @@ def atomic_write_text(
             pass
 
 
+def rewrite_selected_paths(
+    value: Any,
+    *,
+    field_names: frozenset[str],
+    legacy_state: Path,
+    state: Path,
+) -> tuple[Any, bool]:
+    """Rewrite legacy absolute paths only in known OpenClaw metadata fields."""
+    legacy_prefix = f"{legacy_state}{os.sep}"
+
+    def rewrite_path(item: str) -> str:
+        if item == str(legacy_state):
+            return str(state)
+        if item.startswith(legacy_prefix):
+            return f"{state}{item[len(str(legacy_state)):]}"
+        return item
+
+    changed = False
+    if isinstance(value, list):
+        rewritten_items = []
+        for item in value:
+            rewritten, item_changed = rewrite_selected_paths(
+                item,
+                field_names=field_names,
+                legacy_state=legacy_state,
+                state=state,
+            )
+            rewritten_items.append(rewritten)
+            changed = changed or item_changed
+        return rewritten_items, changed
+    if isinstance(value, dict):
+        rewritten_dict: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in field_names and isinstance(item, str):
+                rewritten = rewrite_path(item)
+                changed = changed or rewritten != item
+            else:
+                rewritten, item_changed = rewrite_selected_paths(
+                    item,
+                    field_names=field_names,
+                    legacy_state=legacy_state,
+                    state=state,
+                )
+                changed = changed or item_changed
+            rewritten_dict[key] = rewritten
+        return rewritten_dict, changed
+    return value, False
+
+
+def canonicalize_openclaw_session_metadata(
+    *, state: Path, legacy_state: Path, uid: int, gid: int
+) -> None:
+    """Repair absolute session paths copied from the legacy state tree.
+
+    OpenClaw stores the resolved session and trajectory filenames in private
+    JSON metadata. Leaving those values untouched makes a canonical service
+    try to lock the read-only legacy tree. Only the documented path-bearing
+    fields are rewritten; transcripts and response content remain untouched.
+    """
+    agents = state / "agents"
+    if optional_stat(agents) is None:
+        return
+    require_directory(agents, uid=uid, gid=gid)
+
+    for root, directories, files in os.walk(agents, followlinks=False):
+        root_path = Path(root)
+        directories[:] = [
+            name
+            for name in directories
+            if not stat.S_ISLNK((root_path / name).lstat().st_mode)
+        ]
+        if root_path.name != "sessions":
+            continue
+        for name in files:
+            path = root_path / name
+            if name == "sessions.json" or name.endswith(".trajectory-path.json"):
+                info = require_regular_file(path, uid=uid, gid=gid)
+                original = json.loads(path.read_text(encoding="utf-8"))
+                rewritten, changed = rewrite_selected_paths(
+                    original,
+                    field_names=frozenset({"sessionFile", "runtimeFile"}),
+                    legacy_state=legacy_state,
+                    state=state,
+                )
+                if changed:
+                    atomic_write_text(
+                        path,
+                        json.dumps(rewritten, separators=(",", ":")) + "\n",
+                        uid=uid,
+                        gid=gid,
+                        mode=stat.S_IMODE(info.st_mode),
+                    )
+                continue
+            if not name.endswith(".trajectory.jsonl"):
+                continue
+            info = require_regular_file(path, uid=uid, gid=gid)
+            changed = False
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{path.name}.identity.", dir=path.parent
+            )
+            temporary = Path(temporary_name)
+            try:
+                source_descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    source_info = os.fstat(source_descriptor)
+                    if (
+                        not stat.S_ISREG(source_info.st_mode)
+                        or source_info.st_uid != uid
+                        or source_info.st_gid != gid
+                        or source_info.st_ino != info.st_ino
+                        or source_info.st_dev != info.st_dev
+                    ):
+                        raise MigrationError(
+                            f"session metadata changed during rewrite: {path}"
+                        )
+                    with os.fdopen(
+                        source_descriptor, "r", encoding="utf-8", closefd=False
+                    ) as source, os.fdopen(
+                        descriptor, "w", encoding="utf-8", closefd=False
+                    ) as destination:
+                        for line in source:
+                            if not line.strip():
+                                destination.write(line)
+                                continue
+                            record = json.loads(line)
+                            rewritten, record_changed = rewrite_selected_paths(
+                                record,
+                                field_names=frozenset({"sessionFile"}),
+                                legacy_state=legacy_state,
+                                state=state,
+                            )
+                            if record_changed:
+                                destination.write(
+                                    json.dumps(rewritten, separators=(",", ":"))
+                                    + "\n"
+                                )
+                            else:
+                                destination.write(line)
+                            changed = changed or record_changed
+                        destination.flush()
+                        os.fsync(descriptor)
+                finally:
+                    os.close(source_descriptor)
+                os.fchmod(descriptor, stat.S_IMODE(info.st_mode))
+                os.fchown(descriptor, uid, gid)
+                os.close(descriptor)
+                descriptor = -1
+                if changed:
+                    os.replace(temporary, path)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+
+
 def canonicalize_openclaw_files(
     *,
     state: Path,
@@ -287,6 +445,13 @@ def canonicalize_openclaw_files(
                 gid=gid,
                 mode=stat.S_IMODE(info.st_mode),
             )
+
+    canonicalize_openclaw_session_metadata(
+        state=state,
+        legacy_state=legacy_state,
+        uid=uid,
+        gid=gid,
+    )
 
 
 def parser() -> argparse.ArgumentParser:

@@ -169,6 +169,40 @@ class GatewayTests(unittest.TestCase):
             ), self.assertRaisesRegex(RuntimeError, "experimental"):
                 gateway.Settings.from_environment()
 
+    def test_production_network_tuple_is_exact_and_explicit(self) -> None:
+        with mock.patch.dict(
+            gateway.os.environ, {"AUDIO8_SGLANG_PRODUCTION": "1"}, clear=True
+        ):
+            result = gateway.Settings.from_environment()
+        self.assertTrue(result.production)
+        self.assertEqual(result.backend_url, gateway.PRODUCTION_BACKEND_URL)
+        self.assertEqual(result.listen_host, "0.0.0.0")
+        self.assertEqual(result.listen_port, 8010)
+
+        unsafe_environments = (
+            {
+                "AUDIO8_SGLANG_PRODUCTION": "1",
+                "AUDIO8_SGLANG_GATEWAY_HOST": "127.0.0.1",
+            },
+            {
+                "AUDIO8_SGLANG_PRODUCTION": "1",
+                "AUDIO8_SGLANG_GATEWAY_PORT": "18011",
+            },
+            {
+                "AUDIO8_SGLANG_PRODUCTION": "1",
+                "AUDIO8_SGLANG_BACKEND_URL": gateway.EXPERIMENTAL_BACKEND_URL,
+            },
+            {
+                "AUDIO8_SGLANG_PRODUCTION": "1",
+                "AUDIO8_SGLANG_EXPERIMENTAL": "1",
+            },
+        )
+        for environment in unsafe_environments:
+            with self.subTest(environment=environment), mock.patch.dict(
+                gateway.os.environ, environment, clear=True
+            ), self.assertRaises(RuntimeError):
+                gateway.Settings.from_environment()
+
     def test_synthesis_validates_and_returns_pcm_wav(self) -> None:
         audio = wav_bytes()
         backend = mock.Mock(
@@ -275,6 +309,29 @@ class GatewayTests(unittest.TestCase):
                 status, document = self.runtime.health_document()
                 self.assertEqual(status, 503)
                 self.assertEqual(document["status"], "loading")
+
+    def test_production_health_requires_exact_optimized_batches(self) -> None:
+        runtime = gateway.GatewayRuntime(
+            dataclasses.replace(settings(), production=True)
+        )
+        backend = {
+            "status": "healthy",
+            "running": True,
+            "audio8_runtime": runtime_attestation(
+                cuda_graph_batches=[1, 2, 3, 4],
+                torch_compile_batches=[1, 2],
+            ),
+        }
+        request_backend = mock.Mock(
+            return_value=(
+                response_headers("application/json"),
+                json.dumps(backend).encode(),
+                0.01,
+            )
+        )
+        with mock.patch.object(runtime, "request_backend", request_backend):
+            status, _document = runtime.health_document()
+        self.assertEqual(status, 503)
 
     def test_redirects_are_not_followed(self) -> None:
         sink_hits = 0

@@ -151,6 +151,25 @@ rg -Fq 'if [[ "${action}" == "verify" || "${action}" == "prepare" ]]; then' \
   "${voice_dir}/scripts/install-voice-stack.sh"
 rg -Fq -- '--tag cerberus/qwen3-asr:1.7b-bcd2b5b7' \
   "${voice_dir}/scripts/install-voice-stack.sh"
+python3 - "${voice_dir}/scripts/install-voice-stack.sh" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+bridge_stop = source.index(
+    'systemctl stop cerberus3-voice-bridge.service'
+)
+openclaw_stop = source.index(
+    'systemctl stop cerberus3-openclaw-voice.service'
+)
+migration = source.index(
+    'python3 "${voice_dir}/scripts/migrate-legacy-state.py"'
+)
+assert bridge_stop < openclaw_stop < migration
+assert 'restore_canonical_on_failure=1' in source
+assert 'canonical_openclaw_was_active' in source
+assert 'canonical_bridge_was_active' in source
+PY
 if rg -q 'cerebrus/qwen3-asr' "${voice_dir}/scripts/install-voice-stack.sh"; then
   echo 'Voice installer still launches the misspelled image namespace.' >&2
   exit 1

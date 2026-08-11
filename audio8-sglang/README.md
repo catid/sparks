@@ -1,10 +1,12 @@
 # Experimental Audio8 SGLang backend for DGX Spark
 
-This directory is an opt-in, review-only implementation of the official
-Audio8 SGLang Omni adapter on a GB10 (`sm_121`) DGX Spark. It does not replace,
-install, enable, or stop the production `cerberus3-audio8.service`. Every
-launcher requires `AUDIO8_SGLANG_EXPERIMENTAL=1`, and the backend is published
-only on numeric loopback port 18010 by default.
+This directory contains the reviewed side-by-side test harness and the
+boot-persistent production deployment of the official Audio8 SGLang Omni
+adapter on a GB10 (`sm_121`) DGX Spark. Trial launchers require
+`AUDIO8_SGLANG_EXPERIMENTAL=1` and remain locked to numeric-loopback ports
+18010/18011. Production launchers require `AUDIO8_SGLANG_PRODUCTION=1`, keep
+the upstream backend unpublished, and expose only the hardened gateway on the
+existing port 8010 API.
 
 ## Pinned runtime
 
@@ -78,8 +80,9 @@ Production versus SGLang WER was
 -0.67 to +2.34), CER was 2.34% versus
 2.96% (+0.62; CI -0.61 to +2.28), and speaker similarity was 0.6578 versus
 0.6501 (-0.0077; CI -0.0215 to +0.0050). Signal checks were clean. The result is
-promising but statistically inconclusive against the preregistered margins;
-production migration remains blocked on blinded listening.
+promising but statistically inconclusive against the preregistered margins.
+The operator reviewed that residual risk and explicitly authorized production
+promotion; the private blinded set remains available for follow-up listening.
 
 ## Build and isolated launch
 
@@ -184,34 +187,65 @@ design must place it on an unexposed gateway-only container network or socket
 and deny egress; publishing host loopback 18010 assumes every local process is
 trusted. The gateway is the required boundary, not an optional convenience.
 
-## Reviewed production migration plan
+## Production deployment and rollback
 
-Do not perform these steps until the feature receives review and blinded
-listening resolves the currently inconclusive quality gate:
+Production uses two fixed Docker networks. The backend network is internal,
+has no host-published port, and contains the reference-bearing GPU process plus
+the gateway. A separate frontend bridge lets only the reference-free gateway
+publish `0.0.0.0:8010`; a dedicated `DOCKER-USER` chain rejects new egress from
+its fixed frontend address while allowing replies to established clients. The
+gateway cannot read the model, reference, cache, Docker socket, SSH keys, or
+shell profiles. Host OUTPUT rules also prevent ordinary local processes from
+routing directly to either private backend-network address. Root or a
+Docker-capable process remains inside the trusted host boundary and can change
+these controls.
 
-1. Build the pinned image and verify all OCI provenance labels. Retain the
-   current stock image, and start the SGLang review backend on
-   `127.0.0.1:18010` with its fingerprint-keyed executable cache, graph and
-   compile enabled, FlashInfer explicit, greedy and streaming disabled.
-2. Start the gateway on review port 18011. Verify `/health`, fixed-reference
-   rejection, redirects, slow/truncated body timeouts, connection and synthesis
-   limits, 429 behavior, valid WAV headers, and backend restart
-   failure/recovery. Require the attested graph and compile fields to be active
-   with batch lists `[1,2]`; HTTP 200 alone is not the optimization gate.
-3. Run paired stock/SGLang ASR, listening, and speaker-similarity checks over a
-   punctuation, number, proper-noun, short, and 140-character corpus. Verify
-   health reports the preloaded fixed-reference VQ cache as active.
-4. Build a separate production deployment with the backend on an unpublished
-   gateway-only container network or socket and deny its egress. Add separate
-   hardened systemd backend and gateway units; the gateway must return 503
-   until the backend attestation passes. Systemd, not Docker, owns restart.
-5. Stop (do not delete) stock Audio8 and promote only the separately reviewed
-   gateway to port 8010; the experimental launchers intentionally refuse this.
-   Leave the voice bridge URL/model unchanged. Verify the health contract and a
-   live voice turn before enabling the new units for boot.
-6. Roll back by stopping the gateway/backend and restarting the untouched stock
-   `cerberus3-audio8.service`. Keep the old image and unit until a reboot and
-   sustained voice-agent soak test pass.
+The installer copies the runtime into root-owned
+`/usr/local/lib/cerberus3-audio8-sglang`, saves the exact stock unit, optional
+environment, enabled state, and image ID under mode-0700
+`/var/lib/cerberus3-audio8-sglang/stock-rollback`, then installs the private
+network and backend units. It enables only that private prewarmed backend;
+stock remains the canonical `cerberus3-audio8.service`, and a reboot before
+cutover continues using stock.
+
+```bash
+export AUDIO8_SGLANG_EXPERIMENTAL=1
+./audio8-sglang/build-image.sh
+sudo env AUDIO8_SGLANG_PRODUCTION=1 ./audio8-sglang/install-production.sh
+sudo systemctl start cerberus3-audio8-sglang-backend.service
+```
+
+Wait for the backend unit to become `active`. Its type-notify supervisor does
+not report ready until Docker's health check validates the fixed-reference
+cache, same-process attestation, both FlashInfer paths, and graph/compile batch
+lists exactly `[1,2]`. It continues watching the container and forces a bounded
+systemd restart after sustained unhealthy state.
+
+The rollback-armed cutover first stops the voice bridge and then stops the
+stock implementation without changing the canonical unit's enabled state.
+Once port 8010 is free, it atomically installs the
+hardened gateway under the same canonical `cerberus3-audio8.service` identity,
+checks the exact public health contract, and resumes the bridge. Existing voice
+dependencies and the voice-assistant checkout never change:
+
+```bash
+sudo env AUDIO8_SGLANG_CUTOVER=1 \
+  /usr/local/lib/cerberus3-audio8-sglang/cutover-production.sh
+```
+
+The voice API remains `http://127.0.0.1:8010/v1/audio/speech`; no client setting
+changes. The gateway deliberately stays available and returns 503 while the
+backend restarts. Stock remains installed and can be restored with:
+
+```bash
+sudo env AUDIO8_SGLANG_ROLLBACK=1 \
+  /usr/local/lib/cerberus3-audio8-sglang/rollback-to-stock.sh
+```
+
+Rollback verifies the snapshotted stock image ID, atomically restores the saved
+stock unit and environment verbatim without opening a boot-disabled window,
+then requires its exact unit implementation and optimized health contract
+before resuming the bridge.
 
 Run the source-only checks with:
 

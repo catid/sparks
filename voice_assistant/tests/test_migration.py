@@ -130,6 +130,42 @@ class LegacyStateMigrationTests(unittest.TestCase):
                 json.dumps(old_config), encoding="utf-8"
             )
             (old_state / "openclaw.json").chmod(0o600)
+            sessions = old_state / "agents/voice/sessions"
+            sessions.mkdir(parents=True, mode=0o700)
+            legacy_session = old_state / "agents/voice/sessions/session.jsonl"
+            near_prefix_session = pathlib.Path(f"{old_state}-backup/session.jsonl")
+            (sessions / "sessions.json").write_text(
+                json.dumps(
+                    {
+                        "agent:voice:main": {
+                            "sessionFile": str(legacy_session),
+                            "displayName": "Private path remains private",
+                        },
+                        "agent:voice:backup": {
+                            "sessionFile": str(near_prefix_session),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (sessions / "turn.trajectory-path.json").write_text(
+                json.dumps({"runtimeFile": str(legacy_session)}),
+                encoding="utf-8",
+            )
+            (sessions / "turn.trajectory.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "session_start",
+                        "data": {
+                            "sessionFile": str(legacy_session),
+                            "privateText": "do not rewrite cerebrus in content",
+                        },
+                    }
+                )
+                + "\n"
+                + '{  "type" : "content", "data" : "preserve spacing"  }\n',
+                encoding="utf-8",
+            )
             private_instruction = "Private custom rule for cerebrus3."
             (old_workspace / "AGENTS.md").write_text(
                 private_instruction, encoding="utf-8"
@@ -171,6 +207,37 @@ class LegacyStateMigrationTests(unittest.TestCase):
                 config["agents"]["defaults"]["workspace"], str(new_workspace)
             )
             self.assertEqual(config["agents"]["custom"], "preserved")
+            canonical_sessions = new_state / "agents/voice/sessions"
+            session_index = json.loads(
+                (canonical_sessions / "sessions.json").read_text(encoding="utf-8")
+            )
+            canonical_session = new_state / "agents/voice/sessions/session.jsonl"
+            self.assertEqual(
+                session_index["agent:voice:main"]["sessionFile"],
+                str(canonical_session),
+            )
+            self.assertEqual(
+                session_index["agent:voice:backup"]["sessionFile"],
+                str(near_prefix_session),
+            )
+            trajectory_path = json.loads(
+                (canonical_sessions / "turn.trajectory-path.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(trajectory_path["runtimeFile"], str(canonical_session))
+            trajectory_file = canonical_sessions / "turn.trajectory.jsonl"
+            trajectory_lines = trajectory_file.read_text(encoding="utf-8").splitlines()
+            trajectory = json.loads(trajectory_lines[0])
+            self.assertEqual(trajectory["data"]["sessionFile"], str(canonical_session))
+            self.assertEqual(
+                trajectory["data"]["privateText"],
+                "do not rewrite cerebrus in content",
+            )
+            self.assertEqual(
+                trajectory_lines[1],
+                '{  "type" : "content", "data" : "preserve spacing"  }',
+            )
             self.assertEqual(
                 (new_workspace / "AGENTS.md").read_text(encoding="utf-8"),
                 "Private custom rule for cerberus3.",
@@ -179,12 +246,19 @@ class LegacyStateMigrationTests(unittest.TestCase):
                 json.loads((old_state / "openclaw.json").read_text()), old_config
             )
 
+            session_index_inode = (canonical_sessions / "sessions.json").stat().st_ino
+            trajectory_inode = trajectory_file.stat().st_ino
             second = self.run_migration(root)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertNotIn(private_token, second.stdout + second.stderr)
             self.assertEqual(
                 json.loads((new_state / "openclaw.json").read_text()), config
             )
+            self.assertEqual(
+                (canonical_sessions / "sessions.json").stat().st_ino,
+                session_index_inode,
+            )
+            self.assertEqual(trajectory_file.stat().st_ino, trajectory_inode)
 
     def test_symlinked_legacy_secret_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

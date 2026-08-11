@@ -48,6 +48,105 @@ class LauncherContractTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 2)
                 self.assertIn("locked to 18010", completed.stderr)
 
+    def test_production_backend_is_private_offline_and_supervised(self) -> None:
+        launcher = (ROOT / "run-production-backend.sh").read_text(
+            encoding="utf-8"
+        )
+        supervisor = (ROOT / "supervise-production-backend.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("--publish", launcher)
+        self.assertIn("cerberus3-audio8-sglang-backend", launcher)
+        self.assertIn('--gpus device=0', launcher)
+        self.assertIn('HF_HUB_OFFLINE=1', launcher)
+        self.assertIn('TRANSFORMERS_OFFLINE=1', launcher)
+        self.assertIn("check_health.py backend", launcher)
+        self.assertIn("AUDIO8_TTS_MAX_RUNNING_REQUESTS=2", launcher)
+        self.assertIn("AUDIO8_TTS_ENABLE_TORCH_COMPILE=1", launcher)
+        self.assertIn("docker stop --time 30", supervisor)
+        self.assertIn("unhealthy_polls >= 3", supervisor)
+        self.assertIn("systemd-notify", supervisor)
+
+    def test_production_gateway_is_the_only_public_listener(self) -> None:
+        launcher = (ROOT / "run-production-gateway.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--publish 0.0.0.0:8010:8010", launcher)
+        self.assertIn("--init", launcher)
+        self.assertIn("AUDIO8_SGLANG_PRODUCTION=1", launcher)
+        self.assertIn("http://172.30.82.2:8010/v1/audio/speech", launcher)
+        self.assertIn("--dns 127.0.0.1", launcher)
+        self.assertIn("name=${frontend_network},ip=172.30.81.2", launcher)
+        self.assertIn("name=${backend_network},ip=172.30.82.3", launcher)
+        self.assertNotIn("/references", launcher)
+        self.assertNotIn("/models", launcher)
+        self.assertNotIn("--gpus", launcher)
+
+    def test_production_units_preserve_stock_rollback(self) -> None:
+        gateway_unit = (
+            ROOT / "systemd/cerberus3-audio8-sglang-gateway.service"
+        ).read_text(encoding="utf-8")
+        backend_unit = (
+            ROOT / "systemd/cerberus3-audio8-sglang-backend.service"
+        ).read_text(encoding="utf-8")
+        installer = (ROOT / "install-production.sh").read_text(encoding="utf-8")
+        cutover = (ROOT / "cutover-production.sh").read_text(encoding="utf-8")
+        rollback = (ROOT / "rollback-to-stock.sh").read_text(encoding="utf-8")
+        self.assertNotIn("Conflicts=cerberus3-audio8.service", gateway_unit)
+        self.assertIn("Wants=", gateway_unit)
+        self.assertNotIn("Requires=cerberus3-audio8-sglang-backend", gateway_unit)
+        self.assertIn("Type=notify", backend_unit)
+        self.assertIn("/usr/sbin:/sbin", backend_unit)
+        self.assertIn("/usr/sbin:/sbin", gateway_unit)
+        self.assertIn("AF_INET6 AF_NETLINK", gateway_unit)
+        self.assertIn("SuccessExitStatus=143", gateway_unit)
+        self.assertIn("WatchdogSec=30s", backend_unit)
+        self.assertIn(
+            "Requires=cerberus3-audio8-sglang-network.service", backend_unit
+        )
+        self.assertIn(
+            "ExecStartPre=+/usr/local/lib/cerberus3-audio8-sglang/"
+            "ensure-production-networks.sh",
+            backend_unit,
+        )
+        self.assertIn("stock-rollback", installer)
+        self.assertIn('systemd/backend.conf', installer)
+        self.assertTrue((ROOT / "systemd/backend.conf").is_file())
+        self.assertIn("rollback-to-stock.sh", installer)
+        self.assertIn('"${runtime_root}/systemd"', installer)
+        self.assertNotIn("disable --now cerberus3-audio8.service", installer)
+        self.assertNotIn("50-audio8-sglang-voice-bridge.conf", installer)
+        self.assertNotIn("50-audio8-sglang-voice-target.conf", installer)
+        self.assertIn('gateway_source="${root}/systemd/', cutover)
+        self.assertIn('"${unit_root}/${stock_unit}"', cutover)
+        self.assertIn("systemctl daemon-reload", cutover)
+        self.assertNotIn('disable --now "${stock_unit}"', cutover)
+        self.assertIn('systemctl stop "${stock_unit}"', cutover)
+        self.assertIn("atomic_install_unit", cutover)
+        self.assertIn('systemctl is-enabled --quiet "${stock_unit}"', cutover)
+        self.assertNotIn("50-audio8-sglang", cutover)
+        self.assertIn('"${rollback_root}/cerberus3-audio8.service"', rollback)
+        self.assertNotIn('disable --now "${stock_unit}"', rollback)
+        self.assertIn("atomic_install_unit", rollback)
+        self.assertIn("check_stock_health.py", rollback)
+        self.assertNotIn("cerberus3-voice-stack.target", rollback)
+
+    def test_frontend_egress_is_fail_closed(self) -> None:
+        network = (ROOT / "ensure-production-networks.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--internal", network)
+        self.assertIn("CERBERUS-AUDIO8", network)
+        self.assertIn("ESTABLISHED,RELATED", network)
+        self.assertIn("-j REJECT", network)
+        self.assertIn("gateway_frontend_ip=172.30.81.2", network)
+        self.assertIn("backend_ip=172.30.82.2", network)
+        self.assertIn("gateway_backend_ip=172.30.82.3", network)
+        self.assertIn('"${backend_ip}/32"', network)
+        self.assertIn('"${gateway_frontend_ip}/32"', network)
+        self.assertIn("CERBERUS-AUDIO8-HOST", network)
+        self.assertIn("iptables -C OUTPUT", network)
+
 
 if __name__ == "__main__":
     unittest.main()

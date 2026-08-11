@@ -1,0 +1,50 @@
+[Unit]
+Description=Audio8 SGLang hardened production gateway on Cerberus 3
+Documentation=file:/home/catid/sparks/audio8-sglang/README.md
+Wants=network-online.target docker.service cerberus3-audio8-sglang-network.service cerberus3-audio8-sglang-backend.service
+Requires=cerberus3-audio8-sglang-network.service
+After=network-online.target docker.service cerberus3-audio8-sglang-network.service cerberus3-audio8-sglang-backend.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=catid
+Group=catid
+WorkingDirectory=/usr/local/lib/cerberus3-audio8-sglang
+Environment=HOME=/home/catid
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+Environment=AUDIO8_SGLANG_PRODUCTION=1
+ExecStartPre=+/usr/local/lib/cerberus3-audio8-sglang/ensure-production-networks.sh
+ExecStartPre=-/usr/bin/docker rm -f cerberus3-audio8-sglang-gateway
+ExecStart=/usr/local/lib/cerberus3-audio8-sglang/run-production-gateway.sh
+ExecStartPost=/usr/local/lib/cerberus3-audio8-sglang/wait-production-gateway.sh
+ExecStop=-/usr/bin/docker stop --time 15 cerberus3-audio8-sglang-gateway
+Restart=always
+RestartSec=5s
+RestartPreventExitStatus=2
+SuccessExitStatus=143
+TimeoutStartSec=120s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+InaccessiblePaths=-/home/catid/.ssh -/home/catid/.bashrc -/home/catid/.zshrc -/home/catid/.profile
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

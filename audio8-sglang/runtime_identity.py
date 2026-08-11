@@ -125,6 +125,8 @@ def load_runtime_identity(
         name: file_sha256(artifact_root / name)
         for name in (
             "Dockerfile",
+            "check_health.py",
+            "gateway.py",
             "runtime_identity.py",
             "verify_source_contract.py",
         )

@@ -19,7 +19,7 @@ SPEC.loader.exec_module(runtime_identity)
 
 
 EXPECTED_REPOSITORY_FINGERPRINT = (
-    "6d6374a6feb1f844451652498cb6cc454af26eb6ee855ab3598997cc61c6f344"
+    "2cf49c3ec3433f53e46c016813885dbaedc212d2b7b93e872f1e87070008b7b4"
 )
 
 
@@ -41,6 +41,8 @@ def fixture_lock() -> dict[str, object]:
 
 def write_runtime_artifacts(root: pathlib.Path) -> None:
     (root / "Dockerfile").write_bytes(b"FROM example.invalid/runtime\n")
+    (root / "check_health.py").write_bytes(b"health verifier\n")
+    (root / "gateway.py").write_bytes(b"gateway\n")
     (root / "runtime_identity.py").write_bytes(b"identity verifier\n")
     (root / "verify_source_contract.py").write_bytes(b"source verifier\n")
 

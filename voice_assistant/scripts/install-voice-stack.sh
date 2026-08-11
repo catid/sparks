@@ -179,7 +179,24 @@ PY
 "${voice_dir}/scripts/install-openclaw-runtime.sh" verify >/dev/null
 
 temporary_dir="$(mktemp -d)"
-trap 'rm -rf -- "${temporary_dir}"' EXIT
+canonical_openclaw_was_active=0
+canonical_bridge_was_active=0
+restore_canonical_on_failure=0
+cleanup() {
+  local status=$?
+  trap - EXIT
+  rm -rf -- "${temporary_dir}"
+  if ((restore_canonical_on_failure != 0 && status != 0)); then
+    if ((canonical_openclaw_was_active != 0)); then
+      "${elevate[@]}" systemctl start cerberus3-openclaw-voice.service || true
+    fi
+    if ((canonical_bridge_was_active != 0)); then
+      "${elevate[@]}" systemctl start cerberus3-voice-bridge.service || true
+    fi
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT
 rendered_config="${temporary_dir}/openclaw.json"
 
 render_node_dir="${node_dir}"
@@ -309,6 +326,20 @@ VOICE_OPENCLAW_RUNTIME_ROOT="${runtime_root}" \
   fail "pinned OpenClaw runtime is missing; run prepare first"
 docker image inspect cerberus/qwen3-asr:1.7b-bcd2b5b7 >/dev/null 2>&1 ||
   fail "pinned Qwen3 ASR image is missing; run prepare first"
+
+# OpenClaw persists resolved session paths in JSON metadata. Quiesce both the
+# writer and its voice client before the migrator atomically repairs those
+# paths, then preserve their prior running state for install/enable actions.
+if "${systemctl_command}" is-active --quiet cerberus3-voice-bridge.service; then
+  canonical_bridge_was_active=1
+  restore_canonical_on_failure=1
+  "${elevate[@]}" systemctl stop cerberus3-voice-bridge.service
+fi
+if "${systemctl_command}" is-active --quiet cerberus3-openclaw-voice.service; then
+  canonical_openclaw_was_active=1
+  restore_canonical_on_failure=1
+  "${elevate[@]}" systemctl stop cerberus3-openclaw-voice.service
+fi
 
 legacy_stop_order=(
   cerebrus3-voice-bridge.service
@@ -503,7 +534,15 @@ if [[ "${action}" == "start" ]]; then
   "${elevate[@]}" systemctl start cerberus3-audio8.service
   "${elevate[@]}" systemctl restart cerberus3-voice-bridge.service
   "${elevate[@]}" systemctl start cerberus3-voice-stack.target
+else
+  if ((canonical_openclaw_was_active != 0)); then
+    "${elevate[@]}" systemctl start cerberus3-openclaw-voice.service
+  fi
+  if ((canonical_bridge_was_active != 0)); then
+    "${elevate[@]}" systemctl start cerberus3-voice-bridge.service
+  fi
 fi
+restore_canonical_on_failure=0
 
 echo "Installed Cerberus voice services for unprivileged user ${service_user}."
 if [[ "${action}" == "enable" || "${action}" == "start" ]]; then

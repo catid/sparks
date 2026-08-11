@@ -1,0 +1,53 @@
+[Unit]
+Description=Audio8 SGLang optimized private backend on Cerberus 3
+Documentation=file:/home/catid/sparks/audio8-sglang/README.md
+Wants=network-online.target docker.service cerberus3-audio8-sglang-network.service
+Requires=cerberus3-audio8-sglang-network.service
+After=network-online.target docker.service cerberus3-audio8-sglang-network.service
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=catid
+Group=catid
+WorkingDirectory=/usr/local/lib/cerberus3-audio8-sglang
+Environment=HOME=/home/catid
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+Environment=AUDIO8_SGLANG_PRODUCTION=1
+EnvironmentFile=/etc/cerberus3-audio8-sglang/backend.env
+ExecStartPre=+/usr/local/lib/cerberus3-audio8-sglang/ensure-production-networks.sh
+ExecStartPre=-/usr/bin/docker rm -f cerberus3-audio8-sglang-backend
+ExecStart=/usr/local/lib/cerberus3-audio8-sglang/supervise-production-backend.sh
+ExecStop=-/usr/bin/docker stop --time 30 cerberus3-audio8-sglang-backend
+Restart=on-failure
+RestartSec=30s
+RestartPreventExitStatus=2
+TimeoutStartSec=480s
+TimeoutStopSec=45s
+WatchdogSec=30s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/home/catid/models /home/catid/.local/share/audio8/authorized-voice
+ReadWritePaths=/home/catid/.cache/cerberus-audio8-sglang
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/home/catid/.ssh -/home/catid/.bashrc -/home/catid/.zshrc -/home/catid/.profile
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
