@@ -110,8 +110,14 @@ class ValidationTests(unittest.TestCase):
             "SDPBackend": Backends,
         }
         exec("def generate(self):\n    return None\n", namespace)
+        original_generate = namespace["generate"]
+
+        def inference_mode_wrapper(self):
+            return original_generate(self)
+
+        inference_mode_wrapper.__wrapped__ = original_generate
         model = types.SimpleNamespace(
-            generate=types.MethodType(namespace["generate"], object())
+            generate=types.MethodType(inference_mode_wrapper, object())
         )
 
         selected = self.server_module.select_sdpa_backend(model, "efficient")

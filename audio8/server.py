@@ -64,18 +64,33 @@ def select_sdpa_backend(model: Any, requested: str) -> str:
         raise RuntimeError("AUDIO8_SDPA_BACKEND must be math or efficient")
     generate = getattr(model, "generate", None)
     function = getattr(generate, "__func__", generate)
+    # The pinned method is decorated with torch.inference_mode(), whose public
+    # wrapper has torch's globals rather than the remote model module's globals.
+    # Follow the standard __wrapped__ chain to the function that actually
+    # references sdpa_kernel/SDPBackend.
+    seen: set[int] = set()
+    while callable(function) and callable(getattr(function, "__wrapped__", None)):
+        identity = id(function)
+        if identity in seen:
+            raise RuntimeError("Audio8 generate wrapper chain is cyclic")
+        seen.add(identity)
+        function = function.__wrapped__
     namespace = getattr(function, "__globals__", None)
+    original_key = "_cerberus_original_sdpa_kernel"
+    if requested == "math":
+        # Math is already the pinned upstream behavior. If this model was
+        # previously patched in-process, restore it; otherwise no symbols need
+        # to be discoverable merely to retain the default.
+        if isinstance(namespace, dict) and original_key in namespace:
+            namespace["sdpa_kernel"] = namespace[original_key]
+        return "math"
     if not isinstance(namespace, dict):
         raise RuntimeError("Audio8 generate implementation is not patchable")
     kernel = namespace.get("sdpa_kernel")
     backends = namespace.get("SDPBackend")
     if not callable(kernel) or backends is None:
         raise RuntimeError("Audio8 SDPA symbols are unavailable")
-    original_key = "_cerberus_original_sdpa_kernel"
     original = namespace.setdefault(original_key, kernel)
-    if requested == "math":
-        namespace["sdpa_kernel"] = original
-        return "math"
     efficient = getattr(backends, "EFFICIENT_ATTENTION", None)
     if efficient is None:
         raise RuntimeError("PyTorch efficient SDPA is unavailable")
