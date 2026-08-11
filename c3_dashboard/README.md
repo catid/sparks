@@ -31,8 +31,9 @@ The ambient art is separate from the TFT-maintenance sweep. After five quiet
 minutes a topmost, exact-black 48-pixel band crosses the 1424x280 panel in 3.2
 seconds, then repeats no more than once per 30 minutes. At that speed every row
 stays black for about 0.47 seconds—over nine times the DP-0101's specified 50
-ms response time. Voice/model activity, changed health, recovery, or local
-input postpones the next pass. The dashboard remains visible outside the band.
+ms response time. A recognized voice command, model/TTS work, changed health,
+recovery, or local input postpones the next pass; ignored background speech
+that merely invokes ASR does not. The dashboard remains visible outside the band.
 DeskPi publishes no image-retention recovery duration or cadence for this
 panel. The response-time figure is used only to ensure the band is not moving
 faster than the liquid crystals can visibly transition; the 30-minute cadence

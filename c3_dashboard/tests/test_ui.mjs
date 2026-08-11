@@ -606,6 +606,22 @@ test("infrequent TFT black sweep timing and overlay state are deterministic", ()
   assert.equal(ui.saverTroubleTransition("offline:0", "offline:0"), false, "unchanged failure does not reset idle time");
   assert.equal(ui.saverTroubleTransition("offline:0", "degraded:2"), true, "meaningful change wakes");
   assert.equal(ui.saverTroubleTransition("degraded:2", null), true, "recovery wakes");
+  assert.equal(ui.voiceActivityNeedsAttention({
+    active: true,
+    steps: { heard_name: "idle", asr: "active", openclaw: "idle", tts: "idle", play: "idle" },
+  }), false, "unrecognized room speech must not starve panel care");
+  assert.equal(ui.voiceActivityNeedsAttention({
+    active: true,
+    steps: { heard_name: "complete", asr: "active", openclaw: "idle", tts: "idle", play: "idle" },
+  }), true, "an armed follow-up is meaningful activity");
+  assert.equal(ui.voiceActivityNeedsAttention({
+    active: true,
+    steps: { heard_name: "complete", asr: "complete", openclaw: "active", tts: "idle", play: "idle" },
+  }), true, "Claw work keeps the dashboard awake");
+  assert.equal(ui.voiceActivityNeedsAttention({
+    active: false,
+    steps: { heard_name: "complete", asr: "complete", openclaw: "complete", tts: "complete", play: "complete" },
+  }), false, "a completed historical turn is not ongoing activity");
 
   const firstEndpointFailure = ui.normalizePayload({
     hosts: {

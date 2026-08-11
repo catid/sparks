@@ -39,9 +39,10 @@ then at most once every 30 minutes. The attached DeskPi DP-0101 is a 1424x280
 TFT LCD with a specified 50 ms response time, not an OLED. A 3.2-second linear
 pass leaves every row black for about 0.47 seconds (over nine response-time
 constants) without pointlessly running a continuous animation. The ordinary
-dashboard remains visible outside the band. Active voice/model work, a new or
-changed cluster/voice problem, recovery, or deliberate pointer/key/touch input
-postpones the pass. An unchanged outage does not keep resetting the timer. A
+dashboard remains visible outside the band. A recognized/armed voice command,
+Claw/TTS/playback work, a new or changed cluster/voice problem, recovery, or
+deliberate pointer/key/touch input postpones the pass. Raw ASR for ignored room
+speech and an unchanged outage do not keep resetting the timer. A
 visibility-resume check handles suspended/throttled WebKit timers.
 DeskPi publishes no image-retention recovery duration or cadence. The 50 ms
 specification therefore bounds visible transition speed only; it is not proof

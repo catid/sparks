@@ -1139,7 +1139,18 @@
   function observeVoiceSaverAttention(model, nowMs) {
     const trouble = voiceTroubleSignature(model);
     observeSaverHealth("voice", trouble, nowMs);
-    if (model.active) noteSaverAttention("voice-active", nowMs);
+    // The always-listening microphone can run ASR for ordinary room speech.
+    // That alone must not postpone panel care forever. Wake only for a
+    // recognized/armed command or work beyond raw wake-word scanning.
+    if (voiceActivityNeedsAttention(model)) noteSaverAttention("voice-active", nowMs);
+  }
+
+  function voiceActivityNeedsAttention(model) {
+    const source = safeObject(model);
+    if (source.active !== true) return false;
+    const steps = safeObject(source.steps);
+    if (["active", "complete"].includes(steps.heard_name)) return true;
+    return ["openclaw", "tts", "play"].some((name) => steps[name] === "active");
   }
 
   function voiceTroubleSignature(model) {
@@ -1573,6 +1584,7 @@
     observeSaverHealth,
     saverTroubleTransition,
     voiceTroubleSignature,
+    voiceActivityNeedsAttention,
     clusterTroubleSignature,
     startSaver,
     render,
