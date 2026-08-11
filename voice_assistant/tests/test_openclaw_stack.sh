@@ -69,10 +69,14 @@ assert slack["actions"] == {
 }
 
 assert config["plugins"]["load"]["paths"] == [
+    str(pathlib.Path(sys.argv[3]) / "openclaw" / "plugins" / "cerberus-alarms"),
     str(pathlib.Path(sys.argv[3]) / "openclaw" / "plugins" / "cerberus-health")
 ]
-assert config["plugins"]["allow"] == ["cerberus-health", "exa", "slack"]
+assert config["plugins"]["allow"] == [
+    "cerberus-alarms", "cerberus-health", "exa", "slack"
+]
 assert config["plugins"]["entries"] == {
+    "cerberus-alarms": {"enabled": True},
     "cerberus-health": {"enabled": True},
     "exa": {"enabled": True},
     "slack": {"enabled": True},
@@ -87,7 +91,8 @@ assert voice["id"] == "voice" and voice["default"] is True
 assert voice["thinkingDefault"] == "xhigh"
 assert voice["tools"]["profile"] == "minimal"
 assert voice["tools"]["alsoAllow"] == [
-    "cerberus_health", "message", "web_fetch", "web_search"
+    "alarm_cancel", "alarm_dismiss", "alarm_set", "alarms_list",
+    "cerberus_health", "message", "web_fetch", "web_search", "timer_set"
 ]
 assert "group:runtime" in voice["tools"]["deny"]
 assert "group:fs" in voice["tools"]["deny"]
@@ -96,7 +101,8 @@ assert "group:web" not in voice["tools"]["deny"]
 assert voice["skills"] == ["weather"]
 assert config["tools"]["profile"] == "minimal"
 assert config["tools"]["alsoAllow"] == [
-    "cerberus_health", "message", "web_fetch", "web_search"
+    "alarm_cancel", "alarm_dismiss", "alarm_set", "alarms_list",
+    "cerberus_health", "message", "web_fetch", "web_search", "timer_set"
 ]
 assert config["tools"]["web"]["search"]["provider"] == "exa"
 assert "exec" not in config["tools"]["alsoAllow"]
@@ -151,8 +157,19 @@ rg -q '^Environment=VOICE_TTS_URL=http://127\.0\.0\.1:8010/v1/audio/speech$' "${
 rg -q '^SupplementaryGroups=audio$' "${bridge_unit}"
 rg -q '^DeviceAllow=char-alsa rw$' "${bridge_unit}"
 rg -q '^Environment=VOICE_STATE_DIR=%t/cerberus3-voice-bridge$' "${bridge_unit}"
+rg -q '^Environment=VOICE_PLAYBACK_LOCK_PATH=/var/lib/cerberus3-alarms/playback.lock$' "${bridge_unit}"
 rg -q '^RuntimeDirectory=cerberus3-voice-bridge$' "${bridge_unit}"
 rg -q '^RuntimeDirectoryMode=0700$' "${bridge_unit}"
+rg -q '^Requires=cerberus3-alarm-service.service$' "${bridge_unit}"
+rg -q '^ReadWritePaths=/var/lib/cerberus3-alarms$' "${bridge_unit}"
+alarm_unit="${voice_dir}/systemd/cerberus3-alarm-service.service.in"
+rg -q '^StateDirectory=cerberus3-alarms$' "${alarm_unit}"
+rg -q '^RuntimeDirectory=cerberus3-alarms$' "${alarm_unit}"
+rg -q '^RestrictAddressFamilies=AF_UNIX AF_INET$' "${alarm_unit}"
+rg -q '^DevicePolicy=closed$' "${alarm_unit}"
+rg -q '^DeviceAllow=char-alsa rw$' "${alarm_unit}"
+rg -q '^Requires=cerberus3-alarm-service.service cerberus3-voice-bridge.service$' \
+  "${voice_dir}/systemd/cerberus3-voice-stack.target.in"
 rg -q '^Conflicts=cerebrus3-voice-bridge\.service$' "${bridge_unit}"
 rg -q '^Conflicts=cerebrus3-openclaw-voice\.service$' \
   "${voice_dir}/systemd/cerberus3-openclaw-voice.service.in"
@@ -194,6 +211,10 @@ rg -Fq '"${openclaw_release}/bin/openclaw" plugins install --force "${plugin_spe
 rg -Fq 'SLACK_BOT_TOKEN must be provisioned in the secret dotenv' \
   "${voice_dir}/scripts/install-voice-stack.sh"
 rg -Fq 'EXA_API_KEY must be provisioned in the secret dotenv' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
+rg -Fq 'cerberus3-alarm-service.service' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
+rg -Fq 'cerberus-alarms/index.js' \
   "${voice_dir}/scripts/install-voice-stack.sh"
 
 fake_bin="${temporary_dir}/fake-bin"

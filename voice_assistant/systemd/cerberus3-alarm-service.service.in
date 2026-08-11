@@ -1,0 +1,53 @@
+[Unit]
+Description=Cerberus persistent timers and alarms on cerberus3
+Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
+Wants=cerberus3-audio8.service
+After=cerberus3-audio8.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+SupplementaryGroups=audio
+WorkingDirectory=@PROJECT_DIR@
+Environment=HOME=@HOME@
+Environment=PATH=/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=ALARM_STATE_DIR=%S/cerberus3-alarms
+Environment=ALARM_RUNTIME_DIR=%t/cerberus3-alarms
+Environment=ALARM_TIMEZONE=America/Chicago
+Environment=ALARM_TTS_URL=http://127.0.0.1:8010/v1/audio/speech
+Environment=ALARM_PLAYBACK_DEVICE=plughw:CARD=CP900,DEV=0
+Environment=ALARM_PLAYBACK_LOCK_PATH=/var/lib/cerberus3-alarms/playback.lock
+ExecStart=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/alarm_service.py
+Restart=always
+RestartSec=3s
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+RuntimeDirectory=cerberus3-alarms
+RuntimeDirectoryMode=0700
+StateDirectory=cerberus3-alarms
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -@HOME@/.ssh -@HOME@/.bashrc -@HOME@/.zshrc -@HOME@/.profile
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+RestrictAddressFamilies=AF_UNIX AF_INET
+UMask=0077
+
+[Install]
+WantedBy=cerberus3-voice-stack.target

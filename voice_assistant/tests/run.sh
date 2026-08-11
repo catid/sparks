@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "${repo_root}"
 
 python3 -m unittest -v \
+  voice_assistant.tests.test_alarm_service \
   voice_assistant.tests.test_asr_server \
   voice_assistant.tests.test_migration \
   voice_assistant.tests.test_voice_bridge
@@ -18,6 +19,7 @@ if [[ -z "${node_bin}" ]]; then
 fi
 if [[ -n "${node_bin}" ]]; then
   "${node_bin}" --test voice_assistant/tests/test_cerberus_health_plugin.mjs
+  "${node_bin}" --test voice_assistant/tests/test_cerberus_alarms_plugin.mjs
 else
   echo "Skipping Cerberus health plugin unit tests: Node is unavailable."
 fi

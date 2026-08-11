@@ -189,6 +189,26 @@ the gateway is loopback-only, and Slack makes this a potential multi-user
 personal-assistant deployment without a tool sandbox. Do not silence the
 second warning unless a real sandbox or stricter tool profile addresses it.
 
+## Cerberus timers and alarms
+
+On the Linux Cerberus 3 host, the voice stack includes a persistent alarm
+service and a constrained custom OpenClaw plugin. The service stores schedules
+in SQLite, exposes only an owner-accessible Unix socket, and serializes speaker
+playback with the voice bridge. It does not enable OpenClaw's general cron or
+automation tools.
+
+After installing the voice stack, add the same tools to the main Slack gateway:
+
+```bash
+./voice_assistant/scripts/configure-main-openclaw-alarms.sh verify
+./voice_assistant/scripts/configure-main-openclaw-alarms.sh install
+```
+
+Append `openclaw/AGENTS-alarms.md` to the main gateway workspace instructions.
+The integration supports setting countdown timers and clock alarms, listing or
+cancelling pending items, and dismissing alarms that are ringing. Schedules
+survive gateway and host restarts.
+
 ## Validation
 
 Run a transport-only local probe first:

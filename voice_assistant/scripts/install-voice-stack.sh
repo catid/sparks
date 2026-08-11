@@ -122,11 +122,13 @@ PY
 unit_names=(
   cerberus3-openclaw-voice.service
   cerberus3-qwen3-asr.service
+  cerberus3-alarm-service.service
   cerberus3-voice-bridge.service
   cerberus3-voice-stack.target
 )
 required_files=(
   "${voice_dir}/asr_server.py"
+  "${voice_dir}/alarm_service.py"
   "${voice_dir}/voice_bridge.py"
   "${voice_dir}/run-asr.sh"
   "${voice_dir}/download-model.sh"
@@ -138,7 +140,11 @@ required_files=(
   "${voice_dir}/openclaw/plugins/cerberus-health/index.js"
   "${voice_dir}/openclaw/plugins/cerberus-health/openclaw.plugin.json"
   "${voice_dir}/openclaw/plugins/cerberus-health/package.json"
+  "${voice_dir}/openclaw/plugins/cerberus-alarms/index.js"
+  "${voice_dir}/openclaw/plugins/cerberus-alarms/openclaw.plugin.json"
+  "${voice_dir}/openclaw/plugins/cerberus-alarms/package.json"
   "${voice_dir}/scripts/install-openclaw-runtime.sh"
+  "${voice_dir}/scripts/configure-main-openclaw-alarms.sh"
   "${voice_dir}/scripts/migrate-legacy-state.py"
   "${voice_dir}/tests/fixtures/fake-node"
   "${voice_dir}/tests/fixtures/fake-openclaw"
@@ -156,6 +162,7 @@ for executable_file in \
   "${voice_dir}/run-asr.sh" \
   "${voice_dir}/download-model.sh" \
   "${voice_dir}/openclaw/gateway-wrapper.sh" \
+  "${voice_dir}/scripts/configure-main-openclaw-alarms.sh" \
   "${voice_dir}/scripts/install-openclaw-runtime.sh" \
   "${voice_dir}/scripts/install-voice-stack.sh"; do
   [[ -x "${executable_file}" ]] || fail "input is not executable: ${executable_file}"
@@ -166,10 +173,12 @@ bash -n \
   "${voice_dir}/download-model.sh" \
   "${voice_dir}/openclaw/gateway-wrapper.sh" \
   "${voice_dir}/scripts/install-openclaw-runtime.sh" \
+  "${voice_dir}/scripts/configure-main-openclaw-alarms.sh" \
   "${voice_dir}/scripts/install-voice-stack.sh"
 python3 -m json.tool "${voice_dir}/openclaw/runtime.lock.json" >/dev/null
 python3 - \
   "${voice_dir}/asr_server.py" \
+  "${voice_dir}/alarm_service.py" \
   "${voice_dir}/voice_bridge.py" \
   "${voice_dir}/scripts/migrate-legacy-state.py" <<'PY'
 import pathlib
@@ -258,6 +267,7 @@ SYSTEMD_UNIT_PATH="${temporary_dir}:/usr/local/lib/systemd/system:/usr/lib/syste
   systemd-analyze verify \
     "${temporary_dir}/cerberus3-openclaw-voice.service" \
     "${temporary_dir}/cerberus3-qwen3-asr.service" \
+    "${temporary_dir}/cerberus3-alarm-service.service" \
     "${temporary_dir}/cerberus3-voice-bridge.service" \
     "${temporary_dir}/cerberus3-voice-stack.target"
 
@@ -504,6 +514,7 @@ if [[ "${action}" == "start" ]]; then
   "${elevate[@]}" systemctl restart cerberus3-openclaw-voice.service
   "${elevate[@]}" systemctl restart cerberus3-qwen3-asr.service
   "${elevate[@]}" systemctl start cerberus3-audio8.service
+  "${elevate[@]}" systemctl restart cerberus3-alarm-service.service
   "${elevate[@]}" systemctl restart cerberus3-voice-bridge.service
   "${elevate[@]}" systemctl start cerberus3-voice-stack.target
 fi

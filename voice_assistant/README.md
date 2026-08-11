@@ -55,6 +55,30 @@ future synthesis lets the current sentence end cleanly, then stops. A failed
 current playback discards its single prefetched successor. The persistent
 client is reused between turns and terminated on bridge shutdown.
 
+## Timers and alarms
+
+`alarm_service.py` provides persistent countdown timers and one-time clock
+alarms for both the voice and main Slack agents. Its API is an HTTP endpoint on
+the owner-only Unix socket `/run/cerberus3-alarms/api.sock`; it does not open a
+TCP port or expose general cron/command execution. Schedules are stored in the
+mode-`0600` SQLite database `/var/lib/cerberus3-alarms/alarms.sqlite3` and
+therefore survive gateway, service, and host restarts.
+
+At the due time, the service immediately plays a local three-note cue. It then
+uses Audio8 for a short label-aware announcement when TTS is available. The cue
+repeats every 20 seconds until dismissed, with a ten-minute hard stop. The alarm
+service and voice bridge share
+`/var/lib/cerberus3-alarms/playback.lock`, so two `aplay` processes cannot
+speak over one another. Generated audio remains in anonymous RAM-backed file
+descriptors.
+
+The `cerberus-alarms` OpenClaw plugin exposes only `timer_set`, `alarm_set`,
+`alarms_list`, `alarm_cancel`, and `alarm_dismiss`. The voice configuration
+allows those exact tools while continuing to deny `cron` and all general
+runtime, filesystem, node, and automation tool groups. Use
+`scripts/configure-main-openclaw-alarms.sh` to merge the same plugin into the
+main Slack gateway without replacing its existing private configuration.
+
 ## Pinned ASR runtime
 
 `MODEL.lock.json` pins `Qwen/Qwen3-ASR-1.7B-hf` by immutable revision and records
@@ -89,6 +113,7 @@ The defaults match the C3 deployment:
 | `VOICE_TTS_URL` | `http://127.0.0.1:8010/v1/audio/speech` |
 | `VOICE_CAPTURE_DEVICE` | `plughw:CARD=CP900,DEV=0` |
 | `VOICE_PLAYBACK_DEVICE` | `plughw:CARD=CP900,DEV=0` |
+| `VOICE_PLAYBACK_LOCK_PATH` | `/var/lib/cerberus3-alarms/playback.lock` |
 | `VOICE_STATE_DIR` | unset outside systemd; `/run/cerberus3-voice-bridge` in the unit |
 
 Set `VOICE_OPENCLAW_TOKEN` through the root-owned deployment environment file;

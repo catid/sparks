@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import io
 import ipaddress
 import json
@@ -124,6 +125,7 @@ class Settings:
     tts_model: str
     capture_device: str
     playback_device: str
+    playback_lock_path: str | None
     frame_ms: int
     pre_roll_ms: int
     speech_start_ms: int
@@ -179,6 +181,13 @@ class Settings:
             ),
             playback_device=os.environ.get(
                 "VOICE_PLAYBACK_DEVICE", "plughw:CARD=CP900,DEV=0"
+            ),
+            playback_lock_path=(
+                os.environ.get(
+                    "VOICE_PLAYBACK_LOCK_PATH",
+                    "/var/lib/cerberus3-alarms/playback.lock",
+                ).strip()
+                or None
             ),
             frame_ms=frame_ms,
             pre_roll_ms=env_int("VOICE_PRE_ROLL_MS", 300, 0, 2000),
@@ -1355,13 +1364,21 @@ class PlaybackProcess:
         self,
         process: subprocess.Popen[bytes],
         timeout_seconds: float,
+        lock_fd: int | None = None,
     ) -> None:
         self.process = process
         self.deadline = time.monotonic() + timeout_seconds
+        self.lock_fd = lock_fd
+
+    def _release_lock(self) -> None:
+        lock_fd, self.lock_fd = self.lock_fd, None
+        if lock_fd is not None:
+            os.close(lock_fd)
 
     def poll(self) -> bool:
         return_code = self.process.poll()
         if return_code is not None:
+            self._release_lock()
             if return_code:
                 raise RuntimeError(
                     f"CP900 playback failed with status {return_code}"
@@ -1374,6 +1391,7 @@ class PlaybackProcess:
 
     def cancel(self) -> None:
         if self.process.poll() is not None:
+            self._release_lock()
             return
         self.process.terminate()
         try:
@@ -1381,6 +1399,7 @@ class PlaybackProcess:
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait(timeout=2)
+        self._release_lock()
 
     def wait(self, stop_event: threading.Event) -> bool:
         """Return False only for deliberate bridge shutdown."""
@@ -1394,6 +1413,33 @@ class PlaybackProcess:
             stop_event.wait(min(0.05, remaining))
 
 
+def acquire_playback_lock(path: str | None, timeout_seconds: float = 30) -> int | None:
+    """Acquire the shared speaker lock without following a replaced lock file."""
+    if path is None:
+        return None
+    if not os.path.isabs(path) or not 0 < len(path) <= 512:
+        raise RuntimeError("playback lock path must be a bounded absolute path")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    lock_fd = os.open(path, flags, 0o600)
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return lock_fd
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("speaker remained busy")
+                time.sleep(0.05)
+    except BaseException:
+        os.close(lock_fd)
+        raise
+
+
 def start_playback(
     settings: Settings,
     wav_bytes: bytes,
@@ -1404,8 +1450,14 @@ def start_playback(
     duration = validate_tts_wav(wav_bytes)
     if not hasattr(os, "memfd_create"):
         raise RuntimeError("anonymous RAM playback is unavailable")
+    lock_fd = acquire_playback_lock(settings.playback_lock_path)
     flags = getattr(os, "MFD_CLOEXEC", 0)
-    memory_fd = os.memfd_create("cerberus-voice-wav", flags)
+    try:
+        memory_fd = os.memfd_create("cerberus-voice-wav", flags)
+    except BaseException:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        raise
     try:
         view = memoryview(wav_bytes)
         while view:
@@ -1414,24 +1466,30 @@ def start_playback(
                 raise RuntimeError("could not stage in-memory playback")
             view = view[written:]
         os.lseek(memory_fd, 0, os.SEEK_SET)
-        process = subprocess.Popen(
-            [
-                "/usr/bin/aplay",
-                "--quiet",
-                "--device",
-                settings.playback_device,
-                "--file-type",
-                "wav",
-            ],
-            stdin=memory_fd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            process = subprocess.Popen(
+                [
+                    "/usr/bin/aplay",
+                    "--quiet",
+                    "--device",
+                    settings.playback_device,
+                    "--file-type",
+                    "wav",
+                ],
+                stdin=memory_fd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except BaseException:
+            if lock_fd is not None:
+                os.close(lock_fd)
+            raise
     finally:
         os.close(memory_fd)
     return PlaybackProcess(
         process,
         max(20, duration + 20) if timeout_seconds is None else timeout_seconds,
+        lock_fd,
     )
 
 

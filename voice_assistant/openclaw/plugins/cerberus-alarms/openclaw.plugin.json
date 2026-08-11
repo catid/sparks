@@ -1,0 +1,30 @@
+{
+  "id": "cerberus-alarms",
+  "name": "Cerberus Timers and Alarms",
+  "description": "Constrained access to persistent local speaker timers and alarms.",
+  "version": "1.0.0",
+  "contracts": {
+    "tools": [
+      "timer_set",
+      "alarm_set",
+      "alarms_list",
+      "alarm_cancel",
+      "alarm_dismiss"
+    ]
+  },
+  "toolMetadata": {
+    "timer_set": { "optional": true },
+    "alarm_set": { "optional": true },
+    "alarms_list": { "optional": true },
+    "alarm_cancel": { "optional": true },
+    "alarm_dismiss": { "optional": true }
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

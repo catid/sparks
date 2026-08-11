@@ -77,5 +77,21 @@ if grep -Eq 'tempfile|mkstemp|NamedTemporaryFile' \
   echo "Voice bridge must keep audio in memory." >&2
   exit 1
 fi
+if grep -Fq 'urllib.request.urlopen' \
+  "${repo_root}/voice_assistant/alarm_service.py"; then
+  echo "Alarm service must use its proxy-free, no-redirect opener." >&2
+  exit 1
+fi
+grep -Fq 'urllib.request.ProxyHandler({})' \
+  "${repo_root}/voice_assistant/alarm_service.py"
+if grep -Eq 'tempfile|mkstemp|NamedTemporaryFile' \
+  "${repo_root}/voice_assistant/alarm_service.py"; then
+  echo "Alarm service must keep generated audio in memory." >&2
+  exit 1
+fi
+grep -Fq 'ThreadingUnixStreamServer' \
+  "${repo_root}/voice_assistant/alarm_service.py"
+grep -Fq 'MAX_RINGING_SECONDS = 10 * 60' \
+  "${repo_root}/voice_assistant/alarm_service.py"
 
 echo "ASR pinning, container isolation, and RAM-only bridge static tests passed."
