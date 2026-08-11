@@ -8,13 +8,15 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div id="dashboard" class="dashboard" data-connection="connecting">
+  <div id="dashboard" class="dashboard" data-connection="connecting" data-ambient-scene="0">
+    <canvas id="ambient-canvas" class="ambient-canvas" width="178" height="35" aria-hidden="true"></canvas>
+
     <header class="topbar">
       <div class="brand" aria-label="Cerebrus three-node cluster">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
         <div class="brand-copy">
           <strong>CEREBRUS</strong>
-          <span>CLUSTER PULSE</span>
+          <span>NODE PULSE</span>
         </div>
       </div>
 
@@ -33,147 +35,153 @@
       </div>
     </header>
 
-    <main class="main-grid" aria-label="Cluster telemetry">
-      <section class="metrics-grid" aria-label="Cluster averages and throughput">
-        <article class="metric-card metric-card--cpu" data-metric="cpu" data-state="waiting">
-          <header class="metric-heading">
-            <span><i aria-hidden="true"></i>CPU</span>
-            <small>CLUSTER AVG</small>
-          </header>
-          <div class="metric-reading">
-            <output id="cpu-value" aria-label="Current cluster average CPU utilization">—</output>
-            <span>%</span>
-          </div>
-          <div class="sparkline-wrap">
-            <svg id="cpu-chart" class="sparkline" viewBox="0 0 240 84" preserveAspectRatio="none"
-                 role="img" aria-label="Rolling CPU utilization graph">
-              <line class="chart-guide" x1="0" y1="42" x2="240" y2="42"></line>
-              <path id="cpu-area" class="chart-area"></path>
-              <path id="cpu-line" class="chart-line"></path>
-              <circle id="cpu-dot" class="chart-dot" r="3" hidden></circle>
-            </svg>
-            <span id="cpu-scale" class="chart-scale">100%</span>
-          </div>
-          <footer><span id="cpu-range">MIN — · MAX —</span><span id="cpu-delta">Δ —</span></footer>
-        </article>
-
-        <article class="metric-card metric-card--gpu" data-metric="gpu" data-state="waiting">
-          <header class="metric-heading">
-            <span><i aria-hidden="true"></i>GPU</span>
-            <small>CLUSTER AVG</small>
-          </header>
-          <div class="metric-reading">
-            <output id="gpu-value" aria-label="Current cluster average GPU utilization">—</output>
-            <span>%</span>
-          </div>
-          <div class="sparkline-wrap">
-            <svg id="gpu-chart" class="sparkline" viewBox="0 0 240 84" preserveAspectRatio="none"
-                 role="img" aria-label="Rolling GPU utilization graph">
-              <line class="chart-guide" x1="0" y1="42" x2="240" y2="42"></line>
-              <path id="gpu-area" class="chart-area"></path>
-              <path id="gpu-line" class="chart-line"></path>
-              <circle id="gpu-dot" class="chart-dot" r="3" hidden></circle>
-            </svg>
-            <span id="gpu-scale" class="chart-scale">100%</span>
-          </div>
-          <footer><span id="gpu-range">MIN — · MAX —</span><span id="gpu-delta">Δ —</span></footer>
-        </article>
-
-        <article class="metric-card metric-card--ram" data-metric="ram" data-state="waiting">
-          <header class="metric-heading">
-            <span><i aria-hidden="true"></i>RAM</span>
-            <small>CLUSTER AVG</small>
-          </header>
-          <div class="metric-reading">
-            <output id="ram-value" aria-label="Current cluster average RAM utilization">—</output>
-            <span>%</span>
-          </div>
-          <div class="sparkline-wrap">
-            <svg id="ram-chart" class="sparkline" viewBox="0 0 240 84" preserveAspectRatio="none"
-                 role="img" aria-label="Rolling RAM utilization graph">
-              <line class="chart-guide" x1="0" y1="42" x2="240" y2="42"></line>
-              <path id="ram-area" class="chart-area"></path>
-              <path id="ram-line" class="chart-line"></path>
-              <circle id="ram-dot" class="chart-dot" r="3" hidden></circle>
-            </svg>
-            <span id="ram-scale" class="chart-scale">100%</span>
-          </div>
-          <footer><span id="ram-range">MIN — · MAX —</span><span id="ram-delta">Δ —</span></footer>
-        </article>
-
-        <article class="metric-card metric-card--tokens" data-metric="tokens" data-state="waiting">
-          <header class="metric-heading">
-            <span><i aria-hidden="true"></i>TOKENS</span>
-            <small id="tokens-state" data-state="unknown">WAITING</small>
-          </header>
-          <div class="metric-reading metric-reading--rate">
-            <output id="tokens-value" aria-label="Current aggregate tokens per second">—</output>
-            <span>TOK/S</span>
-          </div>
-          <div class="sparkline-wrap">
-            <svg id="tokens-chart" class="sparkline" viewBox="0 0 240 84" preserveAspectRatio="none"
-                 role="img" aria-label="Rolling token throughput graph">
-              <line class="chart-guide" x1="0" y1="42" x2="240" y2="42"></line>
-              <path id="tokens-area" class="chart-area"></path>
-              <path id="tokens-line" class="chart-line"></path>
-              <circle id="tokens-dot" class="chart-dot" r="3" hidden></circle>
-            </svg>
-            <span id="tokens-scale" class="chart-scale">AUTO</span>
-          </div>
-          <footer><span id="tokens-range">MIN — · MAX —</span><span id="tokens-delta">Δ —</span></footer>
-        </article>
-      </section>
-
-      <aside class="nodes-panel" aria-labelledby="nodes-title">
-        <header class="nodes-heading">
-          <div>
-            <span class="section-kicker">LIVE HOSTS</span>
-            <h1 id="nodes-title">SPARK ARRAY</h1>
-          </div>
-          <span id="history-window">5 MIN WINDOW</span>
+    <main class="main-grid" aria-label="Per-node cluster telemetry">
+      <article class="metric-card metric-card--cpu" data-metric="cpu" data-state="waiting">
+        <header class="metric-heading">
+          <span><i aria-hidden="true"></i>CPU LOAD</span>
+          <small>PER NODE · %</small>
         </header>
-
-        <div class="node-columns" aria-hidden="true">
-          <span>NODE</span><span>CPU</span><span>GPU</span><span>RAM</span>
+        <div class="trace-stack" aria-label="Per-node CPU utilization">
+          <div id="cpu-c1-row" class="trace-row trace-row--c1" data-state="unknown">
+            <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C1</b></span>
+            <output id="cpu-c1-value" aria-label="C1 CPU utilization">—</output><span class="trace-unit">%</span>
+            <svg id="cpu-c1-chart" class="mini-chart" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C1 CPU utilization history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="cpu-c1-line" class="chart-line"></path>
+              <circle id="cpu-c1-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+          </div>
+          <div id="cpu-c2-row" class="trace-row trace-row--c2" data-state="unknown">
+            <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C2</b></span>
+            <output id="cpu-c2-value" aria-label="C2 CPU utilization">—</output><span class="trace-unit">%</span>
+            <svg id="cpu-c2-chart" class="mini-chart" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C2 CPU utilization history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="cpu-c2-line" class="chart-line"></path>
+              <circle id="cpu-c2-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+          </div>
+          <div id="cpu-c3-row" class="trace-row trace-row--c3" data-state="unknown">
+            <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C3</b></span>
+            <output id="cpu-c3-value" aria-label="C3 CPU utilization">—</output><span class="trace-unit">%</span>
+            <svg id="cpu-c3-chart" class="mini-chart" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C3 CPU utilization history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="cpu-c3-line" class="chart-line"></path>
+              <circle id="cpu-c3-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+          </div>
         </div>
+        <footer><span>5 MIN ROLLING</span><span>THREE INDEPENDENT TRACES</span></footer>
+      </article>
 
-        <div class="node-list">
-          <article id="host-c1" class="node-row" data-state="unknown">
-            <div class="node-name">
-              <span class="status-dot" aria-hidden="true"></span>
-              <div><strong>C1</strong><small id="c1-state">WAITING</small></div>
-            </div>
-            <output id="c1-cpu" aria-label="C1 CPU utilization">—</output>
-            <output id="c1-gpu" aria-label="C1 GPU utilization">—</output>
-            <output id="c1-ram" aria-label="C1 RAM utilization">—</output>
-          </article>
-
-          <article id="host-c2" class="node-row" data-state="unknown">
-            <div class="node-name">
-              <span class="status-dot" aria-hidden="true"></span>
-              <div><strong>C2</strong><small id="c2-state">WAITING</small></div>
-            </div>
-            <output id="c2-cpu" aria-label="C2 CPU utilization">—</output>
-            <output id="c2-gpu" aria-label="C2 GPU utilization">—</output>
-            <output id="c2-ram" aria-label="C2 RAM utilization">—</output>
-          </article>
-
-          <article id="host-c3" class="node-row" data-state="unknown">
-            <div class="node-name">
-              <span class="status-dot" aria-hidden="true"></span>
-              <div><strong>C3</strong><small id="c3-state">WAITING</small></div>
-            </div>
-            <output id="c3-cpu" aria-label="C3 CPU utilization">—</output>
-            <output id="c3-gpu" aria-label="C3 GPU utilization">—</output>
-            <output id="c3-ram" aria-label="C3 RAM utilization">—</output>
-          </article>
+      <article class="metric-card metric-card--gpu" data-metric="gpu" data-state="waiting">
+        <header class="metric-heading">
+          <span><i aria-hidden="true"></i>GPU LOAD</span>
+          <small>PER NODE · %</small>
+        </header>
+        <div class="trace-stack" aria-label="Per-node GPU utilization">
+          <div id="gpu-c1-row" class="trace-row trace-row--c1" data-state="unknown">
+            <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C1</b></span>
+            <output id="gpu-c1-value" aria-label="C1 GPU utilization">—</output><span class="trace-unit">%</span>
+            <svg id="gpu-c1-chart" class="mini-chart" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C1 GPU utilization history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="gpu-c1-line" class="chart-line"></path>
+              <circle id="gpu-c1-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+          </div>
+          <div id="gpu-c2-row" class="trace-row trace-row--c2" data-state="unknown">
+            <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C2</b></span>
+            <output id="gpu-c2-value" aria-label="C2 GPU utilization">—</output><span class="trace-unit">%</span>
+            <svg id="gpu-c2-chart" class="mini-chart" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C2 GPU utilization history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="gpu-c2-line" class="chart-line"></path>
+              <circle id="gpu-c2-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+          </div>
+          <div id="gpu-c3-row" class="trace-row trace-row--c3" data-state="unknown">
+            <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C3</b></span>
+            <output id="gpu-c3-value" aria-label="C3 GPU utilization">—</output><span class="trace-unit">%</span>
+            <svg id="gpu-c3-chart" class="mini-chart" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C3 GPU utilization history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="gpu-c3-line" class="chart-line"></path>
+              <circle id="gpu-c3-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+          </div>
         </div>
+        <footer><span>5 MIN ROLLING</span><span>THREE INDEPENDENT TRACES</span></footer>
+      </article>
 
-        <p id="connection-message" class="connection-message" aria-live="assertive">
-          Waiting for telemetry…
-        </p>
-      </aside>
+      <article class="metric-card metric-card--ram" data-metric="ram" data-state="waiting">
+        <header class="metric-heading">
+          <span><i aria-hidden="true"></i>UNIFIED RAM</span>
+          <small>PER NODE · %</small>
+        </header>
+        <div class="trace-stack" aria-label="Per-node RAM utilization">
+          <div id="ram-c1-row" class="trace-row trace-row--c1" data-state="unknown">
+            <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C1</b></span>
+            <output id="ram-c1-value" aria-label="C1 RAM utilization">—</output><span class="trace-unit">%</span>
+            <svg id="ram-c1-chart" class="mini-chart" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C1 RAM utilization history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="ram-c1-line" class="chart-line"></path>
+              <circle id="ram-c1-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+          </div>
+          <div id="ram-c2-row" class="trace-row trace-row--c2" data-state="unknown">
+            <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C2</b></span>
+            <output id="ram-c2-value" aria-label="C2 RAM utilization">—</output><span class="trace-unit">%</span>
+            <svg id="ram-c2-chart" class="mini-chart" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C2 RAM utilization history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="ram-c2-line" class="chart-line"></path>
+              <circle id="ram-c2-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+          </div>
+          <div id="ram-c3-row" class="trace-row trace-row--c3" data-state="unknown">
+            <span class="trace-ident"><i class="trace-status" aria-hidden="true"></i><b>C3</b></span>
+            <output id="ram-c3-value" aria-label="C3 RAM utilization">—</output><span class="trace-unit">%</span>
+            <svg id="ram-c3-chart" class="mini-chart" viewBox="0 0 220 42" preserveAspectRatio="none" role="img" aria-label="C3 RAM utilization history">
+              <line class="chart-guide" x1="0" y1="21" x2="220" y2="21"></line>
+              <path id="ram-c3-line" class="chart-line"></path>
+              <circle id="ram-c3-dot" class="chart-dot" r="2.5" hidden></circle>
+            </svg>
+          </div>
+        </div>
+        <footer><span>5 MIN ROLLING</span><span>THREE INDEPENDENT TRACES</span></footer>
+      </article>
+
+      <article class="metric-card metric-card--tokens" data-metric="tokens" data-state="waiting">
+        <header class="metric-heading">
+          <span><i aria-hidden="true"></i>OUTPUT TOKENS</span>
+          <small id="tokens-state" data-state="unknown">WAITING</small>
+        </header>
+        <p class="api-scope"><b>C1 API</b><span>C1+C2 MODEL AGGREGATE</span></p>
+        <div class="token-reading">
+          <output id="tokens-value" aria-label="Current API-wide output token throughput">—</output>
+          <span>TOK/S</span>
+        </div>
+        <div class="token-chart-wrap">
+          <svg id="tokens-chart" class="token-chart" viewBox="0 0 300 78" preserveAspectRatio="none" role="img" aria-label="API-wide rolling output token throughput">
+            <line class="chart-guide" x1="0" y1="39" x2="300" y2="39"></line>
+            <path id="tokens-area" class="chart-area"></path>
+            <path id="tokens-line" class="chart-line"></path>
+            <circle id="tokens-dot" class="chart-dot" r="3" hidden></circle>
+          </svg>
+          <span id="tokens-scale" class="chart-scale">AUTO</span>
+        </div>
+        <footer>
+          <span id="tokens-range">MIN — · MAX —</span>
+          <span id="tokens-delta">NOT PER NODE</span>
+        </footer>
+      </article>
     </main>
+
+    <footer class="status-strip">
+      <p id="connection-message" class="connection-message" aria-live="assertive">Waiting for telemetry…</p>
+      <div class="host-states" aria-label="Host status">
+        <span id="host-c1" class="host-state" data-state="unknown"><i class="status-dot" aria-hidden="true"></i><b>C1</b><small id="c1-state">WAITING</small></span>
+        <span id="host-c2" class="host-state" data-state="unknown"><i class="status-dot" aria-hidden="true"></i><b>C2</b><small id="c2-state">WAITING</small></span>
+        <span id="host-c3" class="host-state" data-state="unknown"><i class="status-dot" aria-hidden="true"></i><b>C3</b><small id="c3-state">WAITING</small></span>
+        <span id="history-window">5 MIN WINDOW</span>
+      </div>
+    </footer>
   </div>
   <script src="/app.js" defer></script>
 </body>

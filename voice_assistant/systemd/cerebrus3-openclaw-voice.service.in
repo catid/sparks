@@ -1,0 +1,51 @@
+[Unit]
+Description=Cerebrus 3 voice OpenClaw gateway
+Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@WORKSPACE@
+Environment=HOME=@HOME@
+Environment=PATH=@NODE_DIR@/bin:@OPENCLAW_RELEASE@/bin:/usr/bin:/bin
+Environment=OPENCLAW_NODE_DIR=@NODE_DIR@
+Environment=OPENCLAW_RELEASE_DIR=@OPENCLAW_RELEASE@
+Environment=OPENCLAW_NODE_VERSION=24.15.0
+Environment=OPENCLAW_VERSION=2026.7.1-2
+Environment=OPENCLAW_STATE_DIR=@STATE_DIR@
+Environment=OPENCLAW_CONFIG_PATH=@CONFIG_PATH@
+Environment=OPENCLAW_WORKSPACE_DIR=@WORKSPACE@
+Environment=XDG_CACHE_HOME=@CACHE_DIR@
+EnvironmentFile=@SECRET_ENV@
+ExecStartPre=@OPENCLAW_RELEASE@/bin/openclaw config validate
+ExecStart=@PROJECT_DIR@/voice_assistant/openclaw/gateway-wrapper.sh
+Restart=always
+RestartSec=5s
+TimeoutStartSec=120s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@STATE_DIR@ @WORKSPACE@ @CACHE_DIR@
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -@HOME@/.ssh -@HOME@/.bashrc -@HOME@/.zshrc -@HOME@/.profile
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=cerebrus3-voice-stack.target

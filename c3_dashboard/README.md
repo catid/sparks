@@ -3,8 +3,18 @@
 This directory contains the dedicated 1424×280 status display for Cerebrus 3.
 It is independent of the larger two-node operator dashboard in `dashboard/`.
 The HTTP collector samples Cerebrus 1, 2, and 3 every five seconds; the local
-screen shows the current cluster-average CPU, GPU, and unified-RAM utilization
-and aggregate vLLM token throughput beside rolling graphs.
+screen shows separate current and rolling C1/C2/C3 CPU, GPU, and unified-RAM
+traces. The token panel is deliberately different: vLLM exposes one
+cluster-wide output counter at the C1 API, so that panel is labelled as a
+C1+C2 API aggregate and never invents per-node token attribution.
+
+The fixed 1424x280 view includes a dependency-free, 178x35 pixel canvas behind
+the telemetry. Four inexpensive software-rendered scenes rotate every 30
+seconds at eight frames per second, and the foreground drifts by one pixel at
+each scene change. This varies otherwise static pixels without moving the
+current values far enough to hurt glanceability. Reduced-motion clients render
+only one frame per 30-second scene. No image, font, shader, or other asset is
+downloaded.
 
 The on-screen deployment has two services:
 

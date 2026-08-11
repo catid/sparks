@@ -1,0 +1,15 @@
+{
+  "node": {
+    "version": "24.15.0",
+    "architecture": "arm64",
+    "archive": "node-v24.15.0-linux-arm64.tar.xz",
+    "url": "https://nodejs.org/dist/v24.15.0/node-v24.15.0-linux-arm64.tar.xz",
+    "sha256": "f3d5a797b5d210ce8e2cb265544c8e482eaedcb8aa409a8b46da7e8595d0dda0"
+  },
+  "openclaw": {
+    "package": "openclaw",
+    "version": "2026.7.1-2",
+    "tarball": "https://registry.npmjs.org/openclaw/-/openclaw-2026.7.1-2.tgz",
+    "integrity": "sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g=="
+  }
+}

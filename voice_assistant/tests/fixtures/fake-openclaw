@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+if [[ "${1:-}" == "--version" ]]; then
+  printf '%s\n' '2026.7.1-2'
+  exit 0
+fi
+printf '%s\n' "$*" >"${OPENCLAW_TEST_MARKER:?}"

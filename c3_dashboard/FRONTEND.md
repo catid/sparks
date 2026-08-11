@@ -2,9 +2,21 @@
 
 The files in `static/` are a dependency-free dashboard designed for the
 native `1424x280` rack display on C3. At that size it is a single fixed view:
-four cluster cards (average CPU, average GPU, average RAM, and aggregate token
-throughput) plus a compact C1/C2/C3 status rail. There is no scrolling, CDN,
-font download, build step, or JavaScript package dependency.
+four cards across the panel. CPU, GPU, and unified RAM each contain three
+stacked C1/C2/C3 current readings and rolling mini-graphs. The token card has
+one larger graph because the production C1 metrics endpoint exposes only the
+C1+C2 API-wide output counter; both the scope label and footer say that it is
+not per-node telemetry. A compact status strip keeps endpoint failures visible.
+There is no scrolling, CDN, font download, build step, or JavaScript package
+dependency.
+
+A 178x35 canvas is stretched with nearest-neighbor rendering behind the cards.
+Four code-native, low-cost pixel scenes rotate every 30 seconds and render at
+eight frames per second. The foreground moves among four one-pixel offsets at
+the same boundary to reduce completely static panel pixels without disturbing
+the fixed layout. With `prefers-reduced-motion`, the canvas changes only once
+per 30-second scene and the foreground shift has no transition. Telemetry and
+network polling are independent of this ambient renderer.
 
 The browser loads `/`, `/style.css`, and `/app.js`. The frontend requests
 `GET /api/status` immediately and then every 5 seconds with `cache: no-store`.
@@ -93,11 +105,13 @@ stop later refreshes.
 Contract details:
 
 - `generated_at` and history `timestamp` values are ISO 8601 timestamps.
-- `cluster.cpu_percent`, `gpu_percent`, and `ram_percent` are averages across
-  the hosts that supplied that metric. The backend owns that averaging; the
-  UI never averages rounded host values again.
+- `cluster.cpu_percent`, `gpu_percent`, and `ram_percent` remain backend
+  summary fields for API consumers, but the rack UI does not graph or display
+  them. Its three utilization traces come directly from `hosts` and
+  `history[].hosts`.
 - `throughput.tokens_per_second` is cluster-wide aggregate output throughput,
-  not a per-host average.
+  not a per-host average. vLLM does not expose trustworthy rank attribution in
+  this deployment, so the UI renders one explicitly labelled API trace.
 - `history` is ordered oldest to newest. The UI displays at most 60 points,
   which is a five-minute window at the required five-second interval.
 - A missing measurement is `null` or omitted, never a fabricated zero. Gaps
@@ -124,6 +138,7 @@ DOM; no browser or downloaded package is needed:
 node --test c3_dashboard/tests/test_ui.mjs
 ```
 
-They cover contract normalization, host mapping, missing-value handling,
-rolling-series extraction, SVG path generation (including gaps), state
-fallbacks, current-value rendering, and the self-contained static shell.
+They cover contract normalization, host mapping, independent per-node rolling
+series, missing-value gaps, SVG path generation, throughput scope/state,
+ambient scene timing and pixel bounds, state fallbacks, current-value
+rendering, and the self-contained static shell.

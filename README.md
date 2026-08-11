@@ -65,8 +65,9 @@ OpenClaw state in this public checkout.
 | API | C1 only, port 8889; canonical `deepseek-v4-flash` alias |
 | Fabric | three-node CX-7 ring; production uses the two C1-C2 logical links |
 | Recovery | C1 systemd supervisor recycles the complete TP pair; C3 is not a dependency |
-| Dashboards | C1 operator telemetry plus a 1424x280 C3 rack display with three-host utilization and live token rate |
+| Dashboards | C1 operator telemetry plus a 1424x280 C3 rack display with per-node utilization traces and API-wide live token rate |
 | C3 TTS | isolated Audio8 0.6B BF16 OpenAI-compatible service; optional private, operator-approved reference |
+| C3 voice | CP900 → pinned Qwen3-ASR 1.7B → Cerberus gate → loopback OpenClaw → C1/C2 DS4F → Audio8 |
 
 The model and container are both pinned and validated before launch. Model
 weights remain outside Git and are mounted read-only. The MiaAI-Lab recipe is
@@ -76,8 +77,8 @@ beside it.
 The rank-host audit found no unexplained installed drift. It also found no
 custom GPU power limit, forced clocks, inference sysctl bundle, preallocated
 hugepages, or replacement Linux kernel. All three hosts boot to
-`multi-user.target`; the stock NVIDIA X configuration remains installed for
-easy rollback, but GDM/X is not running.
+`multi-user.target` and GDM remains disabled. C1 and C2 are fully headless;
+C3 runs only the small rootless-X kiosk unit needed by its rack display.
 
 ## Measured throughput
 
@@ -130,6 +131,7 @@ qualitative agent evaluation are in
 - [Boot, recovery, dashboard, and routine operations](docs/OPERATIONS.md)
 - [Cerebrus 3 rack dashboard](c3_dashboard/README.md)
 - [Cerebrus 3 Audio8 TTS](audio8/README.md)
+- [Cerebrus 3 always-on voice assistant](voice_assistant/README.md)
 - [Move the dashboard to a dedicated Linux host](docs/REMOTE_DASHBOARD.md)
 - [Validation and benchmarks](docs/VALIDATION.md)
 - [Installed-file map](docs/INSTALLED_ARTIFACTS.md)
@@ -166,6 +168,8 @@ minutes for weight loading, warm-up, and CUDA-graph capture.
   rack kiosk for Cerebrus 3
 - `audio8/`: pinned Audio8 0.6B BF16 TTS container and service wrapper for
   Cerebrus 3; reference media remains private
+- `voice_assistant/`: pinned Qwen3-ASR, RAM-only CP900 wake bridge, isolated
+  OpenClaw voice agent, and boot-persistent C3 systemd units
 - `deepseek_v4_bench/`: fixed-length realistic streaming benchmark
 - `deepseek_v4_agent_eval/`: disposable-sandbox coding-agent evaluation
 - `bench/`: NCCL/RDMA and lower-level benchmark helpers

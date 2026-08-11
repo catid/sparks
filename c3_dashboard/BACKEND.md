@@ -11,12 +11,19 @@ online-host cluster averages, and bounded in-memory time series. The response
 also states how many hosts contributed to each average, so a degraded average
 cannot be mistaken for a complete three-host sample.
 
+Every history point includes a `hosts` map as well as the cluster summary. The
+rack UI consumes those host maps directly to draw independent C1/C2/C3 traces;
+cluster averages remain available to other API clients but are not used as a
+fallback for a missing node. A failed node therefore creates a visible gap
+instead of silently changing the denominator of an on-screen average.
+
 Production generation throughput comes from
 `http://cerebrus1:8889/metrics` by default. The backend differentiates the
 cumulative `vllm:generation_tokens_total` counter across successful scrapes;
 it never exposes that lifetime total as the current rate. The API distinguishes
 `warming`, `active`, `idle` (an exact `0`), `stale`, and `down`. Failed scrapes
-never retain the prior live rate.
+never retain the prior live rate. This counter describes the C1-served TP2 API
+as a whole; the backend does not claim per-rank or per-node token attribution.
 
 Run tests without installing packages:
 

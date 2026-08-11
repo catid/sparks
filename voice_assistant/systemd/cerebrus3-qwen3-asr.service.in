@@ -1,0 +1,48 @@
+[Unit]
+Description=Qwen3 ASR 1.7B service on Cerebrus 3
+Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@PROJECT_DIR@
+Environment=HOME=@HOME@
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=QWEN_ASR_HOST=127.0.0.1
+Environment=QWEN_ASR_PORT=8020
+Environment=XDG_CACHE_HOME=@ASR_CACHE_DIR@
+Environment=HF_HOME=@ASR_CACHE_DIR@/huggingface
+Environment=TORCH_HOME=@ASR_CACHE_DIR@/torch
+EnvironmentFile=-/etc/default/cerebrus3-qwen3-asr
+ExecStartPre=-/usr/bin/docker rm -f cerebrus3-qwen-asr
+ExecStart=@PROJECT_DIR@/voice_assistant/run-asr.sh
+ExecStop=-/usr/bin/docker stop --time 30 cerebrus3-qwen-asr
+Restart=always
+RestartSec=5s
+TimeoutStartSec=0
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@ASR_CACHE_DIR@
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=cerebrus3-voice-stack.target

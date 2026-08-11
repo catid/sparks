@@ -4,15 +4,18 @@
   const API_URL = "/api/status";
   const POLL_MS = 5000;
   const MAX_HISTORY_POINTS = 60;
-  const PERCENT_METRICS = new Set(["cpu", "gpu", "ram"]);
+  const NODE_SLOTS = [1, 2, 3];
+  const AMBIENT_SCENE_MS = 30000;
+  const AMBIENT_FRAME_MS = 125;
+  const AMBIENT_SCENES = 4;
   const METRICS = {
     cpu: { field: "cpu_percent", label: "CPU utilization" },
     gpu: { field: "gpu_percent", label: "GPU utilization" },
     ram: { field: "ram_percent", label: "RAM utilization" },
-    tokens: { field: "tokens_per_second", label: "token throughput" },
   };
 
   let pollTimer = null;
+  let ambientTimer = null;
   let lastPayload = null;
   let lastSuccessMs = null;
 
@@ -33,7 +36,7 @@
   }
 
   function hostSlot(key, host, fallbackIndex) {
-    const candidates = [key, host.id, host.name, host.hostname]
+    const candidates = [key, host.id, host.name, host.hostname, host.reported_hostname]
       .filter((value) => value !== null && value !== undefined)
       .map(String);
     for (const candidate of candidates) {
@@ -80,12 +83,13 @@
       const host = safeObject(rawHost);
       let slot = hostSlot(key, host, index);
       if (slot === null || occupied.has(slot)) {
-        slot = [1, 2, 3].find((candidate) => !occupied.has(candidate)) || null;
+        slot = NODE_SLOTS.find((candidate) => !occupied.has(candidate)) || null;
       }
       if (slot !== null) occupied.add(slot);
       hosts.push({
         key,
         slot,
+        name: host.name || key,
         state: host.state,
         error: host.error === null || host.error === undefined ? "" : String(host.error),
         cpu_percent: finiteNumber(host.cpu_percent),
@@ -109,9 +113,6 @@
         state: clusterSource.state,
         available_hosts: finiteNumber(clusterSource.available_hosts),
         total_hosts: finiteNumber(clusterSource.total_hosts),
-        cpu_percent: finiteNumber(clusterSource.cpu_percent),
-        gpu_percent: finiteNumber(clusterSource.gpu_percent),
-        ram_percent: finiteNumber(clusterSource.ram_percent),
       },
       throughput: {
         state: throughputSource.state,
@@ -124,25 +125,45 @@
     };
   }
 
-  function historyValue(point, metric) {
-    if (metric === "tokens") {
-      return finiteNumber(safeObject(point.throughput).tokens_per_second);
+  function hostAtSlot(payload, slot) {
+    return payload.hosts.find((host) => host.slot === slot) || null;
+  }
+
+  function historyHostAtSlot(point, slot) {
+    const hosts = safeObject(point.hosts);
+    const entries = Object.entries(hosts);
+    for (let index = 0; index < entries.length; index += 1) {
+      const [key, rawHost] = entries[index];
+      const host = safeObject(rawHost);
+      if (hostSlot(key, host, index) === slot) return host;
     }
-    return finiteNumber(safeObject(point.cluster)[METRICS[metric].field]);
+    return null;
   }
 
-  function currentValue(payload, metric) {
-    return metric === "tokens"
-      ? finiteNumber(payload.throughput.tokens_per_second)
-      : finiteNumber(payload.cluster[METRICS[metric].field]);
-  }
-
-  function metricSeries(payload, metric) {
-    const values = payload.history.slice(-MAX_HISTORY_POINTS).map((point) => historyValue(point, metric));
-    const current = currentValue(payload, metric);
+  function hostMetricSeries(payload, metric, slot) {
+    const field = METRICS[metric].field;
+    const values = payload.history.slice(-MAX_HISTORY_POINTS).map((point) => {
+      const host = historyHostAtSlot(point, slot);
+      return host ? finiteNumber(host[field]) : null;
+    });
+    const currentHost = hostAtSlot(payload, slot);
+    const current = currentHost ? finiteNumber(currentHost[field]) : null;
     if (!values.length) {
       if (current !== null) values.push(current);
-    } else if (current !== null) {
+    } else {
+      values[values.length - 1] = current;
+    }
+    return values;
+  }
+
+  function tokenSeries(payload) {
+    const values = payload.history.slice(-MAX_HISTORY_POINTS).map((point) => (
+      finiteNumber(safeObject(point.throughput).tokens_per_second)
+    ));
+    const current = finiteNumber(payload.throughput.tokens_per_second);
+    if (!values.length) {
+      if (current !== null) values.push(current);
+    } else {
       values[values.length - 1] = current;
     }
     return values;
@@ -160,9 +181,9 @@
 
   function sparklinePaths(values, options) {
     const settings = options || {};
-    const width = finiteNumber(settings.width) || 240;
-    const height = finiteNumber(settings.height) || 84;
-    const padding = finiteNumber(settings.padding) ?? 4;
+    const width = finiteNumber(settings.width) || 220;
+    const height = finiteNumber(settings.height) || 42;
+    const padding = finiteNumber(settings.padding) ?? 3;
     const min = finiteNumber(settings.min) ?? 0;
     const maxCandidate = finiteNumber(settings.max);
     const max = maxCandidate !== null && maxCandidate > min ? maxCandidate : min + 1;
@@ -202,11 +223,7 @@
         break;
       }
     }
-    return {
-      line: lineParts.join(" "),
-      area: areaParts.join(" "),
-      latest,
-    };
+    return { line: lineParts.join(" "), area: areaParts.join(" "), latest };
   }
 
   function metricStats(values) {
@@ -222,7 +239,7 @@
   function formatCurrent(value, metric) {
     const number = finiteNumber(value);
     if (number === null) return "—";
-    if (PERCENT_METRICS.has(metric)) return clamp(number, 0, 100).toFixed(1);
+    if (metric !== "tokens") return clamp(number, 0, 100).toFixed(0);
     return new Intl.NumberFormat("en-US", {
       maximumFractionDigits: number < 100 ? 1 : 0,
       minimumFractionDigits: 0,
@@ -232,16 +249,11 @@
   function formatCompact(value, metric) {
     const number = finiteNumber(value);
     if (number === null) return "—";
-    if (PERCENT_METRICS.has(metric)) return String(Math.round(clamp(number, 0, 100)));
+    if (metric !== "tokens") return String(Math.round(clamp(number, 0, 100)));
     const absolute = Math.abs(number);
     if (absolute >= 1e6) return `${(number / 1e6).toFixed(absolute >= 1e7 ? 0 : 1)}M`;
     if (absolute >= 1e3) return `${(number / 1e3).toFixed(absolute >= 1e4 ? 0 : 1)}K`;
     return number < 100 ? number.toFixed(1) : String(Math.round(number));
-  }
-
-  function formatNodePercent(value) {
-    const number = finiteNumber(value);
-    return number === null ? "—" : String(Math.round(clamp(number, 0, 100)));
   }
 
   function sampleAgeSeconds(payload, nowMs) {
@@ -261,69 +273,95 @@
     });
   }
 
-  function renderMetric(payload, metric) {
-    const card = document.querySelector(`[data-metric="${metric}"]`);
-    const value = currentValue(payload, metric);
-    const values = metricSeries(payload, metric);
-    const stats = metricStats(values);
-    const percent = PERCENT_METRICS.has(metric);
-    const graphMax = percent ? 100 : niceCeiling(Math.max(10, stats.max === null ? 10 : stats.max * 1.08));
-    const paths = sparklinePaths(values, { width: 240, height: 84, padding: 4, min: 0, max: graphMax });
-    const unit = percent ? "%" : " tok/s";
+  function renderNodeMetric(payload, metric, slot) {
+    const host = hostAtSlot(payload, slot);
+    const value = host ? finiteNumber(host[METRICS[metric].field]) : null;
+    const values = hostMetricSeries(payload, metric, slot);
+    const paths = sparklinePaths(values, { width: 220, height: 42, padding: 3, min: 0, max: 100 });
+    const state = host ? normalizeState(host.state) : "unknown";
+    const row = byId(`${metric}-c${slot}-row`);
+    const output = byId(`${metric}-c${slot}-value`);
+    const chart = byId(`${metric}-c${slot}-chart`);
+    const dot = byId(`${metric}-c${slot}-dot`);
 
-    byId(`${metric}-value`).textContent = formatCurrent(value, metric);
-    byId(`${metric}-range`).textContent = stats.min === null
-      ? "MIN — · MAX —"
-      : `MIN ${formatCompact(stats.min, metric)} · MAX ${formatCompact(stats.max, metric)}`;
-    byId(`${metric}-delta`).textContent = stats.delta === null
-      ? "Δ —"
-      : `Δ ${stats.delta > 0 ? "+" : ""}${formatCompact(stats.delta, metric)}`;
-    byId(`${metric}-scale`).textContent = percent ? "100%" : `${formatCompact(graphMax, metric)} MAX`;
-    byId(`${metric}-line`).setAttribute("d", paths.line);
-    byId(`${metric}-area`).setAttribute("d", paths.area);
-
-    const dot = byId(`${metric}-dot`);
-    dot.hidden = paths.latest === null;
+    row.dataset.state = state;
+    row.title = host && host.error ? host.error : "";
+    output.textContent = formatCurrent(value, metric);
+    output.dataset.available = value === null ? "false" : "true";
+    byId(`${metric}-c${slot}-line`).setAttribute("d", paths.line);
+    dot.hidden = value === null || paths.latest === null;
     if (paths.latest) {
       dot.setAttribute("cx", paths.latest.x.toFixed(2));
       dot.setAttribute("cy", paths.latest.y.toFixed(2));
     }
-    card.dataset.state = value === null ? "unavailable" : "ready";
-    if (metric === "tokens") {
-      const throughputState = throughputViewState(payload.throughput.state, value);
-      const stateLabel = byId("tokens-state");
-      card.dataset.throughputState = throughputState.state;
-      stateLabel.dataset.state = throughputState.state;
-      stateLabel.textContent = throughputState.label;
-    }
-    byId(`${metric}-chart`).setAttribute(
+    chart.setAttribute(
       "aria-label",
       value === null
-        ? `${METRICS[metric].label} is unavailable`
-        : `${METRICS[metric].label}, current ${formatCurrent(value, metric)}${unit}`,
+        ? `C${slot} ${METRICS[metric].label} is unavailable`
+        : `C${slot} ${METRICS[metric].label}, current ${formatCurrent(value, metric)} percent`,
+    );
+    return value !== null;
+  }
+
+  function renderPerNodeMetric(payload, metric) {
+    const available = NODE_SLOTS.map((slot) => renderNodeMetric(payload, metric, slot))
+      .filter(Boolean).length;
+    const card = document.querySelector(`[data-metric="${metric}"]`);
+    card.dataset.state = available ? "ready" : "unavailable";
+    card.dataset.availableNodes = String(available);
+  }
+
+  function renderTokens(payload) {
+    const card = document.querySelector('[data-metric="tokens"]');
+    const value = finiteNumber(payload.throughput.tokens_per_second);
+    const values = tokenSeries(payload);
+    const stats = metricStats(values);
+    const graphMax = niceCeiling(Math.max(10, stats.max === null ? 10 : stats.max * 1.08));
+    const paths = sparklinePaths(values, { width: 300, height: 78, padding: 4, min: 0, max: graphMax });
+    const state = throughputViewState(payload.throughput.state, value);
+
+    byId("tokens-value").textContent = formatCurrent(value, "tokens");
+    byId("tokens-range").textContent = stats.min === null
+      ? "MIN — · MAX —"
+      : `MIN ${formatCompact(stats.min, "tokens")} · MAX ${formatCompact(stats.max, "tokens")}`;
+    byId("tokens-delta").textContent = "API AGG · NOT PER NODE";
+    byId("tokens-scale").textContent = `${formatCompact(graphMax, "tokens")} MAX`;
+    byId("tokens-line").setAttribute("d", paths.line);
+    byId("tokens-area").setAttribute("d", paths.area);
+    const dot = byId("tokens-dot");
+    dot.hidden = value === null || paths.latest === null;
+    if (paths.latest) {
+      dot.setAttribute("cx", paths.latest.x.toFixed(2));
+      dot.setAttribute("cy", paths.latest.y.toFixed(2));
+    }
+    const stateLabel = byId("tokens-state");
+    stateLabel.dataset.state = state.state;
+    stateLabel.textContent = state.label;
+    card.dataset.state = value === null ? "unavailable" : "ready";
+    card.dataset.throughputState = state.state;
+    card.title = payload.throughput.source
+      ? `Cluster-wide output rate from ${payload.throughput.source}; no per-node attribution is available.`
+      : "Cluster-wide API output rate; no per-node attribution is available.";
+    byId("tokens-chart").setAttribute(
+      "aria-label",
+      value === null
+        ? "API-wide output token throughput is unavailable"
+        : `API-wide output token throughput, current ${formatCurrent(value, "tokens")} tokens per second; not attributable per node`,
     );
   }
 
   function renderHost(slot, host) {
-    const row = byId(`host-c${slot}`);
-    const rawState = host ? host.state : null;
-    const state = host ? normalizeState(rawState) : "unknown";
+    const summary = byId(`host-c${slot}`);
+    const state = host ? normalizeState(host.state) : "unknown";
     const age = host ? finiteNumber(host.age_seconds) : null;
     const stateText = state === "unknown"
       ? (host ? "UNKNOWN" : "NO DATA")
       : state.toUpperCase();
-    row.dataset.state = state;
-    row.title = host && host.error ? host.error : "";
+    summary.dataset.state = state;
+    summary.title = host && host.error ? host.error : "";
     byId(`c${slot}-state`).textContent = age !== null
       ? `${stateText} · ${Math.max(0, Math.round(age))}S`
       : stateText;
-
-    ["cpu", "gpu", "ram"].forEach((metric) => {
-      const output = byId(`c${slot}-${metric}`);
-      const value = host ? host[`${metric}_percent`] : null;
-      output.textContent = formatNodePercent(value);
-      output.dataset.available = finiteNumber(value) === null ? "false" : "true";
-    });
   }
 
   function inferredClusterState(payload) {
@@ -369,21 +407,22 @@
     byId("sample-time").textContent = formatSampleTime(payload.generated_at);
     byId("sample-age").textContent = age === null ? "NO SAMPLE" : age < 2 ? "LIVE" : `${Math.floor(age)}S AGO`;
 
-    Object.keys(METRICS).forEach((metric) => renderMetric(payload, metric));
+    Object.keys(METRICS).forEach((metric) => renderPerNodeMetric(payload, metric));
+    renderTokens(payload);
     const bySlot = new Map(payload.hosts.map((host) => [host.slot, host]));
-    [1, 2, 3].forEach((slot) => renderHost(slot, bySlot.get(slot) || null));
+    NODE_SLOTS.forEach((slot) => renderHost(slot, bySlot.get(slot) || null));
 
     let message;
     if (state === "online") {
-      message = `${payload.history.length} ROLLING SAMPLES · ALL HOSTS REPORTING`;
+      message = `${payload.history.length} ROLLING SAMPLES · C1/C2/C3 TRACES LIVE · TOKEN RATE IS API-WIDE`;
     } else if (stale) {
       message = `LATEST SAMPLE IS ${Math.floor(age)}S OLD · CHECK COLLECTOR`;
     } else if (state === "degraded") {
-      message = `${availableHosts} OF ${totalHosts} HOSTS AVAILABLE · PARTIAL AVERAGES SHOWN`;
+      message = `${availableHosts} OF ${totalHosts} HOSTS AVAILABLE · MISSING NODE TRACES ARE SHOWN AS GAPS`;
     } else if (state === "offline") {
-      message = "NO CLUSTER HOSTS AVAILABLE · LAST VALUES MAY BE RETAINED";
+      message = "NO CLUSTER HOSTS AVAILABLE · RETAINED HISTORY IS NOT CURRENT DATA";
     } else {
-      message = "WAITING FOR A COMPLETE CLUSTER SAMPLE";
+      message = "WAITING FOR PER-NODE TELEMETRY";
     }
     byId("connection-message").textContent = message;
     document.title = state === "offline" ? "OFFLINE · Cerebrus Cluster Pulse" : "Cerebrus Cluster Pulse";
@@ -401,6 +440,96 @@
     byId("sample-age").textContent = elapsed === null ? "NO SAMPLE" : `${elapsed}S AGO`;
     byId("connection-message").textContent = `STATUS API UNAVAILABLE · ${String(error && error.message ? error.message : error).slice(0, 90)}`;
     document.title = "LINK LOST · Cerebrus Cluster Pulse";
+  }
+
+  function ambientSceneAt(elapsedMs) {
+    const elapsed = finiteNumber(elapsedMs);
+    if (elapsed === null) return 0;
+    return Math.floor(Math.max(0, elapsed) / AMBIENT_SCENE_MS) % AMBIENT_SCENES;
+  }
+
+  function burnInOffset(scene) {
+    return [
+      { x: -1, y: 0 },
+      { x: 1, y: -1 },
+      { x: 0, y: 1 },
+      { x: 1, y: 0 },
+    ][Math.abs(Math.trunc(scene)) % AMBIENT_SCENES];
+  }
+
+  function ambientPixel(scene, x, y, seconds, width, height) {
+    const nx = x / Math.max(1, width - 1);
+    const ny = y / Math.max(1, height - 1);
+    let wave;
+    let pulse;
+    let color;
+    switch (scene % AMBIENT_SCENES) {
+      case 1:
+        wave = Math.sin((x + y * 2) * 0.34 - seconds * 1.35);
+        pulse = Math.max(0, Math.sin(x * 0.11 - seconds * 2.1)) * (0.25 + 0.75 * ny);
+        color = [40 + 35 * pulse, 32 + 45 * (wave + 1), 82 + 95 * pulse];
+        break;
+      case 2:
+        wave = Math.sin(Math.hypot(nx - 0.5, ny - 0.5) * 42 - seconds * 2.2);
+        pulse = Math.max(0, Math.cos((nx * 3 - ny * 2 + seconds * 0.13) * Math.PI));
+        color = [18 + 48 * pulse, 58 + 74 * (wave + 1) / 2, 65 + 90 * pulse];
+        break;
+      case 3:
+        wave = Math.sin((x * 0.18) + Math.sin(y * 0.55 + seconds) * 2.1 + seconds * 0.7);
+        pulse = ((x * 17 + y * 31 + Math.floor(seconds * 3)) % 97) < 2 ? 1 : 0;
+        color = [32 + 105 * pulse, 52 + 52 * (wave + 1), 42 + 55 * (1 - ny)];
+        break;
+      default:
+        wave = Math.sin(x * 0.16 + seconds * 0.8) + Math.cos(y * 0.48 - seconds * 0.55);
+        pulse = (Math.sin((nx + ny) * 18 - seconds * 1.1) + 1) / 2;
+        color = [15 + 30 * pulse, 58 + 48 * (wave + 2) / 4, 72 + 82 * pulse];
+        break;
+    }
+    return color.map((channel) => Math.round(clamp(channel, 0, 255)));
+  }
+
+  function paintAmbient(canvas, nowMs) {
+    if (!canvas || typeof canvas.getContext !== "function") return null;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context || typeof context.createImageData !== "function") return null;
+    const width = canvas.width || 178;
+    const height = canvas.height || 35;
+    const scene = ambientSceneAt(nowMs);
+    const seconds = Math.max(0, finiteNumber(nowMs) || 0) / 1000;
+    const image = context.createImageData(width, height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const offset = (y * width + x) * 4;
+        const color = ambientPixel(scene, x, y, seconds, width, height);
+        image.data[offset] = color[0];
+        image.data[offset + 1] = color[1];
+        image.data[offset + 2] = color[2];
+        image.data[offset + 3] = 255;
+      }
+    }
+    context.putImageData(image, 0, 0);
+    const dashboard = byId("dashboard");
+    if (dashboard.dataset.ambientScene !== String(scene)) {
+      const offset = burnInOffset(scene);
+      dashboard.dataset.ambientScene = String(scene);
+      dashboard.style.setProperty("--burnin-x", `${offset.x}px`);
+      dashboard.style.setProperty("--burnin-y", `${offset.y}px`);
+    }
+    return scene;
+  }
+
+  function startAmbient() {
+    if (ambientTimer !== null) clearTimeout(ambientTimer);
+    const canvas = byId("ambient-canvas");
+    if (!canvas || typeof canvas.getContext !== "function") return;
+    const reducedMotion = typeof global.matchMedia === "function"
+      && global.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const frameDelay = reducedMotion ? AMBIENT_SCENE_MS : AMBIENT_FRAME_MS;
+    const tick = () => {
+      paintAmbient(canvas, Date.now());
+      ambientTimer = setTimeout(tick, frameDelay);
+    };
+    tick();
   }
 
   async function fetchStatus() {
@@ -433,18 +562,21 @@
 
   function start() {
     if (pollTimer !== null) clearTimeout(pollTimer);
+    startAmbient();
     poll();
   }
 
   global.C3DashboardUI = {
     POLL_MS,
     MAX_HISTORY_POINTS,
+    AMBIENT_SCENE_MS,
     finiteNumber,
     hostSlot,
     normalizeState,
     throughputViewState,
     normalizePayload,
-    metricSeries,
+    hostMetricSeries,
+    tokenSeries,
     niceCeiling,
     sparklinePaths,
     metricStats,
@@ -452,6 +584,10 @@
     formatCompact,
     sampleAgeSeconds,
     inferredClusterState,
+    ambientSceneAt,
+    burnInOffset,
+    ambientPixel,
+    paintAmbient,
     render,
     renderTransportError,
     start,

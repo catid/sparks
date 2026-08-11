@@ -289,9 +289,13 @@ traffic on both logical links of the direct production edge: C1 P1
 
 C3 can run an independent five-second collector and a rootless-X kiosk sized
 for the attached 1424x280 rack panel. It polls all three hosts, shows current
-and rolling cluster-average CPU/GPU/RAM utilization, and derives generation
-tok/s from consecutive C1 vLLM counter samples. A stale or unreachable API is
-shown explicitly; a lifetime token counter is never presented as a live rate.
+and rolling C1/C2/C3 CPU/GPU/RAM traces, and derives generation tok/s from
+consecutive C1 vLLM counter samples. Token throughput is explicitly labelled
+as a C1+C2 API aggregate because the endpoint has no trustworthy per-node
+attribution. A stale or unreachable host/API is shown explicitly; neither a
+cluster average nor a lifetime token counter is substituted for missing live
+data. A low-resolution code-native ambient canvas changes scene every 30
+seconds and shifts foreground content by one pixel to reduce static panel use.
 
 ```bash
 c3_dashboard/scripts/install.sh verify
@@ -321,6 +325,49 @@ An operator-approved reference can be selected with the root-readable
 `/etc/default/cerebrus3-audio8`; the audio and exact transcript stay outside
 Git. The service never starts a speaker loop. See
 [`audio8/README.md`](../audio8/README.md).
+
+### Cerebrus 3 voice assistant
+
+C3 can keep the CP900 microphone open for local speech, transcribe completed
+utterances with the pinned Qwen3-ASR 1.7B checkpoint, and accept a request only
+when `Cerberus` or `Cerebrus` occurs among the first two recognized words. The
+bridge sends accepted text to a loopback, token-authenticated OpenClaw agent;
+that agent uses the C1-C2 DS4F API with `xhigh` thinking mapped to the model's
+maximum reasoning effort. Final text is chunked and played through Audio8 and
+the CP900. Capture remains stopped during inference, synthesis, playback, and
+the cooldown so the speaker cannot recursively wake the microphone.
+
+Prepare and install the complete boot stack on C3 only:
+
+```bash
+voice_assistant/scripts/install-voice-stack.sh verify
+voice_assistant/scripts/install-voice-stack.sh prepare
+voice_assistant/scripts/install-voice-stack.sh start
+systemctl status cerebrus3-voice-stack.target
+systemctl status cerebrus3-{openclaw-voice,qwen3-asr,voice-bridge}.service
+```
+
+The installer pins Node and OpenClaw, verifies the ASR weight checksum, creates
+a root-owned mode-`0600` gateway token without printing it, and enables the
+umbrella target at `multi-user.target`. ASR and OpenClaw listen only on
+loopback. The bridge keeps microphone PCM and synthesized WAVs in RAM, omits
+transcript content from its journal, bypasses proxy environment variables,
+rejects redirects, and caps spoken output. The OpenClaw and bridge sandboxes
+mask the Docker socket and the service account's SSH and shell credential
+files. OpenClaw retains its normal conversation state so follow-up voice turns
+can share context.
+
+Basic non-secret checks are:
+
+```bash
+curl -fsS http://127.0.0.1:8020/health | jq .
+curl -fsS http://127.0.0.1:8010/health | jq .
+systemctl is-enabled cerebrus3-voice-stack.target cerebrus3-audio8.service
+journalctl -u cerebrus3-voice-bridge.service -n 50 --no-pager
+```
+
+See [`voice_assistant/README.md`](../voice_assistant/README.md) for the exact
+interfaces, wake behavior, private configuration boundary, and recovery tests.
 
 ## Reboot expectations
 

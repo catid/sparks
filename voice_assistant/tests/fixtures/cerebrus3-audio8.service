@@ -1,0 +1,7 @@
+[Unit]
+Description=Static Audio8 dependency fixture
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/true
+RemainAfterExit=yes

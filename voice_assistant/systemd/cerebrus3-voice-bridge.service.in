@@ -1,0 +1,56 @@
+[Unit]
+Description=Cerebrus 3 wake-word voice bridge
+Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
+Wants=cerebrus3-openclaw-voice.service cerebrus3-qwen3-asr.service cerebrus3-audio8.service
+After=cerebrus3-openclaw-voice.service cerebrus3-qwen3-asr.service cerebrus3-audio8.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+SupplementaryGroups=audio
+WorkingDirectory=@PROJECT_DIR@
+Environment=HOME=@HOME@
+Environment=PATH=/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=VOICE_WAKE_WORD=cerberus
+Environment=VOICE_ASR_URL=http://127.0.0.1:8020/transcribe
+Environment=VOICE_OPENCLAW_URL=http://127.0.0.1:18789/v1/chat/completions
+Environment=VOICE_OPENCLAW_MODEL=openclaw/voice
+Environment=VOICE_OPENCLAW_USER=cerebrus3-voice
+Environment=VOICE_TTS_URL=http://127.0.0.1:8010/v1/audio/speech
+Environment=VOICE_CAPTURE_DEVICE=plughw:CARD=CP900,DEV=0
+Environment=VOICE_PLAYBACK_DEVICE=plughw:CARD=CP900,DEV=0
+Environment=VOICE_STATE_DIR=%S/cerebrus3-voice-bridge
+EnvironmentFile=@SECRET_ENV@
+EnvironmentFile=-/etc/default/cerebrus3-voice-bridge
+ExecStart=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/voice_bridge.py
+Restart=always
+RestartSec=3s
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+StateDirectory=cerebrus3-voice-bridge
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -@HOME@/.ssh -@HOME@/.bashrc -@HOME@/.zshrc -@HOME@/.profile
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=cerebrus3-voice-stack.target

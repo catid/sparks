@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "repo_id": "Qwen/Qwen3-ASR-1.7B-hf",
+  "revision": "bcd2b5b7f32b480ab5790554cfa8347f246a14f3",
+  "local_directory": "Qwen3-ASR-1.7B-hf--bcd2b5b7",
+  "served_model_name": "qwen/qwen3-asr-1.7b",
+  "precision": "bfloat16",
+  "transformers_version": "5.13.0",
+  "weights": {
+    "path": "model.safetensors",
+    "size_bytes": 4076193080,
+    "sha256": "2db53c7d81bd9b8cbc6a074e89be2c968a0d373fb4ee68bb1b1e14f7042dfee1"
+  }
+}

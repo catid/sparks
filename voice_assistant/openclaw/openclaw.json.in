@@ -1,0 +1,219 @@
+{
+  "env": {
+    "shellEnv": {
+      "enabled": false,
+      "timeoutMs": 15000
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "port": 18789,
+    "auth": {
+      "mode": "token",
+      "token": {
+        "source": "env",
+        "provider": "default",
+        "id": "OPENCLAW_GATEWAY_TOKEN"
+      },
+      "allowTailscale": false,
+      "rateLimit": {
+        "maxAttempts": 10,
+        "windowMs": 60000,
+        "lockoutMs": 300000,
+        "exemptLoopback": false
+      }
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true,
+          "maxBodyBytes": 1048576,
+          "maxImageParts": 0,
+          "images": {
+            "allowUrl": false
+          }
+        },
+        "responses": {
+          "enabled": false
+        }
+      }
+    }
+  },
+  "commands": {
+    "native": false,
+    "nativeSkills": false,
+    "text": false,
+    "bash": false,
+    "config": false,
+    "mcp": false,
+    "plugins": false,
+    "debug": false,
+    "restart": false
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "@WORKSPACE@",
+      "skipBootstrap": true,
+      "model": {
+        "primary": "vllm/deepseek-v4-flash",
+        "fallbacks": []
+      },
+      "utilityModel": "vllm/deepseek-v4-flash",
+      "models": {
+        "vllm/deepseek-v4-flash": {
+          "alias": "ds4f",
+          "params": {
+            "temperature": 1,
+            "topP": 1
+          },
+          "agentRuntime": {
+            "id": "openclaw"
+          }
+        }
+      },
+      "thinkingDefault": "xhigh",
+      "reasoningDefault": "off",
+      "elevatedDefault": "off",
+      "timeoutSeconds": 3600,
+      "contextTokens": 393216,
+      "maxConcurrent": 1,
+      "contextPruning": {
+        "mode": "cache-ttl",
+        "ttl": "5m"
+      },
+      "compaction": {
+        "mode": "safeguard",
+        "timeoutSeconds": 1800,
+        "keepRecentTokens": 50000,
+        "recentTurnsPreserve": 3,
+        "identifierPolicy": "strict",
+        "qualityGuard": {
+          "enabled": true,
+          "maxRetries": 1
+        },
+        "midTurnPrecheck": {
+          "enabled": true
+        },
+        "postIndexSync": "async",
+        "truncateAfterCompaction": true,
+        "maxActiveTranscriptBytes": "20mb"
+      },
+      "experimental": {
+        "localModelLean": false
+      }
+    },
+    "list": [
+      {
+        "id": "voice",
+        "default": true,
+        "name": "Cerberus Voice",
+        "workspace": "@WORKSPACE@",
+        "model": {
+          "primary": "vllm/deepseek-v4-flash",
+          "fallbacks": []
+        },
+        "thinkingDefault": "xhigh",
+        "reasoningDefault": "off",
+        "skills": [],
+        "subagents": {
+          "allowAgents": [],
+          "requireAgentId": true
+        },
+        "tools": {
+          "profile": "minimal",
+          "deny": [
+            "group:runtime",
+            "group:fs",
+            "group:web",
+            "group:automation",
+            "group:messaging",
+            "group:nodes",
+            "group:media",
+            "gateway",
+            "cron",
+            "sessions_spawn",
+            "subagents"
+          ],
+          "elevated": {
+            "enabled": false
+          }
+        }
+      }
+    ]
+  },
+  "tools": {
+    "profile": "minimal",
+    "deny": [
+      "group:runtime",
+      "group:fs",
+      "group:web",
+      "group:automation",
+      "group:messaging",
+      "group:nodes",
+      "group:media",
+      "gateway",
+      "cron",
+      "sessions_spawn",
+      "subagents"
+    ],
+    "elevated": {
+      "enabled": false
+    },
+    "loopDetection": {
+      "enabled": true
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "vllm": {
+        "baseUrl": "http://cerebrus1:8889/v1",
+        "apiKey": "vllm-local",
+        "api": "openai-completions",
+        "timeoutSeconds": 3600,
+        "models": [
+          {
+            "id": "deepseek-v4-flash",
+            "name": "DeepSeek V4 Flash DSpark NVFP4 TP2",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 1048576,
+            "maxTokens": 65536,
+            "compat": {
+              "supportsTools": true,
+              "supportsUsageInStreaming": true,
+              "supportsReasoningEffort": true,
+              "supportsStrictMode": false,
+              "maxTokensField": "max_tokens",
+              "thinkingFormat": "deepseek",
+              "requiresReasoningContentOnAssistantMessages": true,
+              "supportedReasoningEfforts": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "reasoningEffortMap": {
+                "low": "high",
+                "medium": "high",
+                "high": "high",
+                "xhigh": "max",
+                "max": "max"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

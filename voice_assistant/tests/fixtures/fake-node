@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+if [[ "${1:-}" == "--version" ]]; then
+  printf '%s\n' 'v24.15.0'
+else
+  printf '%s' '2026.7.1-2'
+fi
