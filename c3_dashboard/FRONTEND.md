@@ -36,7 +36,9 @@ network polling remain independent of this ambient renderer.
 A second, independent TFT-maintenance layer sends an exact-black, 48-pixel
 horizontal band from the top through the bottom after five quiet minutes and
 then at most once every 30 minutes. The attached DeskPi DP-0101 is a 1424x280
-TFT LCD with a specified 50 ms response time, not an OLED. A 3.2-second linear
+TFT LCD with a specified 50 ms response time, not an OLED, according to the
+[DeskPi DP-0101 specification](https://deskpi.com/products/deskpi-6-91-inch-touch-screen-1424x280-tft-lcd-display-10-inch-1u-rackmount-monitor-for-deskpi-rackmate-t0-t1-t2-server-cabinets).
+A 3.2-second linear
 pass leaves every row black for about 0.47 seconds (over nine response-time
 constants) without pointlessly running a continuous animation. The ordinary
 dashboard remains visible outside the band. A recognized/armed voice command,
@@ -47,7 +49,10 @@ visibility-resume check handles suspended/throttled WebKit timers.
 DeskPi publishes no image-retention recovery duration or cadence. The 50 ms
 specification therefore bounds visible transition speed only; it is not proof
 that one pass clears image sticking. The 30-minute recurrence is an infrequent,
-low-disruption heuristic layered on top of the foreground nudge.
+low-disruption heuristic layered on top of the foreground nudge. General LCD
+manufacturer guidance supports avoiding long-lived static images and using a
+[screensaver or power-save mode](https://www.eizoglobal.com/support/db/files/manuals/FlexScan/FLT-6/en-US/1017769072315258123.html),
+but does not validate a universal sweep duration or interval.
 
 The browser loads `/`, `/style.css`, and `/app.js`. The frontend requests
 `GET /api/status` immediately and then every 5 seconds with `cache: no-store`.

@@ -164,7 +164,9 @@ grep -Fxq 'do not overwrite' "${victim}"
 [[ -f "${model_dir}/.pinned-revision" && ! -L "${model_dir}/.pinned-revision" ]]
 grep -Fxq "${revision}" "${model_dir}/.pinned-revision"
 
-test_wav="${test_root}/invalid.wav"
+test_wav_parent="${test_root}/existing-output"
+mkdir -m 0755 -- "${test_wav_parent}"
+test_wav="${test_wav_parent}/invalid.wav"
 set +e
 invalid_wav_output="$({
   PATH="${fake_bin}:/usr/bin:/bin" \
@@ -176,6 +178,7 @@ set -e
 [[ "${invalid_wav_status}" != 0 ]]
 grep -Fq 'not a valid WAV container' <<<"${invalid_wav_output}"
 [[ ! -e "${test_wav}" ]]
+[[ "$(stat -c '%a' -- "${test_wav_parent}")" == 755 ]]
 
 grep -Fxq 'COPY server.py ./server.py' "${repo_root}/audio8/Dockerfile"
 grep -Fq 'sdpa_backend="${AUDIO8_SDPA_BACKEND:-efficient}"' \

@@ -8,7 +8,14 @@ output_parent="$(dirname -- "${output}")"
   echo "Test output path cannot be a symlink." >&2
   exit 2
 }
-install -d -m 0700 -- "${output_parent}"
+if [[ -e "${output_parent}" ]]; then
+  [[ -d "${output_parent}" && -w "${output_parent}" && -x "${output_parent}" ]] || {
+    echo "Test output parent must be a writable directory." >&2
+    exit 2
+  }
+else
+  install -d -m 0700 -- "${output_parent}"
+fi
 temporary="$(mktemp "${output}.tmp.XXXXXX")"
 cleanup() { rm -f -- "${temporary}"; }
 trap cleanup EXIT
