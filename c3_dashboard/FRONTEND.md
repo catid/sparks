@@ -16,12 +16,19 @@ There is no scrolling, CDN, font download, build step, or JavaScript package
 dependency.
 
 A 178x35 canvas is stretched with nearest-neighbor rendering behind the cards.
-Four code-native, low-cost pixel scenes rotate every 30 seconds and render at
-eight frames per second. The foreground moves among four one-pixel offsets at
-the same boundary to reduce completely static panel pixels without disturbing
-the fixed layout. With `prefers-reduced-motion`, the canvas changes only once
-per 30-second scene and the foreground shift has no transition. Telemetry and
-network polling are independent of this ambient renderer.
+Six code-native pixel scenes rotate every 30 seconds: a three-node Cerberus
+constellation, packet tunnel, interference contours, packet rain, circuit
+traces, and aurora ribbons. They crossfade during the final four seconds and
+adopt calm voice-active, degraded, or critical palettes without flashing or
+covering telemetry. The renderer deliberately runs at only one chunky frame
+per second: a software-rendered WebKit kiosk must otherwise repaint all
+1424x280 output pixels for every tiny source-canvas change. Its `ImageData` is
+allocated once and reused, the expensive CSS canvas filter was removed, and
+painting pauses while the document is hidden. The foreground follows a
+nine-position one-pixel walk at scene boundaries for burn-in mitigation.
+With `prefers-reduced-motion`, each scene is a frozen snapshot, transitions are
+disabled, and updates align to the next 30-second boundary. Telemetry and
+network polling remain independent of this ambient renderer.
 
 The browser loads `/`, `/style.css`, and `/app.js`. The frontend requests
 `GET /api/status` immediately and then every 5 seconds with `cache: no-store`.
@@ -157,10 +164,17 @@ Contract details:
 - `throughput.tokens_per_second` is cluster-wide aggregate output throughput,
   not a per-host average. vLLM does not expose trustworthy rank attribution in
   this deployment, so the UI renders one explicitly labelled API trace.
-- `history` is ordered oldest to newest. The UI displays at most 60 points,
-  which is a five-minute window at the required five-second interval.
+- `history` is ordered oldest to newest. The backend returns and the UI accepts
+  at most 60 points, which is a five-minute window at the required five-second
+  interval.
 - A missing measurement is `null` or omitted, never a fabricated zero. Gaps
   remain gaps in graph lines and show as an em dash in current-value fields.
+- If the whole status API becomes unreachable, retained graph values are
+  explicitly dimmed and labelled stale, all three host pills stop claiming to
+  be online, and the token-rate state becomes `STALE`. An old, missing, or
+  invalid `generated_at` timestamp gets the same honest treatment. A fresh
+  successful poll clears these freshness markers. The independently polled
+  voice card is not changed by a cluster telemetry transport failure.
 - Preferred states are `online`, `degraded`, and `offline`. The UI also maps
   common equivalents such as `healthy`, `stale`, and `unreachable`.
 - Throughput states are `warming`, `active`, `idle`, `stale`, and `down`.
@@ -190,6 +204,7 @@ node --test c3_dashboard/tests/test_ui.mjs
 
 They cover contract normalization, host mapping, independent per-node rolling
 series, missing-value gaps, SVG path generation, throughput scope/state,
-ambient scene timing and pixel bounds, state fallbacks, current-value
-rendering, all voice pipeline/failure states, independent voice transport
-failure, and the self-contained static shell.
+ambient scene timing, transitions, palettes, and pixel bounds, state fallbacks,
+transport-stale recovery, current-value rendering, long-duration voice uptime,
+all voice pipeline/failure states, independent voice transport failure, and
+the self-contained static shell.

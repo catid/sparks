@@ -19,11 +19,23 @@ it never calls that reading RAM temperature. The response also states how many
 hosts contributed to each average, so a degraded average cannot be mistaken
 for a complete three-host sample.
 
+Every successful probe must report the canonical identity of the host that was
+requested. A stale DNS or SSH alias that reaches the wrong Spark is therefore
+shown as a failed host instead of duplicating another machine's readings.
+Each local shell or SSH probe runs in its own process group; its four-second
+deadline terminates that whole group, including a stuck local `nvidia-smi`
+child. Public errors are bounded operational categories rather than reflected
+SSH stderr, key paths, or remote output.
+
 Every history point includes a `hosts` map as well as the cluster summary. The
 rack UI consumes those host maps directly to draw independent C1/C2/C3 traces;
 cluster averages remain available to other API clients but are not used as a
 fallback for a missing node. A failed node therefore creates a visible gap
 instead of silently changing the denominator of an on-screen average.
+The collector and public snapshot retain at most 60 points: exactly five
+minutes at the required five-second cadence. The server also clamps older
+custom 720-point environments at runtime, avoiding an unused hour-long payload
+and a second slicing/allocation path at the API boundary.
 Host and cluster history entries carry `cpu_temperature_c`,
 `gpu_temperature_c`, `soc_temperature_c`, and the normally-null
 `ram_temperature_c`/`memory_temperature_c` fields alongside utilization.
@@ -37,6 +49,10 @@ it never exposes that lifetime total as the current rate. The API distinguishes
 `warming`, `active`, `idle` (an exact `0`), `stale`, and `down`. Failed scrapes
 never retain the prior live rate. This counter describes the C1-served TP2 API
 as a whole; the backend does not claim per-rank or per-node token attribution.
+Rate windows use the monotonic timestamp taken when each metrics response is
+actually received, rather than the earlier collection-cycle timestamp. A
+metric-family change or Prometheus process restart clears the rate baseline,
+even if the replacement counter has already risen beyond the old total.
 
 The local bridge writes an atomic, privacy-safe heartbeat to
 `/run/cerberus3-voice-bridge/status.json`. The backend reads that regular file
@@ -53,6 +69,9 @@ cluster collection. `GET /api/voice-status` reads the heartbeat at request time
 so the frontend's 750 ms voice poll can see short ASR and transition states
 without increasing SSH or vLLM scrape traffic. `/api/voice` is retained as an
 equivalent local alias. Both HTTP endpoints remain loopback-only.
+Successful high-frequency API polls are intentionally omitted from the access
+log; HTTP failures and ordinary static-file requests remain logged. This avoids
+turning the 750 ms voice heartbeat poll into persistent journal churn.
 
 Run tests without installing packages:
 

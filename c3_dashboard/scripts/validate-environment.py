@@ -113,7 +113,9 @@ def validate(values: dict[str, str]) -> None:
         raise AssertionError from exc
     if interval != 5:
         fail("C3_DASHBOARD_INTERVAL must be 5 seconds")
-    integer(values, "C3_DASHBOARD_HISTORY_POINTS", 2, 17_280)
+    history_points = integer(values, "C3_DASHBOARD_HISTORY_POINTS", 2, 60)
+    if history_points != 60:
+        fail("C3_DASHBOARD_HISTORY_POINTS must be 60 (five minutes)")
 
     nodes = tuple(node.strip() for node in values["C3_DASHBOARD_NODES"].split(","))
     if nodes != EXPECTED_NODES:
@@ -170,9 +172,11 @@ def validate(values: dict[str, str]) -> None:
         kiosk.scheme != "http"
         or kiosk.hostname not in LOOPBACK_HOSTS
         or kiosk_port != port
+        or kiosk.path not in ("", "/")
         or kiosk.query
+        or kiosk.fragment
     ):
-        fail("C3_KIOSK_URL must use loopback HTTP on C3_DASHBOARD_PORT")
+        fail("C3_KIOSK_URL must be the loopback dashboard root on C3_DASHBOARD_PORT")
     if values["C3_KIOSK_MODE"] != "1424x280":
         fail("C3_KIOSK_MODE must preserve the panel's native 1424x280 mode")
     output = values["C3_KIOSK_OUTPUT"]

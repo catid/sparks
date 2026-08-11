@@ -8,8 +8,13 @@
   const MAX_HISTORY_POINTS = 60;
   const NODE_SLOTS = [1, 2, 3];
   const AMBIENT_SCENE_MS = 30000;
-  const AMBIENT_FRAME_MS = 125;
-  const AMBIENT_SCENES = 4;
+  // One intentionally chunky frame per second is enough for a pixel-art panel.
+  // WebKit otherwise repaints the entire software-scaled 1424x280 canvas.
+  const AMBIENT_FRAME_MS = 1000;
+  const AMBIENT_TRANSITION_MS = 4000;
+  const AMBIENT_SCENES = 6;
+  const AMBIENT_NODE_CENTERS = [0.18, 0.5, 0.82];
+  const AMBIENT_NODE_PALETTES = [[40, 132, 170], [146, 48, 112], [77, 150, 44]];
   const METRICS = {
     cpu: { field: "cpu_percent", label: "CPU utilization", temperatureField: "cpu_temperature_c", temperatureId: "cpu-temp", temperatureLabel: "CPU temperature" },
     gpu: { field: "gpu_percent", label: "GPU utilization", temperatureField: "gpu_temperature_c", temperatureId: "gpu-temp", temperatureLabel: "GPU temperature" },
@@ -20,8 +25,10 @@
   let voicePollTimer = null;
   let ambientTimer = null;
   let lastPayload = null;
-  let lastSuccessMs = null;
   let voiceLastSuccessMs = null;
+  let ambientSurface = null;
+  let ambientMotionQuery = null;
+  let ambientLifecycleBound = false;
 
   const byId = (id) => document.getElementById(id);
 
@@ -385,6 +392,16 @@
     const clamped = Math.max(0, seconds);
     if (clamped < 10) return `${clamped.toFixed(1)}S`;
     if (clamped < 60) return `${Math.round(clamped)}S`;
+    if (clamped >= 86400) {
+      const days = Math.floor(clamped / 86400);
+      const hours = Math.floor((clamped % 86400) / 3600);
+      return `${days}D${String(hours).padStart(2, "0")}H`;
+    }
+    if (clamped >= 3600) {
+      const hours = Math.floor(clamped / 3600);
+      const minutes = Math.floor((clamped % 3600) / 60);
+      return `${hours}H${String(minutes).padStart(2, "0")}M`;
+    }
     const minutes = Math.floor(clamped / 60);
     const remainder = Math.floor(clamped % 60);
     return `${minutes}M${String(remainder).padStart(2, "0")}S`;
@@ -556,7 +573,9 @@
       state,
       stateLabel: stateLabels[state] || "UNKNOWN",
       stageLabel: stageLabels[voice.stage] || voice.stage.toUpperCase(),
-      elapsedLabel: formatVoiceDuration(elapsed),
+      // Listening is the steady state, not an in-flight operation. Its tenure
+      // can be weeks on an always-on kiosk and obscures useful diagnostics.
+      elapsedLabel: voice.stage === "listening" ? "—" : formatVoiceDuration(elapsed),
       detail,
       error,
       heartbeatLabel: heartbeatAge === null ? "NO HEARTBEAT" : `HEARTBEAT ${formatVoiceDuration(heartbeatAge)}`,
@@ -574,22 +593,29 @@
   function renderVoice(raw, nowMs) {
     const model = voiceViewModel(raw, nowMs);
     const card = byId("voice-card");
-    card.dataset.state = model.state;
-    byId("voice-state").dataset.state = model.state;
-    byId("voice-state").textContent = model.stateLabel;
-    byId("voice-stage").textContent = model.stageLabel;
-    byId("voice-elapsed").textContent = model.elapsedLabel;
-    byId("voice-detail").textContent = model.detail;
-    byId("voice-heartbeat").textContent = model.heartbeatLabel;
-    byId("voice-last-event").textContent = model.lastEventLabel;
+    const setText = (element, value) => {
+      if (element.textContent !== value) element.textContent = value;
+    };
+    const setState = (element, value) => {
+      if (element.dataset.state !== value) element.dataset.state = value;
+    };
+    setState(card, model.state);
+    setState(byId("voice-state"), model.state);
+    setText(byId("voice-state"), model.stateLabel);
+    setText(byId("voice-stage"), model.stageLabel);
+    setText(byId("voice-elapsed"), model.elapsedLabel);
+    setText(byId("voice-detail"), model.detail);
+    setText(byId("voice-heartbeat"), model.heartbeatLabel);
+    setText(byId("voice-last-event"), model.lastEventLabel);
     const error = byId("voice-error");
-    error.hidden = !model.error;
-    error.textContent = model.error || "";
+    if (error.hidden !== !model.error) error.hidden = !model.error;
+    setText(error, model.error || "");
     for (const [name, step] of Object.entries(model.steps)) {
-      byId(`voice-${name}-step`).dataset.state = step.state;
-      byId(`voice-${name}-state`).textContent = step.label;
+      setState(byId(`voice-${name}-step`), step.state);
+      setText(byId(`voice-${name}-state`), step.label);
     }
-    card.title = model.error || `${model.stageLabel}; ${model.detail}`;
+    const title = model.error || `${model.stageLabel}; ${model.detail}`;
+    if (card.title !== title) card.title = title;
     voiceLastSuccessMs = finiteNumber(nowMs) ?? Date.now();
     return model;
   }
@@ -678,6 +704,7 @@
     const available = NODE_SLOTS.map((slot) => renderNodeMetric(payload, metric, slot))
       .filter(Boolean).length;
     const card = document.querySelector(`[data-metric="${metric}"]`);
+    delete card.dataset.freshnessState;
     card.dataset.state = available ? "ready" : "unavailable";
     card.dataset.availableNodes = String(available);
   }
@@ -690,6 +717,7 @@
     const graphMax = niceCeiling(Math.max(10, stats.max === null ? 10 : stats.max * 1.08));
     const paths = sparklinePaths(values, { width: 300, height: 78, padding: 4, min: 0, max: graphMax });
     const state = throughputViewState(payload.throughput.state, value);
+    delete card.dataset.freshnessState;
 
     byId("tokens-value").textContent = formatCurrent(value, "tokens");
     byId("tokens-range").textContent = stats.min === null
@@ -751,6 +779,38 @@
     return states.length ? "offline" : "unknown";
   }
 
+  function markClusterDataStale(ageSeconds, title) {
+    const age = finiteNumber(ageSeconds);
+    for (const metric of Object.keys(METRICS)) {
+      const card = document.querySelector(`[data-metric="${metric}"]`);
+      if (card) {
+        card.dataset.freshnessState = "stale";
+        card.title = title;
+      }
+      for (const slot of NODE_SLOTS) {
+        const row = byId(`${metric}-c${slot}-row`);
+        if (row) row.dataset.state = "stale";
+      }
+    }
+    const tokensCard = document.querySelector('[data-metric="tokens"]');
+    if (tokensCard) {
+      tokensCard.dataset.freshnessState = "stale";
+      tokensCard.dataset.throughputState = "stale";
+      tokensCard.title = title;
+    }
+    const tokenState = byId("tokens-state");
+    if (tokenState) {
+      tokenState.dataset.state = "stale";
+      tokenState.textContent = "STALE";
+    }
+    for (const slot of NODE_SLOTS) {
+      const summary = byId(`host-c${slot}`);
+      const state = byId(`c${slot}-state`);
+      if (summary) summary.dataset.state = "stale";
+      if (state) state.textContent = age === null ? "STALE" : `STALE · ${Math.max(0, Math.floor(age))}S`;
+    }
+  }
+
   function render(raw, nowMs) {
     const payload = normalizePayload(raw);
     const now = finiteNumber(nowMs) ?? Date.now();
@@ -758,8 +818,8 @@
     const age = sampleAgeSeconds(payload, now);
     const staleAfter = Math.max(15, payload.interval_seconds * 3);
     let state = inferredClusterState(payload);
-    const stale = age !== null && age > staleAfter;
-    if (stale && state !== "offline") state = "degraded";
+    const stale = age === null || age > staleAfter;
+    if (stale) state = "degraded";
 
     const totalHosts = finiteNumber(payload.cluster.total_hosts) || 3;
     const derivedAvailable = payload.hosts.filter((host) => normalizeState(host.state) === "online").length;
@@ -774,7 +834,9 @@
     dashboard.dataset.connection = state;
     byId("cluster-indicator").className = "status-dot";
     byId("cluster-state").textContent = labels[state];
-    byId("host-count").textContent = `${availableHosts} / ${totalHosts} NODES`;
+    byId("host-count").textContent = stale
+      ? `LAST ${availableHosts} / ${totalHosts} NODES`
+      : `${availableHosts} / ${totalHosts} NODES`;
     byId("sample-time").textContent = formatSampleTime(payload.generated_at);
     byId("sample-age").textContent = age === null ? "NO SAMPLE" : age < 2 ? "LIVE" : `${Math.floor(age)}S AGO`;
 
@@ -782,12 +844,20 @@
     renderTokens(payload);
     const bySlot = new Map(payload.hosts.map((host) => [host.slot, host]));
     NODE_SLOTS.forEach((slot) => renderHost(slot, bySlot.get(slot) || null));
+    if (stale) {
+      const staleTitle = age === null
+        ? "Retained values; cluster sample time is missing or invalid."
+        : `Retained values; latest cluster sample is ${Math.floor(age)} seconds old.`;
+      markClusterDataStale(age, staleTitle);
+    }
 
     let message;
     if (state === "online") {
       message = `${payload.history.length} ROLLING SAMPLES · C1/C2/C3 TRACES LIVE · TOKEN RATE IS API-WIDE`;
     } else if (stale) {
-      message = `LATEST SAMPLE IS ${Math.floor(age)}S OLD · CHECK COLLECTOR`;
+      message = age === null
+        ? "LATEST SAMPLE TIME IS MISSING OR INVALID · CHECK COLLECTOR"
+        : `LATEST SAMPLE IS ${Math.floor(age)}S OLD · CHECK COLLECTOR`;
     } else if (state === "degraded") {
       message = `${availableHosts} OF ${totalHosts} HOSTS AVAILABLE · MISSING NODE TRACES ARE SHOWN AS GAPS`;
     } else if (state === "offline") {
@@ -798,7 +868,6 @@
     byId("connection-message").textContent = message;
     document.title = state === "offline" ? "OFFLINE · Cerberus Cluster Pulse" : "Cerberus Cluster Pulse";
     lastPayload = payload;
-    lastSuccessMs = now;
     return payload;
   }
 
@@ -807,9 +876,19 @@
     dashboard.dataset.connection = "error";
     byId("cluster-indicator").className = "status-dot";
     byId("cluster-state").textContent = "DATA LINK LOST";
-    const elapsed = lastSuccessMs === null ? null : Math.max(0, Math.floor((Date.now() - lastSuccessMs) / 1000));
+    const retainedAge = lastPayload ? sampleAgeSeconds(lastPayload, Date.now()) : null;
+    const elapsed = retainedAge === null ? null : Math.floor(retainedAge);
+    const retainedTotal = lastPayload ? (finiteNumber(lastPayload.cluster.total_hosts) || 3) : 3;
+    const retainedAvailable = lastPayload
+      ? (finiteNumber(lastPayload.cluster.available_hosts)
+        ?? lastPayload.hosts.filter((host) => normalizeState(host.state) === "online").length)
+      : null;
+    byId("host-count").textContent = retainedAvailable === null
+      ? `? / ${retainedTotal} NODES`
+      : `LAST ${retainedAvailable} / ${retainedTotal} NODES`;
     byId("sample-age").textContent = elapsed === null ? "NO SAMPLE" : `${elapsed}S AGO`;
     byId("connection-message").textContent = `STATUS API UNAVAILABLE · ${String(error && error.message ? error.message : error).slice(0, 90)}`;
+    markClusterDataStale(elapsed, "Retained values; cluster telemetry transport is unavailable.");
     document.title = "LINK LOST · Cerberus Cluster Pulse";
   }
 
@@ -819,86 +898,255 @@
     return Math.floor(Math.max(0, elapsed) / AMBIENT_SCENE_MS) % AMBIENT_SCENES;
   }
 
-  function burnInOffset(scene) {
-    return [
-      { x: -1, y: 0 },
-      { x: 1, y: -1 },
-      { x: 0, y: 1 },
-      { x: 1, y: 0 },
-    ][Math.abs(Math.trunc(scene)) % AMBIENT_SCENES];
+  function ambientFrameAt(elapsedMs, reducedMotion) {
+    const elapsed = Math.max(0, finiteNumber(elapsedMs) || 0);
+    const phase = Math.floor(elapsed / AMBIENT_SCENE_MS);
+    const within = elapsed % AMBIENT_SCENE_MS;
+    const transitionStart = AMBIENT_SCENE_MS - AMBIENT_TRANSITION_MS;
+    const transitionProgress = reducedMotion || within <= transitionStart
+      ? 0
+      : clamp((within - transitionStart) / AMBIENT_TRANSITION_MS, 0, 1);
+    const mix = transitionProgress * transitionProgress * (3 - 2 * transitionProgress);
+    return {
+      phase,
+      scene: phase % AMBIENT_SCENES,
+      nextScene: (phase + 1) % AMBIENT_SCENES,
+      mix,
+    };
   }
 
-  function ambientPixel(scene, x, y, seconds, width, height) {
+  function burnInOffset(phase) {
+    return [
+      { x: 0, y: 0 }, { x: -1, y: 0 }, { x: 1, y: 0 },
+      { x: 0, y: -1 }, { x: 0, y: 1 }, { x: -1, y: -1 },
+      { x: 1, y: 1 }, { x: -1, y: 1 }, { x: 1, y: -1 },
+    ][Math.abs(Math.trunc(phase)) % 9];
+  }
+
+  function ambientDisplayMode(connection, voiceState) {
+    const cluster = String(connection || "").toLowerCase();
+    const voice = String(voiceState || "").toLowerCase();
+    if (["offline", "error"].includes(cluster)) return "critical";
+    if (["degraded", "connecting"].includes(cluster)
+      || ["down", "error", "stale", "starting"].includes(voice)) return "degraded";
+    if (["busy", "armed"].includes(voice)) return "voice";
+    return "normal";
+  }
+
+  function ambientHash(x, y, seed) {
+    let value = Math.imul(x + seed * 17, 374761393)
+      ^ Math.imul(y + seed * 31, 668265263);
+    value = Math.imul(value ^ (value >>> 13), 1274126177);
+    return ((value ^ (value >>> 16)) >>> 0) / 4294967295;
+  }
+
+  function ambientPixel(scene, x, y, seconds, width, height, mode, target) {
+    const color = target || [0, 0, 0];
     const nx = x / Math.max(1, width - 1);
     const ny = y / Math.max(1, height - 1);
-    let wave;
-    let pulse;
-    let color;
+    let wave = 0;
+    let pulse = 0;
+    let red = 0;
+    let green = 0;
+    let blue = 0;
     switch (scene % AMBIENT_SCENES) {
       case 1:
-        wave = Math.sin((x + y * 2) * 0.34 - seconds * 1.35);
-        pulse = Math.max(0, Math.sin(x * 0.11 - seconds * 2.1)) * (0.25 + 0.75 * ny);
-        color = [40 + 35 * pulse, 32 + 45 * (wave + 1), 82 + 95 * pulse];
+        // A slow packet tunnel with a vanishing point behind the card row.
+        wave = Math.abs(((nx * 12 - seconds * 0.32) % 1 + 1) % 1 - 0.5);
+        pulse = Math.max(0, 1 - wave * 11);
+        {
+          const horizon = Math.abs(ny - 0.5);
+          const rails = Math.max(0, 1 - Math.abs((horizon * 9 + seconds * 0.16) % 1 - 0.5) * 8);
+          const spokes = Math.max(0, 1 - Math.abs(Math.sin((nx - 0.5) * 21 + ny * 2)) * 8);
+          red = 10 + 48 * pulse + 20 * rails;
+          green = 25 + 84 * rails + 40 * spokes;
+          blue = 38 + 106 * pulse + 42 * rails;
+        }
         break;
       case 2:
-        wave = Math.sin(Math.hypot(nx - 0.5, ny - 0.5) * 42 - seconds * 2.2);
-        pulse = Math.max(0, Math.cos((nx * 3 - ny * 2 + seconds * 0.13) * Math.PI));
-        color = [18 + 48 * pulse, 58 + 74 * (wave + 1) / 2, 65 + 90 * pulse];
+        // Three interference sources form animated topographic contours.
+        wave = Math.sin(Math.hypot(nx - 0.18, ny - 0.44) * 42 - seconds * 0.65)
+          + Math.sin(Math.hypot(nx - 0.51, ny - 0.62) * 36 + seconds * 0.48)
+          + Math.sin(Math.hypot(nx - 0.82, ny - 0.38) * 40 - seconds * 0.55);
+        pulse = Math.max(0, 1 - Math.abs(Math.sin(wave * 2.2)) * 6);
+        red = 20 + 105 * pulse + 14 * (wave + 3) / 6;
+        green = 22 + 62 * pulse + 34 * (wave + 3) / 6;
+        blue = 48 + 102 * pulse;
         break;
       case 3:
-        wave = Math.sin((x * 0.18) + Math.sin(y * 0.55 + seconds) * 2.1 + seconds * 0.7);
-        pulse = ((x * 17 + y * 31 + Math.floor(seconds * 3)) % 97) < 2 ? 1 : 0;
-        color = [32 + 105 * pulse, 52 + 52 * (wave + 1), 42 + 55 * (1 - ny)];
+        // Deterministic packet rain; no random state or per-frame allocation.
+        {
+          const column = Math.floor(x / 2);
+          const speed = 0.8 + ambientHash(column, 0, 3) * 1.7;
+          const head = ((seconds * speed + ambientHash(column, 4, 7) * height) % (height + 9)) - 5;
+          const trail = y - head;
+          pulse = trail >= 0 && trail < 7 ? (1 - trail / 7) : 0;
+          const node = column % 3;
+          red = 8 + pulse * (node === 1 ? 150 : 42);
+          green = 18 + pulse * (node === 2 ? 150 : 74);
+          blue = 24 + pulse * (node === 0 ? 170 : 88);
+        }
+        break;
+      case 4:
+        // Circuit-board cells with packets turning at deterministic junctions.
+        {
+          const gridX = x % 11;
+          const gridY = y % 7;
+          const wire = gridX === 0 || gridY === 0 ? 1 : 0;
+          const packetX = Math.floor(seconds * 2.2 + y * 0.37) % 11;
+          const packetY = Math.floor(seconds * 1.4 + x * 0.23) % 7;
+          pulse = (gridY === 0 && gridX === packetX) || (gridX === 0 && gridY === packetY) ? 1 : 0;
+          const junction = gridX < 2 && gridY < 2 ? 1 : 0;
+          red = 9 + 24 * wire + 95 * pulse;
+          green = 20 + 68 * wire + 122 * pulse + 25 * junction;
+          blue = 28 + 58 * wire + 95 * pulse;
+        }
+        break;
+      case 5:
+        // Wide aurora ribbons move slowly enough to remain calm overnight.
+        wave = Math.sin(nx * 13 + seconds * 0.22)
+          + 0.55 * Math.sin(nx * 27 - seconds * 0.16);
+        pulse = Math.max(0, 1 - Math.abs(ny - (0.5 + wave * 0.15)) * 8);
+        {
+          const upper = Math.max(0, 1 - Math.abs(ny - (0.25 - wave * 0.06)) * 12);
+          red = 13 + 52 * pulse + 76 * upper;
+          green = 26 + 124 * pulse + 34 * upper;
+          blue = 42 + 82 * pulse + 106 * upper;
+        }
         break;
       default:
-        wave = Math.sin(x * 0.16 + seconds * 0.8) + Math.cos(y * 0.48 - seconds * 0.55);
-        pulse = (Math.sin((nx + ny) * 18 - seconds * 1.1) + 1) / 2;
-        color = [15 + 30 * pulse, 58 + 48 * (wave + 2) / 4, 72 + 82 * pulse];
+        // Cerberus triad: three colored nodes share one breathing data link.
+        {
+          red = 7; green = 16; blue = 24;
+          const linkY = 0.5 + Math.sin(nx * 14 - seconds * 0.28) * 0.045;
+          const link = Math.max(0, 1 - Math.abs(ny - linkY) * 70);
+          red += 18 * link; green += 62 * link; blue += 78 * link;
+          for (let index = 0; index < AMBIENT_NODE_CENTERS.length; index += 1) {
+            const center = AMBIENT_NODE_CENTERS[index];
+            const cy = 0.5 + Math.sin(seconds * 0.22 + index * 2.1) * 0.08;
+            const distance = Math.hypot(nx - center, ny - cy);
+            const glow = 1 / (1 + distance * distance * 310);
+            const ring = Math.max(0, 1 - Math.abs(distance * 32 - (2.2 + Math.sin(seconds * 0.35 + index))) * 1.8);
+            const palette = AMBIENT_NODE_PALETTES[index];
+            red += palette[0] * glow + palette[0] * ring * 0.3;
+            green += palette[1] * glow + palette[1] * ring * 0.3;
+            blue += palette[2] * glow + palette[2] * ring * 0.3;
+          }
+        }
         break;
     }
-    return color.map((channel) => Math.round(clamp(channel, 0, 255)));
+
+    const displayMode = mode || "normal";
+    if (displayMode === "critical") {
+      const luminance = red * 0.21 + green * 0.72 + blue * 0.07;
+      const bar = Math.max(0, 1 - Math.abs(((nx + ny * 0.5 - seconds * 0.025) * 8) % 1 - 0.5) * 9);
+      red = 22 + luminance * 0.72 + bar * 70;
+      green = 5 + luminance * 0.1;
+      blue = 16 + luminance * 0.22 + bar * 16;
+    } else if (displayMode === "degraded") {
+      const luminance = red * 0.21 + green * 0.72 + blue * 0.07;
+      red = 18 + luminance * 0.68;
+      green = 15 + luminance * 0.48;
+      blue = 22 + luminance * 0.3;
+    } else if (displayMode === "voice") {
+      const sweepPosition = ((seconds * 0.055) % 1 + 1) % 1;
+      const sweep = Math.max(0, 1 - Math.abs(nx - sweepPosition) * 13);
+      red += sweep * 18;
+      green += sweep * 70;
+      blue += sweep * 48;
+    }
+    color[0] = Math.round(clamp(red, 0, 255));
+    color[1] = Math.round(clamp(green, 0, 255));
+    color[2] = Math.round(clamp(blue, 0, 255));
+    return color;
   }
 
-  function paintAmbient(canvas, nowMs) {
+  function paintAmbient(canvas, nowMs, options) {
     if (!canvas || typeof canvas.getContext !== "function") return null;
-    const context = canvas.getContext("2d", { alpha: false });
-    if (!context || typeof context.createImageData !== "function") return null;
     const width = canvas.width || 178;
     const height = canvas.height || 35;
-    const scene = ambientSceneAt(nowMs);
-    const seconds = Math.max(0, finiteNumber(nowMs) || 0) / 1000;
-    const image = context.createImageData(width, height);
+    if (!ambientSurface || ambientSurface.canvas !== canvas
+      || ambientSurface.width !== width || ambientSurface.height !== height) {
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context || typeof context.createImageData !== "function") return null;
+      ambientSurface = {
+        canvas,
+        context,
+        image: context.createImageData(width, height),
+        width,
+        height,
+      };
+    }
+    const settings = options || {};
+    const reducedMotion = settings.reducedMotion === true;
+    const frame = ambientFrameAt(nowMs, reducedMotion);
+    const dashboard = byId("dashboard");
+    const voiceCard = byId("voice-card");
+    const mode = settings.mode || ambientDisplayMode(
+      dashboard && dashboard.dataset.connection,
+      voiceCard && voiceCard.dataset.state,
+    );
+    // Reduced-motion snapshots are frozen within each scene.
+    const seconds = reducedMotion
+      ? (frame.phase * AMBIENT_SCENE_MS + AMBIENT_SCENE_MS * 0.42) / 1000
+      : Math.max(0, finiteNumber(nowMs) || 0) / 1000;
+    const image = ambientSurface.image;
+    const primary = [0, 0, 0];
+    const secondary = [0, 0, 0];
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const offset = (y * width + x) * 4;
-        const color = ambientPixel(scene, x, y, seconds, width, height);
-        image.data[offset] = color[0];
-        image.data[offset + 1] = color[1];
-        image.data[offset + 2] = color[2];
+        ambientPixel(frame.scene, x, y, seconds, width, height, mode, primary);
+        if (frame.mix > 0) {
+          ambientPixel(frame.nextScene, x, y, seconds, width, height, mode, secondary);
+        }
+        image.data[offset] = primary[0] + (secondary[0] - primary[0]) * frame.mix;
+        image.data[offset + 1] = primary[1] + (secondary[1] - primary[1]) * frame.mix;
+        image.data[offset + 2] = primary[2] + (secondary[2] - primary[2]) * frame.mix;
         image.data[offset + 3] = 255;
       }
     }
-    context.putImageData(image, 0, 0);
-    const dashboard = byId("dashboard");
-    if (dashboard.dataset.ambientScene !== String(scene)) {
-      const offset = burnInOffset(scene);
-      dashboard.dataset.ambientScene = String(scene);
-      dashboard.style.setProperty("--burnin-x", `${offset.x}px`);
-      dashboard.style.setProperty("--burnin-y", `${offset.y}px`);
+    ambientSurface.context.putImageData(image, 0, 0);
+    if (dashboard) {
+      dashboard.dataset.ambientMode = mode;
+      if (dashboard.dataset.ambientPhase !== String(frame.phase)) {
+        const offset = burnInOffset(frame.phase);
+        dashboard.dataset.ambientPhase = String(frame.phase);
+        dashboard.dataset.ambientScene = String(frame.scene);
+        dashboard.style.setProperty("--burnin-x", `${offset.x}px`);
+        dashboard.style.setProperty("--burnin-y", `${offset.y}px`);
+      }
     }
-    return scene;
+    return frame.scene;
   }
 
   function startAmbient() {
     if (ambientTimer !== null) clearTimeout(ambientTimer);
     const canvas = byId("ambient-canvas");
     if (!canvas || typeof canvas.getContext !== "function") return;
-    const reducedMotion = typeof global.matchMedia === "function"
-      && global.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const frameDelay = reducedMotion ? AMBIENT_SCENE_MS : AMBIENT_FRAME_MS;
+    if (!ambientMotionQuery && typeof global.matchMedia === "function") {
+      ambientMotionQuery = global.matchMedia("(prefers-reduced-motion: reduce)");
+    }
+    if (!ambientLifecycleBound) {
+      ambientLifecycleBound = true;
+      if (ambientMotionQuery && typeof ambientMotionQuery.addEventListener === "function") {
+        ambientMotionQuery.addEventListener("change", startAmbient);
+      }
+      if (typeof document.addEventListener === "function") {
+        document.addEventListener("visibilitychange", startAmbient);
+      }
+    }
+    if (document.hidden) return;
+    const reducedMotion = Boolean(ambientMotionQuery && ambientMotionQuery.matches);
     const tick = () => {
-      paintAmbient(canvas, Date.now());
-      ambientTimer = setTimeout(tick, frameDelay);
+      if (document.hidden) return;
+      const now = Date.now();
+      paintAmbient(canvas, now, { reducedMotion });
+      const cadence = reducedMotion ? AMBIENT_SCENE_MS : AMBIENT_FRAME_MS;
+      // Align updates to wall-clock boundaries so reduced motion does not
+      // drift into the middle of the following 30-second scene.
+      const delay = Math.max(50, cadence - (now % cadence) + 16);
+      ambientTimer = setTimeout(tick, delay);
     };
     tick();
   }
@@ -964,6 +1212,7 @@
     VOICE_POLL_MS,
     MAX_HISTORY_POINTS,
     AMBIENT_SCENE_MS,
+    AMBIENT_FRAME_MS,
     finiteNumber,
     hostSlot,
     normalizeState,
@@ -986,7 +1235,9 @@
     renderVoiceTransportError,
     inferredClusterState,
     ambientSceneAt,
+    ambientFrameAt,
     burnInOffset,
+    ambientDisplayMode,
     ambientPixel,
     paintAmbient,
     render,

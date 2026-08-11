@@ -18,6 +18,7 @@ done
 
 export C3_TEST_COMMAND_LOG="${command_log}"
 export C3_KIOSK_RUNTIME_HOME="${runtime_home}"
+export XDG_SESSION_ID=66
 export PATH="${fake_bin}:/usr/bin:/bin"
 sed "s|@HOME@|${HOME}|g" \
   "${dashboard_dir}/dashboard.env.example" >"${test_root}/good.env"
@@ -30,6 +31,8 @@ grep -Eq '^startx .*kiosk-session.sh -- .*/Xorg :0 vt7 -keeptty -nolisten tcp -n
   "${command_log}"
 grep -Fq "STARTX_ENV HOME=${runtime_home} XDG_RUNTIME_DIR=${runtime_home}" \
   "${command_log}"
+[[ "$(cat "${runtime_home}/session-id")" == "66" ]]
+[[ "$(stat -c %a "${runtime_home}/session-id")" == "600" ]]
 
 ln -sfn "${dashboard_dir}/tests/fixtures/fake-startx-noauth" \
   "${fake_bin}/startx"
@@ -146,8 +149,16 @@ preflight_line="$(
 
 kiosk_unit="${dashboard_dir}/systemd/dgx-spark-c3-kiosk.service.in"
 grep -Fq 'ExecStartPre=+/usr/bin/chvt 7' "${kiosk_unit}"
+grep -Fq 'ConditionPathExistsGlob=/dev/dri/card[0-9]*' "${kiosk_unit}"
+grep -Fq 'ExecStop=+@CLEANUP_HELPER@' \
+  "${kiosk_unit}"
+grep -Fq 'ExecStopPost=+@CLEANUP_HELPER@' \
+  "${kiosk_unit}"
+grep -Fq -- '--uid @UID@ --tty tty7' "${kiosk_unit}"
+grep -Fq -- '--main-pid $MAINPID' "${kiosk_unit}"
 grep -Fq 'Environment=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1' \
   "${kiosk_unit}"
+grep -Fq 'SuccessExitStatus=1' "${kiosk_unit}"
 grep -Fq 'export GSK_RENDERER=cairo' \
   "${dashboard_dir}/scripts/launch-kiosk.sh"
 

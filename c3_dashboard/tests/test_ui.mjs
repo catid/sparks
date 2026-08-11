@@ -226,21 +226,71 @@ test("zero is valid telemetry and token chart ceilings are stable", () => {
   );
 });
 
-test("ambient renderer changes scene every 30 seconds and stays bounded", () => {
+test("ambient renderer rotates six scenes, crossfades, and stays bounded", () => {
   assert.equal(ui.AMBIENT_SCENE_MS, 30000);
+  assert.equal(ui.AMBIENT_FRAME_MS, 1000);
   assert.equal(ui.ambientSceneAt(0), 0);
   assert.equal(ui.ambientSceneAt(29999), 0);
   assert.equal(ui.ambientSceneAt(30000), 1);
-  assert.equal(ui.ambientSceneAt(90000), 3);
-  assert.equal(ui.ambientSceneAt(120000), 0);
+  assert.equal(ui.ambientSceneAt(150000), 5);
+  assert.equal(ui.ambientSceneAt(180000), 0);
 
-  const offsets = [0, 1, 2, 3].map((scene) => ({ ...ui.burnInOffset(scene) }));
-  assert.equal(new Set(offsets.map(({ x, y }) => `${x},${y}`)).size, 4);
-  for (let scene = 0; scene < 4; scene += 1) {
-    const pixel = Array.from(ui.ambientPixel(scene, 20, 12, 31.5, 178, 35));
-    assert.equal(pixel.length, 3);
-    pixel.forEach((channel) => assert.ok(Number.isInteger(channel) && channel >= 0 && channel <= 255));
+  const transition = ui.ambientFrameAt(29000, false);
+  assert.equal(transition.scene, 0);
+  assert.equal(transition.nextScene, 1);
+  assert.ok(transition.mix > 0 && transition.mix < 1);
+  assert.equal(ui.ambientFrameAt(29000, true).mix, 0);
+
+  const offsets = Array.from({ length: 9 }, (_, phase) => ({ ...ui.burnInOffset(phase) }));
+  assert.equal(new Set(offsets.map(({ x, y }) => `${x},${y}`)).size, 9);
+  for (const mode of ["normal", "voice", "degraded", "critical"]) {
+    for (let scene = 0; scene < 6; scene += 1) {
+      const pixel = Array.from(ui.ambientPixel(scene, 20, 12, 31.5, 178, 35, mode));
+      assert.equal(pixel.length, 3);
+      pixel.forEach((channel) => assert.ok(Number.isInteger(channel) && channel >= 0 && channel <= 255));
+    }
   }
+
+  assert.equal(ui.ambientDisplayMode("online", "ready"), "normal");
+  assert.equal(ui.ambientDisplayMode("online", "busy"), "voice");
+  assert.equal(ui.ambientDisplayMode("online", "down"), "degraded");
+  assert.equal(ui.ambientDisplayMode("offline", "busy"), "critical");
+});
+
+test("ambient painter reuses its image buffer and follows live health state", () => {
+  let allocations = 0;
+  const writes = [];
+  const context2d = {
+    createImageData(width, height) {
+      allocations += 1;
+      return { data: new Uint8ClampedArray(width * height * 4) };
+    },
+    putImageData(image) { writes.push(image); },
+  };
+  const canvas = { width: 12, height: 4, getContext() { return context2d; } };
+  const dashboard = {
+    dataset: { connection: "online" },
+    style: { values: {}, setProperty(key, value) { this.values[key] = value; } },
+  };
+  const voice = { dataset: { state: "busy" } };
+  context.document = {
+    hidden: false,
+    getElementById(id) {
+      return { dashboard, "voice-card": voice }[id] || null;
+    },
+  };
+
+  ui.paintAmbient(canvas, 0, { reducedMotion: false });
+  ui.paintAmbient(canvas, 1000, { reducedMotion: false });
+  assert.equal(allocations, 1);
+  assert.equal(writes.length, 2);
+  assert.equal(writes[0], writes[1]);
+  assert.equal(dashboard.dataset.ambientMode, "voice");
+
+  dashboard.dataset.connection = "offline";
+  ui.paintAmbient(canvas, 2000, { reducedMotion: true });
+  assert.equal(allocations, 1);
+  assert.equal(dashboard.dataset.ambientMode, "critical");
 });
 
 test("throughput state distinguishes idle zero from warming, stale, and down", () => {
@@ -342,6 +392,13 @@ test("voice duration formatting is compact and deterministic", () => {
   assert.equal(ui.formatVoiceDuration(1.21), "1.2S");
   assert.equal(ui.formatVoiceDuration(12.8), "13S");
   assert.equal(ui.formatVoiceDuration(125), "2M05S");
+  assert.equal(ui.formatVoiceDuration(31500), "8H45M");
+  assert.equal(ui.formatVoiceDuration(187200), "2D04H");
+  const listening = ui.voiceViewModel({
+    ...voiceStatus(),
+    stage_elapsed_seconds: 31500,
+  }, Date.parse("2026-08-10T18:30:05Z"));
+  assert.equal(listening.elapsedLabel, "—");
 });
 
 test("cluster state falls back to availability counts", () => {
@@ -483,6 +540,34 @@ test("renderer exposes per-node values and honest API-wide token scope", () => {
   assert.equal(cards.tokens.dataset.state, "ready");
   assert.equal(cards.tokens.dataset.throughputState, "active");
   assert.match(cards.tokens.title, /no per-node attribution/i);
+
+  ui.renderTransportError(new Error("connection refused"));
+  assert.equal(elements.dashboard.dataset.connection, "error");
+  assert.equal(elements["cluster-state"].textContent, "DATA LINK LOST");
+  assert.equal(elements["host-count"].textContent, "LAST 3 / 3 NODES");
+  assert.equal(elements["cpu-c1-row"].dataset.state, "stale");
+  assert.equal(elements["host-c1"].dataset.state, "stale");
+  assert.match(elements["c1-state"].textContent, /^STALE/);
+  assert.equal(elements["tokens-state"].dataset.state, "stale");
+  assert.equal(elements["tokens-state"].textContent, "STALE");
+  assert.equal(cards.cpu.dataset.freshnessState, "stale");
+  assert.equal(cards.tokens.dataset.freshnessState, "stale");
+  assert.match(cards.cpu.title, /retained values/i);
+
+  ui.render(statusPayload, Date.parse("2026-08-10T18:30:07Z"));
+  assert.equal(cards.cpu.dataset.freshnessState, undefined);
+  assert.equal(cards.tokens.dataset.freshnessState, undefined);
+  assert.equal(elements["host-c1"].dataset.state, "online");
+  assert.equal(elements["tokens-state"].textContent, "LIVE");
+
+  ui.render(statusPayload, Date.parse("2026-08-10T18:31:05Z"));
+  assert.equal(elements.dashboard.dataset.connection, "degraded");
+  assert.equal(elements["cluster-state"].textContent, "TELEMETRY STALE");
+  assert.equal(elements["host-count"].textContent, "LAST 3 / 3 NODES");
+  assert.equal(elements["host-c2"].dataset.state, "stale");
+  assert.equal(cards.ram.dataset.freshnessState, "stale");
+  assert.equal(elements["tokens-state"].textContent, "STALE");
+  assert.match(elements["connection-message"].textContent, /LATEST SAMPLE IS 60S OLD/);
 });
 
 test("static shell is self-contained and contains the exact rack-display regions", () => {
@@ -503,6 +588,7 @@ test("static shell is self-contained and contains the exact rack-display regions
   assert.ok(html.indexOf('id="voice-openclaw-step"') < html.indexOf('id="voice-tts-step"'));
   assert.ok(html.indexOf('id="voice-tts-step"') < html.indexOf('id="voice-playback-step"'));
   assert.match(html, /id="ambient-canvas"[^>]+width="178"[^>]+height="35"/);
+  assert.match(html, /data-ambient-mode="degraded"/);
   assert.equal((html.match(/TEMP °C/g) || []).length, 3);
   assert.equal((html.match(/class="mini-chart mini-chart--temp"/g) || []).length, 9);
   assert.match(html, /SOC TEMP · NO LPDDR SENSOR/);
@@ -518,6 +604,8 @@ test("static shell is self-contained and contains the exact rack-display regions
   assert.match(css, /height:\s*100dvh/);
   assert.match(css, /grid-template-rows:\s*34px minmax\(0, 1fr\) 17px/);
   assert.match(css, /image-rendering:\s*pixelated/);
+  assert.match(css, /contain:\s*strict/);
+  assert.doesNotMatch(css, /filter:\s*saturate/);
   assert.match(css, /overflow:\s*hidden/);
   assert.match(html, /aria-live="polite"/);
   assert.match(html, /aria-live="assertive"/);

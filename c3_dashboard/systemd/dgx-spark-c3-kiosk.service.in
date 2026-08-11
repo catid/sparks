@@ -8,7 +8,7 @@ After=dgx-spark-c3-dashboard.service
 After=getty@tty7.service
 Conflicts=getty@tty7.service
 ConditionPathExists=/dev/tty0
-ConditionPathExists=/dev/dri/card0
+ConditionPathExistsGlob=/dev/dri/card[0-9]*
 StartLimitIntervalSec=0
 
 [Service]
@@ -37,6 +37,15 @@ RuntimeDirectory=dgx-spark-c3-kiosk
 RuntimeDirectoryMode=0700
 ExecStartPre=+/usr/bin/chvt 7
 ExecStart=@PROJECT_DIR@/c3_dashboard/scripts/launch-kiosk.sh
+# pam_systemd migrates the rootless Xorg tree into a login scope. This
+# root-owned installed helper verifies that scope's UID/user/service/TTY before
+# terminating it, both for an ordinary stop and after an unexpected exit.
+ExecStop=+@CLEANUP_HELPER@ --user @USER@ --uid @UID@ --tty tty7 --main-pid $MAINPID
+ExecStopPost=+@CLEANUP_HELPER@ --user @USER@ --uid @UID@ --tty tty7
+# startx exits 1 after logind deliberately terminates its session during an
+# explicit stop. Treat that known cleanup result as clean; Restart=always still
+# recovers from the same status when it happens outside an operator stop.
+SuccessExitStatus=1
 Restart=always
 RestartSec=15s
 TimeoutStopSec=15s

@@ -13,10 +13,12 @@ import argparse
 import concurrent.futures
 import copy
 import datetime
+import errno
 import json
 import math
 import os
 import re
+import signal
 import socket
 import stat
 import subprocess
@@ -34,9 +36,12 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parent
 DEFAULT_NODES = ("cerberus1", "cerberus2", "cerberus3")
 DEFAULT_INTERVAL_SECONDS = 5.0
+DEFAULT_HISTORY_POINTS = 60
+MAX_HISTORY_POINTS = 60
 DEFAULT_PORT = 9763
 MAX_METRICS_BYTES = 4 * 1024 * 1024
 MAX_VOICE_STATUS_BYTES = 32 * 1024
+MAX_PUBLIC_ERROR_LENGTH = 160
 DEFAULT_VOICE_STATUS_PATH = "/run/cerberus3-voice-bridge/status.json"
 DEFAULT_VOICE_STALE_SECONDS = 6.0
 MAX_STATUS_TIMESTAMP = 253_402_300_799.0  # 9999-12-31T23:59:59Z
@@ -166,6 +171,19 @@ def canonical_host(host: str) -> str:
         "cerebrus3": "cerberus3",
     }
     return aliases.get(short, short)
+
+
+def bounded_public_error(value: Any, default: str) -> str:
+    """Return one bounded printable line suitable for the loopback API."""
+    if not isinstance(value, str):
+        return default
+    line = value.strip().splitlines()[-1:] or [""]
+    printable = "".join(
+        character if character.isprintable() else " " for character in line[0]
+    ).strip()
+    if not printable:
+        return default
+    return printable[:MAX_PUBLIC_ERROR_LENGTH]
 
 
 def validate_nodes(nodes: tuple[str, ...]) -> tuple[str, ...]:
@@ -309,14 +327,9 @@ def parse_prometheus(text: str) -> tuple[dict[str, list[float]], dict[str, str]]
     return dict(samples), types
 
 
-def generation_counter(text: str) -> tuple[float | None, str | None]:
-    """Select one known cumulative generation-token source.
-
-    A declared type that disagrees with the expected counter family is
-    rejected.  This prevents a similarly named gauge from being differentiated
-    as though it were a cumulative counter.
-    """
-    samples, types = parse_prometheus(text)
+def _generation_counter(
+    samples: dict[str, list[float]], types: dict[str, str]
+) -> tuple[float | None, str | None]:
     for sample_name, family_name, expected_type in GENERATION_COUNTER_CANDIDATES:
         values = samples.get(sample_name)
         if not values:
@@ -326,6 +339,50 @@ def generation_counter(text: str) -> tuple[float | None, str | None]:
             continue
         return sum(values), sample_name
     return None, None
+
+
+def _process_start_marker(
+    samples: dict[str, list[float]], types: dict[str, str]
+) -> tuple[float, ...] | None:
+    values = samples.get("process_start_time_seconds")
+    if not values:
+        return None
+    declared_type = types.get("process_start_time_seconds")
+    if declared_type is not None and declared_type != "gauge":
+        return None
+    return tuple(sorted(values))
+
+
+def generation_observation(
+    text: str,
+) -> tuple[float | None, str | None, tuple[float, ...] | None]:
+    """Parse a counter and private process-restart marker in one pass."""
+    samples, types = parse_prometheus(text)
+    total, metric = _generation_counter(samples, types)
+    return total, metric, _process_start_marker(samples, types)
+
+
+def generation_counter(text: str) -> tuple[float | None, str | None]:
+    """Select one known cumulative generation-token source.
+
+    A declared type that disagrees with the expected counter family is
+    rejected.  This prevents a similarly named gauge from being differentiated
+    as though it were a cumulative counter.
+    """
+    total, metric, _marker = generation_observation(text)
+    return total, metric
+
+
+def process_start_marker(text: str) -> tuple[float, ...] | None:
+    """Return a private restart marker for the metrics-serving process set.
+
+    The standard Prometheus process collector exposes a gauge.  Keeping the
+    complete sorted value set also behaves correctly if a future deployment
+    exports more than one worker process.  This marker is never put in the
+    public dashboard payload.
+    """
+    samples, types = parse_prometheus(text)
+    return _process_start_marker(samples, types)
 
 
 def fetch_text(url: str, timeout: float) -> str:
@@ -341,6 +398,26 @@ def fetch_text(url: str, timeout: float) -> str:
     if len(body) > MAX_METRICS_BYTES:
         raise OSError("metrics response exceeded size limit")
     return body.decode("utf-8", "replace")
+
+
+def metrics_failure(exc: BaseException) -> str:
+    """Describe metrics transport failures without reflecting URLs or bodies."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"metrics endpoint returned HTTP {exc.code}"
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return "metrics endpoint timed out"
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return "metrics endpoint timed out"
+    if isinstance(reason, socket.gaierror):
+        return "metrics hostname resolution failed"
+    if isinstance(reason, ConnectionRefusedError):
+        return "metrics connection refused"
+    if isinstance(reason, OSError):
+        if reason.errno == errno.ECONNREFUSED:
+            return "metrics connection refused"
+        return "metrics endpoint unavailable"
+    return "metrics endpoint unavailable"
 
 
 def timestamp_epoch(value: Any) -> float | None:
@@ -372,6 +449,14 @@ def timestamp_epoch(value: Any) -> float | None:
         if parsed is not None and 0 <= parsed <= MAX_STATUS_TIMESTAMP
         else None
     )
+
+
+def past_event_timestamp(value: Any, status_clock: float) -> float | None:
+    """Accept event timestamps only when they are not ahead of the heartbeat."""
+    parsed = timestamp_epoch(value)
+    if parsed is None or parsed > status_clock + 5.0:
+        return None
+    return parsed
 
 
 def status_token(value: Any, default: str = "unknown") -> str:
@@ -484,14 +569,15 @@ class VoiceStatusReader:
         include_chunks: bool = False,
     ) -> dict[str, Any]:
         source = status_mapping(raw)
-        started = timestamp_epoch(source.get("started_at"))
-        completed = timestamp_epoch(source.get("completed_at"))
-        last_success = timestamp_epoch(source.get("last_success_at"))
+        started = past_event_timestamp(source.get("started_at"), now)
+        completed = past_event_timestamp(source.get("completed_at"), now)
+        last_success = past_event_timestamp(source.get("last_success_at"), now)
         state = status_token(source.get("state"))
         duration = bounded_duration(source.get("duration_seconds"))
         elapsed = None
-        if state in self.ACTIVE_COMPONENT_STATES and started is not None:
-            elapsed = round(max(0.0, now - started), 1)
+        if state in self.ACTIVE_COMPONENT_STATES:
+            if started is not None:
+                elapsed = round(max(0.0, now - started), 1)
         elif duration is not None:
             elapsed = duration
         result: dict[str, Any] = {
@@ -556,19 +642,25 @@ class VoiceStatusReader:
         age = max(0.0, now - updated)
         state = status_token(overall.get("state"))
         stage = status_token(overall.get("stage"))
-        stage_started = timestamp_epoch(overall.get("stage_started_at"))
         stale = age > self.stale_after_seconds
         status_clock = updated if stale else now
+        stage_started = past_event_timestamp(
+            overall.get("stage_started_at"), status_clock
+        )
         healthy = state in {"ready", "busy", "armed"} and not stale
 
         armed_until = timestamp_epoch(wake_word.get("armed_until"))
-        last_triggered = timestamp_epoch(wake_word.get("last_trigger_at"))
+        last_triggered = past_event_timestamp(
+            wake_word.get("last_trigger_at"), status_clock
+        )
         last_error_source = status_mapping(raw.get("last_error"))
         last_error = None
         if last_error_source:
             error_stage = status_token(last_error_source.get("stage"))
             error_type = status_token(last_error_source.get("type"))
-            error_at = timestamp_epoch(last_error_source.get("at"))
+            error_at = past_event_timestamp(
+                last_error_source.get("at"), status_clock
+            )
             last_error = {
                 "stage": error_stage,
                 "error_type": error_type,
@@ -640,9 +732,11 @@ class ThroughputTracker:
         self.source = source
         self.stale_after_seconds = max(stale_after_seconds, 1.0)
         self.previous_total: float | None = None
-        self.previous_at: float | None = None
+        self.previous_clock: float | None = None
         self.last_success_at: float | None = None
+        self.last_success_clock: float | None = None
         self.metric: str | None = None
+        self.process_marker: tuple[float, ...] | None = None
 
     def _base(self, now: float) -> dict[str, Any]:
         return {
@@ -669,26 +763,51 @@ class ThroughputTracker:
             "error": None,
         }
 
-    def success(self, total: float, metric: str, now: float) -> dict[str, Any]:
+    def success(
+        self,
+        total: float,
+        metric: str,
+        now: float,
+        *,
+        sample_clock: float | None = None,
+        process_marker: tuple[float, ...] | None = None,
+    ) -> dict[str, Any]:
         current = finite_float(total)
         if current is None or current < 0:
             return self.failure("invalid generation-token counter", now)
+        clock = finite_float(sample_clock)
+        if clock is None:
+            clock = now
 
         old_total = self.previous_total
-        old_at = self.previous_at
+        old_clock = self.previous_clock
+        old_metric = self.metric
+        old_process_marker = self.process_marker
         self.previous_total = current
-        self.previous_at = now
+        self.previous_clock = clock
         self.last_success_at = now
+        self.last_success_clock = clock
         self.metric = metric
+        self.process_marker = process_marker
         result = self._base(now)
         result["healthy"] = True
         result["age_seconds"] = 0.0
         result["last_success_at"] = utc_timestamp(now)
         result["source_metric"] = metric
 
-        if old_total is None or old_at is None:
+        if old_total is None or old_clock is None:
             return result
-        elapsed = now - old_at
+        if old_metric != metric:
+            result["reason"] = "counter source changed; waiting for the next sample"
+            return result
+        if (
+            old_process_marker is not None
+            and process_marker is not None
+            and old_process_marker != process_marker
+        ):
+            result["reason"] = "metrics process restarted; waiting for the next sample"
+            return result
+        elapsed = clock - old_clock
         if current < old_total:
             result["reason"] = "counter reset; waiting for the next sample"
             return result
@@ -707,16 +826,25 @@ class ThroughputTracker:
         )
         return result
 
-    def failure(self, error: str, now: float) -> dict[str, Any]:
+    def failure(
+        self,
+        error: str,
+        now: float,
+        *,
+        sample_clock: float | None = None,
+    ) -> dict[str, Any]:
         # A rate spanning an unobserved scrape gap is not a current five-second
         # rate.  Discard the baseline so recovery warms up for one sample and
         # the next displayed value covers a fully observed window.
         self.previous_total = None
-        self.previous_at = None
+        self.previous_clock = None
         result = self._base(now)
+        clock = finite_float(sample_clock)
+        if clock is None:
+            clock = now
         age = (
-            max(0.0, now - self.last_success_at)
-            if self.last_success_at is not None
+            max(0.0, clock - self.last_success_clock)
+            if self.last_success_clock is not None
             else None
         )
         stale = age is not None and age < self.stale_after_seconds
@@ -732,6 +860,63 @@ class ThroughputTracker:
             }
         )
         return result
+
+
+def run_probe_command(
+    command: list[str], probe: str, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Run one probe and kill its complete local process group on timeout."""
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(input=probe, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            # The process may have exited in the timeout/kill race.  A direct
+            # kill is also a safe fallback on platforms without killpg.
+            try:
+                process.kill()
+            except OSError:
+                pass
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def probe_failure(result: subprocess.CompletedProcess[str], remote: bool) -> str:
+    """Map SSH/shell failures to bounded, non-content-bearing diagnostics."""
+    fallback = (
+        f"SSH probe failed (exit {result.returncode})"
+        if remote
+        else f"local probe failed (exit {result.returncode})"
+    )
+    if not remote:
+        return fallback
+    detail = bounded_public_error(result.stderr, "").lower()
+    categories = (
+        ("could not resolve hostname", "hostname resolution failed"),
+        ("name or service not known", "hostname resolution failed"),
+        ("temporary failure in name resolution", "hostname resolution failed"),
+        ("host key verification failed", "SSH host-key verification failed"),
+        ("permission denied", "SSH authentication failed"),
+        ("connection refused", "SSH connection refused"),
+        ("connection timed out", "SSH connection timed out"),
+        ("no route to host", "SSH route unavailable"),
+    )
+    for needle, public_error in categories:
+        if needle in detail:
+            return public_error
+    return fallback
 
 
 class HostProber:
@@ -773,22 +958,20 @@ class HostProber:
         return command
 
     def __call__(self, host: str) -> dict[str, Any]:
+        remote = canonical_host(host) != self.local_hostname
         try:
-            result = subprocess.run(
+            result = run_probe_command(
                 self.command(host),
-                input=REMOTE_PROBE,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                check=False,
+                REMOTE_PROBE,
+                self.timeout,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return {"error": str(exc)}
+        except subprocess.TimeoutExpired:
+            return {"error": "SSH probe timed out" if remote else "local probe timed out"}
+        except OSError as exc:
+            error_number = exc.errno if isinstance(exc.errno, int) else "unknown"
+            return {"error": f"probe launch failed (errno {error_number})"}
         if result.returncode:
-            error = result.stderr.strip().splitlines()
-            return {
-                "error": error[-1] if error else f"probe exited {result.returncode}"
-            }
+            return {"error": probe_failure(result, remote)}
         parsed = parse_probe(result.stdout)
         if parsed["cpu_total"] is None and parsed["ram_total_bytes"] is None:
             return {"error": "probe returned no CPU or RAM metrics"}
@@ -810,7 +993,7 @@ class Collector:
         nodes: tuple[str, ...] = DEFAULT_NODES,
         interval: float = DEFAULT_INTERVAL_SECONDS,
         metrics_url: str = "http://cerberus1.local:8889/metrics",
-        history_points: int = 720,
+        history_points: int = DEFAULT_HISTORY_POINTS,
         host_prober: Callable[[str], dict[str, Any]] | None = None,
         metrics_fetcher: Callable[[str, float], str] = fetch_text,
         ssh_key: str | None = None,
@@ -821,7 +1004,10 @@ class Collector:
         self.nodes = validate_nodes(nodes)
         self.interval = max(1.0, interval)
         self.metrics_url = metrics_url
-        self.history_points = max(2, history_points)
+        # The kiosk consumes exactly five minutes at a five-second cadence.
+        # Clamp stale/custom environments here too so an old 720-point setting
+        # cannot recreate a large public response after a code-only upgrade.
+        self.history_points = min(MAX_HISTORY_POINTS, max(2, history_points))
         self.host_prober = host_prober or HostProber(ssh_key, known_hosts)
         self.metrics_fetcher = metrics_fetcher
         self.voice_status_reader = VoiceStatusReader(
@@ -900,17 +1086,51 @@ class Collector:
     def _scrape_counter(self) -> dict[str, Any]:
         try:
             text = self.metrics_fetcher(self.metrics_url, min(3.0, self.interval))
-            total, metric = generation_counter(text)
+            total, metric, marker = generation_observation(text)
             if total is None or metric is None:
-                return {"error": "no supported cumulative generation-token counter"}
-            return {"total": total, "metric": metric}
+                sample = {"error": "no supported cumulative generation-token counter"}
+            else:
+                sample = {
+                    "total": total,
+                    "metric": metric,
+                    "process_marker": marker,
+                }
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
-            return {"error": str(exc)}
-        except Exception as exc:  # isolate a malformed response from host telemetry
-            return {"error": f"metrics parse failed: {exc}"}
+            sample = {"error": metrics_failure(exc)}
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+        except Exception:  # isolate a malformed response from host telemetry
+            sample = {"error": "metrics response could not be parsed"}
+        # Timestamp the observation itself.  Host probes may finish later, and
+        # using the collection-cycle start can materially skew a five-second
+        # counter rate when endpoint latency changes between samples.
+        sample["observed_at"] = time.time()
+        sample["observed_clock"] = time.monotonic()
+        return sample
+
+    def _probe_host(self, name: str) -> tuple[dict[str, Any], float]:
+        raw = self.host_prober(name)
+        if not isinstance(raw, dict):
+            raw = {"error": "probe returned an invalid result"}
+        return raw, time.time()
 
     def _host_status(self, name: str, raw: dict[str, Any], now: float) -> dict[str, Any]:
-        if raw.get("error"):
+        error = raw.get("error")
+        reported_hostname = raw.get("reported_hostname")
+        if not error:
+            if (
+                not isinstance(reported_hostname, str)
+                or not reported_hostname.strip()
+                or len(reported_hostname.strip()) > 253
+                or not HOST_PATTERN.fullmatch(reported_hostname.strip())
+            ):
+                error = "probe did not report a valid hostname"
+            elif canonical_host(reported_hostname) != canonical_host(name):
+                error = (
+                    "probe identity mismatch: expected "
+                    f"{canonical_host(name)}, got {canonical_host(reported_hostname)}"
+                )
+        if error:
             self.previous_cpu.pop(name, None)
             last_seen = self.last_host_success.get(name)
             return {
@@ -934,7 +1154,7 @@ class Collector:
                     if last_seen is not None
                     else None
                 ),
-                "error": str(raw["error"]),
+                "error": bounded_public_error(error, "host probe failed"),
             }
 
         total = finite_float(raw.get("cpu_total"))
@@ -965,7 +1185,7 @@ class Collector:
             ram_temperature = memory_temperature
         return {
             "name": name,
-            "reported_hostname": raw.get("reported_hostname"),
+            "reported_hostname": reported_hostname.strip().lower(),
             "state": "up",
             "cpu_percent": cpu,
             "gpu_percent": percent(finite_float(raw.get("gpu_percent"))),
@@ -985,28 +1205,43 @@ class Collector:
 
     def collect(self, now: float | None = None) -> None:
         fixed_test_time = now is not None
-        now = time.time() if now is None else now
+        cycle_time = time.time() if now is None else now
         raw_hosts: dict[str, dict[str, Any]] = {}
+        host_observed_at: dict[str, float] = {}
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(self.nodes) + 1,
             thread_name_prefix="c3-metric",
         ) as executor:
             host_futures = {
-                name: executor.submit(self.host_prober, name) for name in self.nodes
+                name: executor.submit(self._probe_host, name) for name in self.nodes
             }
             counter_future = executor.submit(self._scrape_counter)
             for name, future in host_futures.items():
                 try:
-                    raw_hosts[name] = future.result()
+                    raw, observed_at = future.result()
+                    raw_hosts[name] = raw
+                    host_observed_at[name] = cycle_time if fixed_test_time else observed_at
                 except Exception as exc:
-                    raw_hosts[name] = {"error": f"probe failed: {exc}"}
+                    raw_hosts[name] = {
+                        "error": f"probe failed ({type(exc).__name__})"
+                    }
+                    host_observed_at[name] = (
+                        cycle_time if fixed_test_time else time.time()
+                    )
             try:
                 counter_sample = counter_future.result()
             except Exception as exc:
-                counter_sample = {"error": f"metrics scrape failed: {exc}"}
+                counter_sample = {
+                    "error": f"metrics scrape failed ({type(exc).__name__})",
+                    "observed_at": time.time(),
+                    "observed_clock": time.monotonic(),
+                }
 
         hosts = {
-            name: self._host_status(name, raw_hosts[name], now) for name in self.nodes
+            name: self._host_status(
+                name, raw_hosts[name], host_observed_at[name]
+            )
+            for name in self.nodes
         }
         cpu, cpu_count = average_field(hosts, "cpu_percent")
         gpu, gpu_count = average_field(hosts, "gpu_percent")
@@ -1059,20 +1294,41 @@ class Collector:
             },
         }
 
+        counter_observed_at = (
+            cycle_time
+            if fixed_test_time
+            else finite_float(counter_sample.get("observed_at")) or time.time()
+        )
+        counter_observed_clock = (
+            cycle_time
+            if fixed_test_time
+            else finite_float(counter_sample.get("observed_clock"))
+        )
         if counter_sample.get("error"):
             throughput = self.throughput_tracker.failure(
-                str(counter_sample["error"]), now
+                bounded_public_error(
+                    counter_sample["error"], "throughput telemetry failed"
+                ),
+                counter_observed_at,
+                sample_clock=counter_observed_clock,
             )
         else:
             throughput = self.throughput_tracker.success(
-                counter_sample["total"], counter_sample["metric"], now
+                counter_sample["total"],
+                counter_sample["metric"],
+                counter_observed_at,
+                sample_clock=counter_observed_clock,
+                process_marker=counter_sample.get("process_marker"),
             )
         # Real collection can spend several seconds waiting on remote probes;
         # use the current clock for this local heartbeat rather than the host
         # sample's earlier timestamp. Tests retain their explicit fixed clock.
-        voice_agent = self.voice_status_reader.read(now if fixed_test_time else None)
+        completed_at = cycle_time if fixed_test_time else time.time()
+        voice_agent = self.voice_status_reader.read(
+            completed_at if fixed_test_time else None
+        )
 
-        generated_at = utc_timestamp(now)
+        generated_at = utc_timestamp(completed_at)
         history_point = {
             "timestamp": generated_at,
             "cluster": {
@@ -1116,7 +1372,11 @@ class Collector:
                 "cluster": cluster,
                 "throughput": throughput,
                 "voice_agent": voice_agent,
-                "history": copy.deepcopy(self.history),
+                # History points are immutable after append.  The snapshot is
+                # only read or copied while holding this lock, so sharing the
+                # bounded list avoids retaining and rebuilding a second full
+                # graph history every five seconds.
+                "history": self.history,
             }
 
     def run(self) -> None:
@@ -1148,18 +1408,17 @@ class Collector:
 
 class DashboardHandler(SimpleHTTPRequestHandler):
     server_version = "C3ClusterDashboard/1.0"
+    VOICE_PATHS = frozenset(
+        {"/api/voice-status", "/api/voice-status/", "/api/voice", "/api/voice/"}
+    )
+    STATUS_PATHS = frozenset({"/api/status", "/api/status/"})
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(ROOT / "static"), **kwargs)
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path in (
-            "/api/voice-status",
-            "/api/voice-status/",
-            "/api/voice",
-            "/api/voice/",
-        ):
+        if path in self.VOICE_PATHS:
             body = json.dumps(
                 getattr(self.server, "collector").get_voice_status(),
                 separators=(",", ":"),
@@ -1172,7 +1431,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if path in ("/api/status", "/api/status/"):
+        if path in self.STATUS_PATHS:
             body = json.dumps(
                 getattr(self.server, "collector").get_snapshot(),
                 separators=(",", ":"),
@@ -1203,6 +1462,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             f"{self.client_address[0]} - [{self.log_date_time_string()}] {fmt % args}",
             flush=True,
         )
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        """Keep failures visible without journaling every kiosk API poll."""
+        path = self.path.split("?", 1)[0]
+        try:
+            successful = 200 <= int(code) < 400
+        except (TypeError, ValueError):
+            successful = False
+        if successful and path in self.VOICE_PATHS | self.STATUS_PATHS:
+            return
+        super().log_request(code, size)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1264,7 +1534,11 @@ def main() -> None:
             "C3_DASHBOARD_VLLM_METRICS_URL",
             "http://cerberus1.local:8889/metrics",
         ),
-        history_points=int(os.environ.get("C3_DASHBOARD_HISTORY_POINTS", "720")),
+        history_points=int(
+            os.environ.get(
+                "C3_DASHBOARD_HISTORY_POINTS", str(DEFAULT_HISTORY_POINTS)
+            )
+        ),
         ssh_key=optional_path(
             "C3_DASHBOARD_SSH_KEY", user_ssh / "id_ed25519_dgx_cluster"
         ),
@@ -1300,6 +1574,7 @@ def main() -> None:
     finally:
         collector.stop_event.set()
         server.server_close()
+        collector_thread.join(timeout=max(5.0, collector.interval + 1.0))
 
 
 if __name__ == "__main__":

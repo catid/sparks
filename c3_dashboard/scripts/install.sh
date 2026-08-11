@@ -16,6 +16,8 @@ collector_unit="dgx-spark-c3-dashboard.service"
 kiosk_unit="dgx-spark-c3-kiosk.service"
 collector_target="/etc/systemd/system/${collector_unit}"
 kiosk_target="/etc/systemd/system/${kiosk_unit}"
+kiosk_cleanup_source="${dashboard_dir}/scripts/terminate-kiosk-session.py"
+kiosk_cleanup_target="/usr/local/libexec/dgx-spark-c3-terminate-kiosk-session"
 replace_environment=0
 
 usage() {
@@ -101,6 +103,7 @@ required_files=(
   "${dashboard_dir}/kiosk.py"
   "${dashboard_dir}/scripts/launch-kiosk.sh"
   "${dashboard_dir}/scripts/kiosk-session.sh"
+  "${kiosk_cleanup_source}"
   "${dashboard_dir}/scripts/validate-environment.py"
   "${dashboard_dir}/systemd/${collector_unit}.in"
   "${dashboard_dir}/systemd/${kiosk_unit}.in"
@@ -112,11 +115,12 @@ done
 for executable_file in \
   "${dashboard_dir}/kiosk.py" \
   "${dashboard_dir}/scripts/launch-kiosk.sh" \
-  "${dashboard_dir}/scripts/kiosk-session.sh"; do
+  "${dashboard_dir}/scripts/kiosk-session.sh" \
+  "${kiosk_cleanup_source}"; do
   [[ -x "${executable_file}" ]] || fail "${executable_file} is not executable"
 done
 for required_command in \
-  Xorg chvt dbus-run-session mcookie python3 sed ssh startx systemd-analyze \
+  Xorg chvt dbus-run-session loginctl mcookie python3 sed ssh startx systemctl systemd-analyze \
   xauth xinit xrandr xset; do
   command -v "${required_command}" >/dev/null 2>&1 ||
     fail "missing required command ${required_command}"
@@ -137,6 +141,9 @@ project_escaped="$(escape_sed_replacement "${project_dir}")"
 home_escaped="$(escape_sed_replacement "${service_home}")"
 user_escaped="$(escape_sed_replacement "${service_user}")"
 group_escaped="$(escape_sed_replacement "${service_group}")"
+uid_escaped="$(escape_sed_replacement "${service_uid}")"
+cleanup_render_path="${kiosk_cleanup_target}"
+cleanup_escaped="$(escape_sed_replacement "${cleanup_render_path}")"
 
 for unit_name in "${collector_unit}" "${kiosk_unit}"; do
   sed \
@@ -144,6 +151,8 @@ for unit_name in "${collector_unit}" "${kiosk_unit}"; do
     -e "s|@HOME@|${home_escaped}|g" \
     -e "s|@USER@|${user_escaped}|g" \
     -e "s|@GROUP@|${group_escaped}|g" \
+    -e "s|@UID@|${uid_escaped}|g" \
+    -e "s|@CLEANUP_HELPER@|${cleanup_escaped}|g" \
     "${dashboard_dir}/systemd/${unit_name}.in" \
     >"${tmp_dir}/${unit_name}"
 done
@@ -163,6 +172,7 @@ PYTHONPYCACHEPREFIX="${tmp_dir}/pycache" \
   python3 -m py_compile \
   "${dashboard_dir}/server.py" \
   "${dashboard_dir}/kiosk.py" \
+  "${kiosk_cleanup_source}" \
   "${dashboard_dir}/scripts/validate-environment.py"
 bash -n \
   "${dashboard_dir}/scripts/launch-kiosk.sh" \
@@ -171,8 +181,18 @@ bash -n \
 python3 "${dashboard_dir}/kiosk.py" \
   --check --url "${kiosk_url}" --size "${kiosk_mode}" \
   --retry-seconds "${kiosk_retry}" >/dev/null
-SYSTEMD_UNIT_PATH="${tmp_dir}:/usr/local/lib/systemd/system:/usr/lib/systemd/system:/lib/systemd/system" \
-  systemd-analyze verify "${collector_rendered}" "${kiosk_rendered}"
+# The installed unit deliberately uses a root-owned libexec copy. During a
+# fresh install that path does not exist yet, so verify an otherwise identical
+# temporary unit pointed at the executable source helper. Never install this
+# verification-only rendering.
+verify_dir="${tmp_dir}/verify"
+mkdir -p "${verify_dir}"
+cp "${collector_rendered}" "${verify_dir}/${collector_unit}"
+sed "s|${cleanup_escaped}|${kiosk_cleanup_source}|g" \
+  "${kiosk_rendered}" >"${verify_dir}/${kiosk_unit}"
+SYSTEMD_UNIT_PATH="${verify_dir}:/usr/local/lib/systemd/system:/usr/lib/systemd/system:/lib/systemd/system" \
+  systemd-analyze verify \
+  "${verify_dir}/${collector_unit}" "${verify_dir}/${kiosk_unit}"
 
 if [[ "${action}" == "verify" ]]; then
   echo "Verified C3 collector, GTK/WebKit kiosk, environment, and systemd units."
@@ -208,6 +228,8 @@ fi
   "${collector_rendered}" "${collector_target}"
 "${elevate[@]}" install -o root -g root -m 0644 \
   "${kiosk_rendered}" "${kiosk_target}"
+"${elevate[@]}" install -D -o root -g root -m 0755 \
+  "${kiosk_cleanup_source}" "${kiosk_cleanup_target}"
 "${elevate[@]}" systemctl daemon-reload
 
 if [[ "${action}" == "enable" || "${action}" == "start" ]]; then

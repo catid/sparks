@@ -25,6 +25,7 @@ class EnvironmentValidationTests(unittest.TestCase):
     def test_rendered_example_satisfies_complete_runtime_contract(self) -> None:
         values = self.rendered_example()
         validator.validate(values)
+        self.assertEqual(values["C3_DASHBOARD_HISTORY_POINTS"], "60")
         self.assertEqual(values["C3_DASHBOARD_VOICE_STALE_SECONDS"], "6")
 
     def test_rejects_runtime_restart_loop_and_exposure_settings(self) -> None:
@@ -32,12 +33,22 @@ class EnvironmentValidationTests(unittest.TestCase):
             "remote bind": ("C3_DASHBOARD_HOST", "0.0.0.0"),
             "remote opt-in": ("C3_DASHBOARD_ALLOW_REMOTE", "1"),
             "wrong interval": ("C3_DASHBOARD_INTERVAL", "2"),
+            "hour-long history": ("C3_DASHBOARD_HISTORY_POINTS", "720"),
+            "short history": ("C3_DASHBOARD_HISTORY_POINTS", "59"),
             "retry too high": ("C3_KIOSK_RETRY_SECONDS", "301"),
             "wait too high": ("C3_KIOSK_OUTPUT_WAIT_SECONDS", "301"),
             "bad output": ("C3_KIOSK_OUTPUT", "TV-0;bad"),
             "credential URL": (
                 "C3_KIOSK_URL",
                 "http://user:pass@127.0.0.1:9763/",
+            ),
+            "missing kiosk page": (
+                "C3_KIOSK_URL",
+                "http://127.0.0.1:9763/missing",
+            ),
+            "kiosk fragment": (
+                "C3_KIOSK_URL",
+                "http://127.0.0.1:9763/#not-the-root",
             ),
             "unexpanded key": ("C3_DASHBOARD_SSH_KEY", "@HOME@/.ssh/key"),
             "remote metrics": (
@@ -74,6 +85,15 @@ class EnvironmentValidationTests(unittest.TestCase):
             values[forbidden] = ":9" if forbidden.endswith("DISPLAY") else "vt9"
             with self.subTest(forbidden=forbidden), self.assertRaises(ValueError):
                 validator.validate(values)
+
+    def test_collector_is_restarted_after_clean_or_failed_exit(self) -> None:
+        unit = (
+            DASHBOARD_DIR
+            / "systemd"
+            / "dgx-spark-c3-dashboard.service.in"
+        ).read_text()
+        self.assertIn("Restart=always\n", unit)
+        self.assertNotIn("Restart=on-failure", unit)
 
     def test_parser_rejects_duplicate_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

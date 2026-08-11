@@ -19,7 +19,7 @@ fail() {
 [[ "${mode}" =~ ^[1-9][0-9]{1,4}x[1-9][0-9]{1,4}$ ]] ||
   fail "invalid display mode ${mode}"
 
-for required_command in Xorg mcookie python3 startx xauth xinit; do
+for required_command in Xorg chmod mcookie mktemp mv python3 startx xauth xinit; do
   command -v "${required_command}" >/dev/null 2>&1 ||
     fail "missing required command ${required_command}"
 done
@@ -41,6 +41,20 @@ fi
 [[ "${runtime_home}" == /* && -d "${runtime_home}" &&
    -O "${runtime_home}" && ! -L "${runtime_home}" ]] ||
   fail "runtime home is not a safe service-owned directory: ${runtime_home}"
+
+# PAMName=login gives rootless Xorg the active VT's DRM lease, but pam_systemd
+# moves this process tree into a login session scope outside the service
+# cgroup.  Record the opaque numeric ID in the private runtime directory so
+# the root-owned ExecStop helper can validate and terminate the exact scope.
+session_id="${XDG_SESSION_ID:-}"
+[[ "${session_id}" =~ ^[0-9]{1,20}$ ]] ||
+  fail "PAM did not provide a numeric XDG_SESSION_ID"
+session_tmp="$(mktemp "${runtime_home}/session-id.XXXXXX")"
+trap 'rm -f -- "${session_tmp}"' EXIT
+printf '%s\n' "${session_id}" >"${session_tmp}"
+chmod 0600 "${session_tmp}"
+mv -f -- "${session_tmp}" "${runtime_home}/session-id"
+trap - EXIT
 
 umask 077
 mkdir -p \

@@ -1,9 +1,15 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
+import shlex
+import subprocess
 import tempfile
 import threading
+import time
+import urllib.error
 import unittest
 import urllib.request
 
@@ -178,6 +184,25 @@ class ServerTests(unittest.TestCase):
             oversized = dashboard.VoiceStatusReader(str(large_path), 15).read(now=100)
             self.assertEqual(oversized["status_error"], "invalid")
 
+    def test_voice_status_reader_rejects_event_timestamps_ahead_of_heartbeat(self):
+        payload = self.voice_payload(now=100)
+        payload["overall"]["stage_started_at"] = dashboard.utc_timestamp(110)
+        payload["wake_word"]["last_trigger_at"] = dashboard.utc_timestamp(110)
+        payload["asr"]["state"] = "processing"
+        payload["asr"]["started_at"] = dashboard.utc_timestamp(110)
+        payload["last_error"]["at"] = dashboard.utc_timestamp(110)
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "status.json"
+            path.write_text(json.dumps(payload))
+            status = dashboard.VoiceStatusReader(str(path), 15).read(now=100)
+
+        self.assertIsNone(status["stage_started_at"])
+        self.assertIsNone(status["stage_elapsed_seconds"])
+        self.assertIsNone(status["watchword"]["last_triggered_at"])
+        self.assertIsNone(status["asr"]["started_at"])
+        self.assertIsNone(status["asr"]["elapsed_seconds"])
+        self.assertIsNone(status["last_error"]["at"])
+
     def test_fast_voice_endpoint_is_distinct_from_cluster_snapshot(self):
         class FakeCollector:
             def __init__(self):
@@ -195,23 +220,32 @@ class ServerTests(unittest.TestCase):
             ("127.0.0.1", 0), dashboard.DashboardHandler
         )
         server.collector = collector
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            base = f"http://127.0.0.1:{server.server_port}"
-            with urllib.request.urlopen(f"{base}/api/voice-status", timeout=2) as response:
-                voice = json.load(response)
-                self.assertEqual(response.headers["Cache-Control"], "no-store")
-            with urllib.request.urlopen(f"{base}/api/status", timeout=2) as response:
-                cluster = json.load(response)
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
+        access_log = io.StringIO()
+        with contextlib.redirect_stdout(access_log):
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_port}"
+                with urllib.request.urlopen(
+                    f"{base}/api/voice-status", timeout=2
+                ) as response:
+                    voice = json.load(response)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                with urllib.request.urlopen(f"{base}/api/status", timeout=2) as response:
+                    cluster = json.load(response)
+                with self.assertRaises(urllib.error.HTTPError):
+                    urllib.request.urlopen(f"{base}/missing", timeout=2)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
 
         self.assertEqual(voice["sequence"], 2)
         self.assertEqual(cluster["voice_agent"]["sequence"], 1)
         self.assertEqual(collector.voice_calls, 1)
+        self.assertNotIn("/api/voice-status", access_log.getvalue())
+        self.assertNotIn("/api/status", access_log.getvalue())
+        self.assertIn('"GET /missing HTTP/1.1" 404', access_log.getvalue())
 
     def test_probe_parser_and_cpu_delta(self):
         parsed = dashboard.parse_probe(
@@ -289,6 +323,22 @@ vllm:request_generation_tokens_sum 45
         self.assertEqual(total, 45)
         self.assertEqual(metric, "vllm:request_generation_tokens_sum")
 
+    def test_prometheus_process_marker_requires_a_gauge(self):
+        marker = dashboard.process_start_marker(
+            """# TYPE process_start_time_seconds gauge
+process_start_time_seconds{worker="b"} 200
+process_start_time_seconds{worker="a"} 100
+"""
+        )
+        self.assertEqual(marker, (100, 200))
+        self.assertIsNone(
+            dashboard.process_start_marker(
+                """# TYPE process_start_time_seconds counter
+process_start_time_seconds 100
+"""
+            )
+        )
+
     def test_throughput_counter_is_never_shown_as_a_rate(self):
         tracker = dashboard.ThroughputTracker("http://c1:8889/metrics", 10)
         first = tracker.success(48_000, "vllm:generation_tokens_total", 100)
@@ -316,6 +366,38 @@ vllm:request_generation_tokens_sum 45
         self.assertEqual(stale["state"], "stale")
         self.assertIsNone(stale["tokens_per_second"])
         self.assertEqual(down["state"], "down")
+
+    def test_throughput_warms_across_source_and_process_changes(self):
+        tracker = dashboard.ThroughputTracker("vllm", 10)
+        tracker.success(
+            100, "counter-a", 1_000, sample_clock=50, process_marker=(10,)
+        )
+        source_change = tracker.success(
+            1_000, "counter-b", 1_005, sample_clock=55, process_marker=(10,)
+        )
+        live = tracker.success(
+            1_050, "counter-b", 1_015, sample_clock=60, process_marker=(10,)
+        )
+        process_change = tracker.success(
+            5_000, "counter-b", 1_020, sample_clock=65, process_marker=(20,)
+        )
+
+        self.assertEqual(source_change["state"], "warming")
+        self.assertIn("source changed", source_change["reason"])
+        # Wall time advanced ten seconds, while the observed scrape window was
+        # five; the counter rate must use the latter.
+        self.assertEqual(live["tokens_per_second"], 10)
+        self.assertEqual(live["window_seconds"], 5)
+        self.assertEqual(process_change["state"], "warming")
+        self.assertIn("process restarted", process_change["reason"])
+
+        # A wall-clock correction must not make freshness negative or keep the
+        # endpoint stale indefinitely.
+        clock_corrected = tracker.failure(
+            "timed out", 900, sample_clock=70
+        )
+        self.assertEqual(clock_corrected["state"], "stale")
+        self.assertEqual(clock_corrected["age_seconds"], 5)
 
     def test_collector_reports_hosts_cluster_average_history_and_rate(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -380,6 +462,27 @@ vllm:request_generation_tokens_sum 45
         self.assertEqual(snapshot["cluster"]["available_hosts"], 2)
         self.assertEqual(snapshot["cluster"]["sampled_hosts"]["gpu"], 2)
 
+    def test_wrong_host_identity_is_rejected_instead_of_duplicated(self):
+        prober = FakeProbe()
+
+        def wrong_identity(host):
+            result = prober(host)
+            if host == "cerberus2":
+                result["reported_hostname"] = "cerberus1.local"
+            return result
+
+        collector = dashboard.Collector(
+            interval=5,
+            host_prober=wrong_identity,
+            metrics_fetcher=FakeMetrics([100]),
+        )
+        collector.collect(now=100)
+        snapshot = collector.get_snapshot()
+
+        self.assertEqual(snapshot["hosts"]["cerberus2"]["state"], "down")
+        self.assertIn("identity mismatch", snapshot["hosts"]["cerberus2"]["error"])
+        self.assertEqual(snapshot["cluster"]["available_hosts"], 2)
+
     def test_scrape_failure_does_not_reuse_last_rate(self):
         collector = dashboard.Collector(
             interval=5,
@@ -422,6 +525,22 @@ vllm:request_generation_tokens_sum 45
         self.assertEqual(len(history), 2)
         self.assertEqual(history[0]["timestamp"], dashboard.utc_timestamp(105))
 
+    def test_legacy_hour_history_is_clamped_to_public_five_minutes(self):
+        collector = dashboard.Collector(
+            interval=5,
+            host_prober=FakeProbe(),
+            metrics_fetcher=FakeMetrics([100] * 61),
+            history_points=720,
+        )
+        self.assertEqual(collector.history_points, dashboard.MAX_HISTORY_POINTS)
+        for index in range(61):
+            collector.collect(now=100 + index * 5)
+
+        history = collector.get_snapshot()["history"]
+        self.assertEqual(len(history), 60)
+        self.assertEqual(history[0]["timestamp"], dashboard.utc_timestamp(105))
+        self.assertEqual(history[-1]["timestamp"], dashboard.utc_timestamp(400))
+
     def test_host_validation_blocks_ssh_option_injection_and_alias_duplicates(self):
         with self.assertRaises(ValueError):
             dashboard.validate_nodes(("-oProxyCommand=bad",))
@@ -437,6 +556,28 @@ vllm:request_generation_tokens_sum 45
         self.assertEqual(remote[0], "ssh")
         self.assertIn("StrictHostKeyChecking=yes", remote)
         self.assertIn("UserKnownHostsFile=/known-hosts", remote)
+
+    def test_probe_timeout_terminates_background_process_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = pathlib.Path(directory) / "child.pid"
+            command = [
+                "sh",
+                "-c",
+                f"sleep 30 & child=$!; echo $child > {shlex.quote(str(pid_path))}; wait",
+            ]
+            with self.assertRaises(subprocess.TimeoutExpired):
+                dashboard.run_probe_command(command, "", 0.1)
+            child_pid = int(pid_path.read_text().strip())
+            state = None
+            for _ in range(20):
+                try:
+                    state = pathlib.Path(f"/proc/{child_pid}/stat").read_text().split()[2]
+                except OSError:
+                    state = None
+                if state in (None, "Z"):
+                    break
+                time.sleep(0.05)
+            self.assertIn(state, (None, "Z"))
 
 
 if __name__ == "__main__":

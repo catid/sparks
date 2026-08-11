@@ -12,6 +12,8 @@ LPDDR5X sensor, while the API retains a truthful null RAM-temperature field.
 The token panel is deliberately different: vLLM exposes one
 cluster-wide output counter at the C1 API, so that panel is labelled as a
 C1+C2 API aggregate and never invents per-node token attribution.
+The API retains only the 60 samples the screen can display, keeping the rolling
+window to five minutes without shipping an unused hour of history every poll.
 The fifth panel follows the local Cerberus voice request through ASR,
 watchword listening/arming/classification, OpenClaw thinking, TTS synthesis, playback, and
 cooldown. It shows stage timing, TTS chunk progress, heartbeat freshness, and
@@ -33,6 +35,7 @@ dgx-spark-c3-dashboard.service  -> loopback Python collector on :9763
 dgx-spark-c3-kiosk.service      -> rootless Xorg on VT 7
                                       -> GTK4/WebKitGTK view
                                       -> http://127.0.0.1:9763/
+                                      -> validated logind-session cleanup
 ```
 
 There is no display manager, desktop session, or window manager in this path.
@@ -41,6 +44,13 @@ systemd-logind grant that active VT session the DRM and input device handles
 needed by rootless Xorg. A privileged `chvt 7` pre-start step makes that VT
 active before Xorg requests the DRM lease; without it, logind returns a paused
 DRM descriptor on a headless boot whose foreground console is still VT 1.
+Because pam_systemd moves the resulting process tree into a login scope, the
+installer also places a small cleanup helper at
+`/usr/local/libexec/dgx-spark-c3-terminate-kiosk-session`. The installed copy
+is root-owned. At stop and post-stop it reads a private numeric session ID and
+requires the configured UID, account name, local `login` service, non-remote
+state, and `tty7` before stopping that exact logind scope. This
+prevents Xorg or WebKit processes from surviving a service restart.
 
 ## Verified C3 runtime
 
@@ -122,8 +132,9 @@ before unattended use.
 
 ## Boot and failure behavior
 
-The collector listens only on loopback and restarts after failure. The kiosk
-has unlimited systemd restart attempts with a 15-second delay. On every start
+The collector listens only on loopback and has unlimited systemd restart
+attempts, including after an unexpected clean exit. The kiosk likewise has
+unlimited restart attempts with a 15-second delay. On every start
 it launches rootless Xorg with TCP listening disabled, discovers a connected
 XRandR output, disables other active outputs, and requires the selected output
 to accept 1424×280 before WebKit starts. X display `:0` and VT 7 are fixed so
@@ -140,9 +151,9 @@ temp storage; none relies on the read-only operator home.
 If the panel is unplugged, the X session exits after a short bounded probe and
 systemd tries again later. This does not hold up `multi-user.target`, start a
 desktop, or make the HTTP service unavailable. Hot-plugging the panel is enough
-for a later attempt to recover. If `/dev/tty0` or `/dev/dri/card0` does not
-exist, systemd skips the kiosk through unit conditions while leaving the
-collector usable.
+for a later attempt to recover. If `/dev/tty0` or no numbered DRM card exists,
+systemd skips the kiosk through unit conditions while leaving the collector
+usable.
 
 The WebKit client is restricted to the configured loopback origin, denies web
 permissions, hides the pointer, disables screen blanking when supported, and
@@ -166,6 +177,12 @@ journalctl -u dgx-spark-c3-dashboard.service -u dgx-spark-c3-kiosk.service \
 curl -fsS http://127.0.0.1:9763/api/status | jq .
 curl -fsS http://127.0.0.1:9763/api/voice-status | jq .
 ```
+
+`systemctl status` can show zero kiosk tasks and only the small PAM handler's
+memory even while the screen is active: logind accounts Xorg and WebKit in the
+corresponding `session-*.scope`. Use `loginctl list-sessions` followed by
+`loginctl session-status ID` when auditing the full display process tree. The
+service's stop hooks still terminate that validated scope.
 
 The voice bridge atomically updates
 `/run/cerberus3-voice-bridge/status.json` every two seconds and at every stage

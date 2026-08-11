@@ -15,7 +15,7 @@ Environment=PATH=/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/default/dgx-spark-c3-dashboard
 ExecStart=/usr/bin/python3 @PROJECT_DIR@/c3_dashboard/server.py
-Restart=on-failure
+Restart=always
 RestartSec=5s
 TimeoutStopSec=10s
 NoNewPrivileges=true
