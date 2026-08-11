@@ -2,16 +2,19 @@
 
 The files in `static/` are a dependency-free dashboard designed for the
 native `1424x280` rack display on C3. At that size it is a single fixed view:
-five compact cards across the panel. CPU, GPU, and unified RAM each contain
+four compact cards across the panel. CPU, GPU, and unified RAM each contain
 three stacked C1/C2/C3 current readings with paired utilization and thermal
 mini-graphs. CPU and GPU use their matching temperatures; RAM is paired with a
 separately labelled SoC temperature. The token card has
 one larger graph because the production C1 metrics endpoint exposes only the
 C1+C2 API-wide output counter; both the scope label and footer say that it is
-not per-node telemetry. The voice card follows the real ASR → watchword →
-OpenClaw → TTS → playback order with five distinct steps, current-stage timing,
-TTS chunks, heartbeat age, and sanitized last failure. A compact status strip
-keeps cluster endpoint failures visible.
+not per-node telemetry. Voice progress is a separate five-zone background
+layer, ordered left-to-right as HEARD NAME → ASR → CLAW → TTS → PLAY. Completed,
+active, and failed zones use bounded operational state only; transcripts,
+responses, audio, raw errors, and request identifiers never enter the DOM. The
+zones remain behind all four cards, with their tiny legend in otherwise unused
+top-edge pixels, so they do not replace or obscure telemetry. A compact status
+strip keeps cluster endpoint failures visible.
 There is no scrolling, CDN, font download, build step, or JavaScript package
 dependency.
 
@@ -30,11 +33,27 @@ With `prefers-reduced-motion`, each scene is a frozen snapshot, transitions are
 disabled, and updates align to the next 30-second boundary. Telemetry and
 network polling remain independent of this ambient renderer.
 
+A second, independent TFT-maintenance layer sends an exact-black, 48-pixel
+horizontal band from the top through the bottom after five quiet minutes and
+then at most once every 30 minutes. The attached DeskPi DP-0101 is a 1424x280
+TFT LCD with a specified 50 ms response time, not an OLED. A 3.2-second linear
+pass leaves every row black for about 0.47 seconds (over nine response-time
+constants) without pointlessly running a continuous animation. The ordinary
+dashboard remains visible outside the band. Active voice/model work, a new or
+changed cluster/voice problem, recovery, or deliberate pointer/key/touch input
+postpones the pass. An unchanged outage does not keep resetting the timer. A
+visibility-resume check handles suspended/throttled WebKit timers.
+DeskPi publishes no image-retention recovery duration or cadence. The 50 ms
+specification therefore bounds visible transition speed only; it is not proof
+that one pass clears image sticking. The 30-minute recurrence is an infrequent,
+low-disruption heuristic layered on top of the foreground nudge.
+
 The browser loads `/`, `/style.css`, and `/app.js`. The frontend requests
 `GET /api/status` immediately and then every 5 seconds with `cache: no-store`.
 An individual request is aborted after 4.2 seconds so a hung request cannot
 stop later refreshes. It independently polls `GET /api/voice-status` every
-750 ms with a 600 ms timeout; a voice-only failure changes only the voice card.
+750 ms with a 600 ms timeout; a voice-only failure changes only the voice
+background state.
 
 ## API contract
 
@@ -116,6 +135,18 @@ stop later refreshes. It independently polls `GET /api/voice-status` every
     "asr": {"state": "ok", "duration_seconds": 1.21},
     "openclaw": {"state": "thinking", "elapsed_seconds": 18.4},
     "tts": {"state": "idle", "chunk_index": 0, "chunk_total": 0},
+    "pipeline": {
+      "source": "producer",
+      "active": true,
+      "mode": "request",
+      "steps": {
+        "heard_name": "complete",
+        "asr": "complete",
+        "openclaw": "active",
+        "tts": "idle",
+        "play": "idle"
+      }
+    },
     "last_error": null,
     "status_error": null
   },
@@ -174,7 +205,7 @@ Contract details:
   be online, and the token-rate state becomes `STALE`. An old, missing, or
   invalid `generated_at` timestamp gets the same honest treatment. A fresh
   successful poll clears these freshness markers. The independently polled
-  voice card is not changed by a cluster telemetry transport failure.
+  voice background is not changed by a cluster telemetry transport failure.
 - Preferred states are `online`, `degraded`, and `offline`. The UI also maps
   common equivalents such as `healthy`, `stale`, and `unreachable`.
 - Throughput states are `warming`, `active`, `idle`, `stale`, and `down`.
@@ -192,6 +223,12 @@ Contract details:
   `status_error` distinguishes `missing`, `unreadable`, `malformed`, `invalid`,
   `schema_mismatch`, and `stale`. The fresher `/api/voice-status` response uses
   the same shape without waiting for the next five-second cluster collection.
+- `voice_agent.pipeline.steps` has exactly five keys: `heard_name`, `asr`,
+  `openclaw`, `tts`, and `play`. Step states are `idle`, `active`, `complete`,
+  `error`, or `unknown`. The frontend prefers this producer contract and
+  derives the same fixed shape from older status payloads when necessary.
+  Stale/down responses clear progress rather than retaining a misleading
+  frozen turn.
 
 ## Frontend test
 
@@ -206,5 +243,6 @@ They cover contract normalization, host mapping, independent per-node rolling
 series, missing-value gaps, SVG path generation, throughput scope/state,
 ambient scene timing, transitions, palettes, and pixel bounds, state fallbacks,
 transport-stale recovery, current-value rendering, long-duration voice uptime,
-all voice pipeline/failure states, independent voice transport failure, and
-the self-contained static shell.
+all voice pipeline/failure states, independent voice transport failure,
+privacy-safe producer/fallback progress mapping, the five-minute/30-minute
+black-sweep schedule and panel-response dwell, and the self-contained shell.

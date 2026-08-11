@@ -95,7 +95,10 @@ def run_kiosk(url: str, size: tuple[int, int], retry_seconds: int) -> int:
             self.webview.set_hexpand(True)
             self.webview.set_vexpand(True)
             self.webview.set_cursor_from_name("none")
-            self.webview.set_background_color(Gdk.RGBA(0.02, 0.03, 0.04, 1.0))
+            # Keep WebKit's underlay digital black. This prevents a bright or
+            # merely dark frame during navigation, renderer restarts, and the
+            # TFT maintenance sweep's first/last paint.
+            self.webview.set_background_color(Gdk.RGBA(0, 0, 0, 1.0))
             settings = self.webview.get_settings()
             # Bare rootless Xorg has no compositor. On GB10, WebKit's
             # accelerated surface can remain white even though the page is

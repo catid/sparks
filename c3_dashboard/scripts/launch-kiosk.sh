@@ -80,4 +80,4 @@ xorg_bin="$(command -v Xorg)"
 # Calling xinit directly here would leave the local UNIX display unprotected.
 exec "${startx_bin}" "${session_script}" -- \
   "${xorg_bin}" "${display}" "${virtual_terminal}" \
-  -keeptty -nolisten tcp -noreset
+  -keeptty -br -nolisten tcp -noreset

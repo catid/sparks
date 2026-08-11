@@ -126,10 +126,116 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status["asr"]["duration_seconds"], 1.21)
         self.assertEqual(status["openclaw"]["elapsed_seconds"], 8)
         self.assertEqual(status["last_error"]["error_type"], "timeouterror")
+        self.assertEqual(status["pipeline"]["source"], "derived")
+        self.assertTrue(status["pipeline"]["active"])
+        self.assertEqual(status["pipeline"]["mode"], "request")
+        self.assertEqual(
+            status["pipeline"]["steps"],
+            {
+                "heard_name": "complete",
+                "asr": "complete",
+                "openclaw": "active",
+                "tts": "idle",
+                "play": "idle",
+            },
+        )
         serialized = json.dumps(status)
         self.assertNotIn("private microphone", serialized)
         self.assertNotIn("private model", serialized)
         self.assertNotIn("bearer token", serialized)
+
+    def test_voice_status_reader_whitelists_explicit_pipeline_progress(self):
+        payload = self.voice_payload(now=100)
+        payload["pipeline"] = {
+            "active": True,
+            "mode": "responding",
+            "steps": {
+                "heard_name": "complete",
+                "asr": "complete",
+                "openclaw": "complete",
+                "tts": "active",
+                "play": "active",
+                "private_request": "do not expose this",
+            },
+            "transcript": "private voice content",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "status.json"
+            path.write_text(json.dumps(payload))
+            status = dashboard.VoiceStatusReader(str(path), 15).read(now=105)
+
+        self.assertEqual(
+            status["pipeline"],
+            {
+                "source": "producer",
+                "active": True,
+                "mode": "responding",
+                "steps": {
+                    "heard_name": "complete",
+                    "asr": "complete",
+                    "openclaw": "complete",
+                    "tts": "active",
+                    "play": "active",
+                },
+            },
+        )
+        serialized = json.dumps(status)
+        self.assertNotIn("private_request", serialized)
+        self.assertNotIn("private voice content", serialized)
+
+    def test_voice_status_pipeline_does_not_report_stale_progress_as_active(self):
+        payload = self.voice_payload(now=50)
+        payload["pipeline"] = {
+            "active": True,
+            "mode": "request",
+            "steps": {
+                "heard_name": "complete",
+                "asr": "complete",
+                "openclaw": "active",
+                "tts": "idle",
+                "play": "idle",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "status.json"
+            path.write_text(json.dumps(payload))
+            status = dashboard.VoiceStatusReader(str(path), 15).read(now=100)
+
+        self.assertEqual(status["state"], "stale")
+        self.assertFalse(status["pipeline"]["active"])
+        self.assertEqual(status["pipeline"]["mode"], "unknown")
+        self.assertTrue(
+            all(value == "unknown" for value in status["pipeline"]["steps"].values())
+        )
+
+    def test_legacy_capture_failure_maps_to_asr_without_wake_progress(self):
+        payload = self.voice_payload(now=100)
+        payload["overall"] = {
+            "state": "degraded",
+            "stage": "retry_wait",
+            "stage_started_at": dashboard.utc_timestamp(99),
+        }
+        payload["wake_word"] = {
+            "state": "listening",
+            "last_trigger_at": None,
+            "armed_until": None,
+        }
+        payload["last_error"] = {
+            "stage": "capture",
+            "type": "OSError",
+            "at": dashboard.utc_timestamp(99),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "status.json"
+            path.write_text(json.dumps(payload))
+            status = dashboard.VoiceStatusReader(str(path), 15).read(now=101)
+
+        self.assertEqual(status["pipeline"]["source"], "derived")
+        self.assertFalse(status["pipeline"]["active"])
+        self.assertEqual(status["pipeline"]["mode"], "error")
+        self.assertEqual(status["pipeline"]["steps"]["heard_name"], "idle")
+        self.assertEqual(status["pipeline"]["steps"]["asr"], "error")
+        self.assertIsNone(status["watchword"]["last_triggered_at"])
 
     def test_voice_status_reader_marks_missing_malformed_stale_and_symlink(self):
         with tempfile.TemporaryDirectory() as directory:

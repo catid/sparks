@@ -25,7 +25,7 @@ fail() {
 [[ "${wait_seconds}" =~ ^[1-9][0-9]{0,2}$ && "${wait_seconds}" -le 300 ]] ||
   fail "invalid output wait interval ${wait_seconds}"
 
-for required_command in xrandr xset dbus-run-session python3; do
+for required_command in xrandr xset xsetroot dbus-run-session python3; do
   command -v "${required_command}" >/dev/null 2>&1 ||
     fail "missing required command ${required_command}"
 done
@@ -73,6 +73,10 @@ done
 [[ -n "${output}" ]] ||
   fail "no connected output accepted native mode ${mode} after ${wait_seconds}s"
 echo "C3 kiosk session: using ${output} at ${mode}" >&2
+
+# Make uncovered X pixels and WebKit's startup/reload interval exact RGB zero.
+# The in-page TFT maintenance band independently traverses the WebKit viewport.
+xsetroot -solid black
 
 # Screen blanking is undesirable for an always-on status panel.  Failure is
 # non-fatal because a display can legitimately omit DPMS support.

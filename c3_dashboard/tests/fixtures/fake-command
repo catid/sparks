@@ -34,7 +34,7 @@ case "${command_name}" in
     fi
     [[ "${C3_TEST_XRANDR_STATE:-connected}" != "disconnected" ]]
     ;;
-  Xorg|mcookie|python3|xauth|xset|sleep)
+  Xorg|mcookie|python3|xauth|xset|xsetroot|sleep)
     log "$@"
     ;;
   startx)

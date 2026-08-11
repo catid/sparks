@@ -87,6 +87,10 @@ class RenderingPolicyTests(unittest.TestCase):
         self.assertIn("set_hardware_acceleration_policy", source)
         self.assertIn("HardwareAccelerationPolicy.NEVER", source)
 
+    def test_webview_underlay_is_exact_black(self) -> None:
+        source = pathlib.Path(kiosk.__file__).read_text(encoding="utf-8")
+        self.assertIn("set_background_color(Gdk.RGBA(0, 0, 0, 1.0))", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,19 @@
   const AMBIENT_SCENES = 6;
   const AMBIENT_NODE_CENTERS = [0.18, 0.5, 0.82];
   const AMBIENT_NODE_PALETTES = [[40, 132, 170], [146, 48, 112], [77, 150, 44]];
+  const SAVER_IDLE_MS = 5 * 60 * 1000;
+  // The DP-0101 TFT is specified at a relatively slow 50 ms response time.
+  // A 3.2 s, 48 px sweep gives every 280 px panel row roughly 0.47 s at
+  // exact black (more than nine response-time constants), then stays out of
+  // the way for 30 minutes. Response time only bounds visible transition; the
+  // cadence is a low-disruption heuristic, not an OLED pixel-refresh cycle.
+  const SAVER_BAND_PX = 48;
+  const SAVER_REPEAT_MS = 30 * 60 * 1000;
+  const SAVER_SWEEP_MS = 3200;
+  const VOICE_PROGRESS_ORDER = ["heard_name", "asr", "openclaw", "tts", "play"];
+  const VOICE_PROGRESS_LABELS = {
+    heard_name: "HEARD NAME", asr: "ASR", openclaw: "CLAW", tts: "TTS", play: "PLAY",
+  };
   const METRICS = {
     cpu: { field: "cpu_percent", label: "CPU utilization", temperatureField: "cpu_temperature_c", temperatureId: "cpu-temp", temperatureLabel: "CPU temperature" },
     gpu: { field: "gpu_percent", label: "GPU utilization", temperatureField: "gpu_temperature_c", temperatureId: "gpu-temp", temperatureLabel: "GPU temperature" },
@@ -25,10 +38,16 @@
   let voicePollTimer = null;
   let ambientTimer = null;
   let lastPayload = null;
-  let voiceLastSuccessMs = null;
   let ambientSurface = null;
   let ambientMotionQuery = null;
   let ambientLifecycleBound = false;
+  let saverTimer = null;
+  let saverFinishTimer = null;
+  let saverLastAttentionMs = null;
+  let saverLastSweepMs = null;
+  let saverActive = false;
+  let saverLifecycleBound = false;
+  const saverAttentionSignatures = { cluster: null, voice: null };
 
   const byId = (id) => document.getElementById(id);
 
@@ -334,6 +353,16 @@
     };
   }
 
+  function normalizeVoiceProgressState(value) {
+    const source = safeObject(value);
+    const state = safeStatusToken(typeof value === "string" ? value : source.state);
+    if (["idle", "active", "complete", "error", "unknown"].includes(state)) return state;
+    if (["running", "processing", "thinking", "synthesizing", "playing", "checking"].includes(state)) return "active";
+    if (["ok", "done", "success", "triggered"].includes(state)) return "complete";
+    if (["failed", "down", "stopped"].includes(state)) return "error";
+    return "unknown";
+  }
+
   function normalizeVoiceStatus(raw) {
     const source = safeObject(raw);
     const overall = safeObject(source.overall);
@@ -343,6 +372,11 @@
     const lastRequest = safeObject(source.last_request);
     const lastErrorSource = safeObject(source.last_error);
     const heartbeat = safeObject(source.heartbeat);
+    const pipelineSource = safeObject(source.pipeline);
+    const pipelineSteps = safeObject(pipelineSource.steps);
+    const hasPipeline = VOICE_PROGRESS_ORDER.some((name) => (
+      Object.prototype.hasOwnProperty.call(pipelineSteps, name)
+    ));
     const tts = normalizeVoiceComponent(source.tts || stages.tts);
     const playback = normalizeVoiceComponent(stages.playback || source.playback);
     const directError = lastErrorSource.stage || lastErrorSource.error_type
@@ -371,6 +405,16 @@
       openclaw: normalizeVoiceComponent(source.openclaw || stages.openclaw),
       tts,
       playback,
+      pipeline: hasPipeline ? {
+        source: ["producer", "derived", "unavailable"].includes(safeStatusToken(pipelineSource.source))
+          ? safeStatusToken(pipelineSource.source)
+          : "unknown",
+        active: pipelineSource.active === true,
+        mode: safeStatusToken(pipelineSource.mode),
+        steps: Object.fromEntries(VOICE_PROGRESS_ORDER.map((name) => [
+          name, normalizeVoiceProgressState(pipelineSteps[name]),
+        ])),
+      } : null,
       last_error: directError ? {
         stage: safeStatusToken(lastErrorSource.stage),
         error_type: safeStatusToken(
@@ -590,55 +634,128 @@
     };
   }
 
-  function renderVoice(raw, nowMs) {
-    const model = voiceViewModel(raw, nowMs);
-    const card = byId("voice-card");
-    const setText = (element, value) => {
-      if (element.textContent !== value) element.textContent = value;
-    };
-    const setState = (element, value) => {
-      if (element.dataset.state !== value) element.dataset.state = value;
-    };
-    setState(card, model.state);
-    setState(byId("voice-state"), model.state);
-    setText(byId("voice-state"), model.stateLabel);
-    setText(byId("voice-stage"), model.stageLabel);
-    setText(byId("voice-elapsed"), model.elapsedLabel);
-    setText(byId("voice-detail"), model.detail);
-    setText(byId("voice-heartbeat"), model.heartbeatLabel);
-    setText(byId("voice-last-event"), model.lastEventLabel);
-    const error = byId("voice-error");
-    if (error.hidden !== !model.error) error.hidden = !model.error;
-    setText(error, model.error || "");
-    for (const [name, step] of Object.entries(model.steps)) {
-      setState(byId(`voice-${name}-step`), step.state);
-      setText(byId(`voice-${name}-state`), step.label);
+  function voiceProgressModel(raw, nowMs) {
+    const view = voiceViewModel(raw, nowMs);
+    const voice = view.voice;
+    if (voice.pipeline) {
+      const explicit = voice.pipeline;
+      return {
+        source: explicit.source,
+        active: explicit.active,
+        mode: explicit.mode,
+        state: view.state,
+        stage: voice.stage,
+        steps: { ...explicit.steps },
+        error: view.error,
+      };
     }
-    const title = model.error || `${model.stageLabel}; ${model.detail}`;
-    if (card.title !== title) card.title = title;
-    voiceLastSuccessMs = finiteNumber(nowMs) ?? Date.now();
+
+    const steps = Object.fromEntries(VOICE_PROGRESS_ORDER.map((name) => [name, "idle"]));
+    const stageIndex = {
+      speech_detected: 0, watchword: 0, asr: 1, openclaw: 2,
+      tts_synthesis: 3, tts_playback: 4, cooldown: 4,
+    }[voice.stage];
+    if (stageIndex !== undefined) {
+      for (let index = 0; index < stageIndex; index += 1) {
+        steps[VOICE_PROGRESS_ORDER[index]] = "complete";
+      }
+      steps[VOICE_PROGRESS_ORDER[stageIndex]] = "active";
+    }
+    if (voice.stage === "asr" && voice.watchword.state !== "armed") {
+      steps.heard_name = "idle";
+    }
+
+    // Legacy payloads describe component completion even if the overall stage
+    // has already advanced. Preserve that information without carrying any
+    // transcript, response, audio, request ID, or raw error content.
+    const legacy = {
+      heard_name: view.steps.watchword,
+      asr: view.steps.asr,
+      openclaw: view.steps.openclaw,
+      tts: view.steps.tts,
+      play: view.steps.playback,
+    };
+    for (const name of VOICE_PROGRESS_ORDER) {
+      const state = legacy[name] ? legacy[name].state : "unknown";
+      if (state === "error" || state === "down") steps[name] = "error";
+      else if (state === "complete" && steps[name] !== "active") steps[name] = "complete";
+      else if (state === "active") steps[name] = "active";
+    }
+    if (view.steps.watchword.state === "armed") steps.heard_name = "complete";
+
+    const failureStep = {
+      watchword: "heard_name", wake_word: "heard_name", asr: "asr",
+      openclaw: "openclaw", tts: "tts", tts_synthesis: "tts",
+      playback: "play", tts_playback: "play",
+    }[voice.last_error && voice.last_error.stage];
+    if (failureStep) steps[failureStep] = "error";
+
+    return {
+      source: "derived",
+      active: ["busy", "armed"].includes(view.state) || Object.values(steps).includes("active"),
+      mode: view.state === "busy" ? "request" : view.state === "armed" ? "armed" : "idle",
+      state: view.state,
+      stage: voice.stage,
+      steps,
+      error: view.error,
+    };
+  }
+
+  function renderVoice(raw, nowMs) {
+    const model = voiceProgressModel(raw, nowMs);
+    const progress = byId("voice-progress");
+    const dashboard = byId("dashboard");
+    if (!progress || !dashboard) return model;
+    const setData = (element, name, value) => {
+      if (element.dataset[name] !== value) element.dataset[name] = value;
+    };
+    setData(progress, "state", model.state);
+    setData(progress, "active", model.active ? "true" : "false");
+    setData(progress, "source", model.source);
+    setData(dashboard, "voiceState", model.state);
+    setData(dashboard, "voiceStage", model.stage);
+    for (const name of VOICE_PROGRESS_ORDER) {
+      const element = byId(`voice-${name.replace("_", "-")}-step`);
+      if (element) setData(element, "state", model.steps[name]);
+    }
+    const summary = VOICE_PROGRESS_ORDER
+      .map((name) => `${VOICE_PROGRESS_LABELS[name]} ${model.steps[name]}`)
+      .join("; ");
+    const announcedState = safeStatusToken(model.state, "unknown");
+    const announcedStage = safeStatusToken(model.stage, "unknown");
+    const failureReported = Boolean(model.error)
+      || Object.values(model.steps).includes("error")
+      || ["down", "error", "stale"].includes(announcedState);
+    const ariaLabel = `Voice pipeline ${announcedState} at ${announcedStage}`
+      + `${failureReported ? "; failure reported" : ""}: ${summary}`;
+    if (progress.getAttribute("aria-label") !== ariaLabel) progress.setAttribute("aria-label", ariaLabel);
+    const title = model.error || `Voice pipeline ${model.mode}`;
+    if (progress.title !== title) progress.title = title;
+    observeVoiceSaverAttention(model, finiteNumber(nowMs) ?? Date.now());
     return model;
   }
 
-  function renderVoiceTransportError(error) {
-    const card = byId("voice-card");
-    card.dataset.state = "down";
-    byId("voice-state").dataset.state = "down";
-    byId("voice-state").textContent = "LINK DOWN";
-    byId("voice-stage").textContent = "VOICE STATUS UNREACHABLE";
-    const elapsed = voiceLastSuccessMs === null
-      ? null
-      : Math.max(0, (Date.now() - voiceLastSuccessMs) / 1000);
-    byId("voice-elapsed").textContent = formatVoiceDuration(elapsed);
-    byId("voice-detail").textContent = "CLUSTER TELEMETRY CONTINUES INDEPENDENTLY";
-    const errorOutput = byId("voice-error");
-    errorOutput.hidden = false;
-    errorOutput.textContent = `VOICE API FAILED · ${String(error && error.message ? error.message : error).slice(0, 48)}`;
-    byId("voice-heartbeat").textContent = elapsed === null ? "NO HEARTBEAT" : `LAST GOOD ${formatVoiceDuration(elapsed)}`;
-    for (const name of ["asr", "watchword", "openclaw", "tts", "playback"]) {
-      byId(`voice-${name}-step`).dataset.state = "unknown";
-      byId(`voice-${name}-state`).textContent = "—";
+  function renderVoiceTransportError(_error) {
+    const progress = byId("voice-progress");
+    const dashboard = byId("dashboard");
+    if (progress) {
+      if (progress.dataset.state !== "down") progress.dataset.state = "down";
+      if (progress.dataset.active !== "false") progress.dataset.active = "false";
+      if (progress.dataset.source !== "unavailable") progress.dataset.source = "unavailable";
+      if (progress.getAttribute("aria-label") !== "Voice pipeline status unavailable") {
+        progress.setAttribute("aria-label", "Voice pipeline status unavailable");
+      }
+      if (progress.title !== "Voice status link unavailable") progress.title = "Voice status link unavailable";
     }
+    if (dashboard) {
+      if (dashboard.dataset.voiceState !== "down") dashboard.dataset.voiceState = "down";
+      if (dashboard.dataset.voiceStage !== "unavailable") dashboard.dataset.voiceStage = "unavailable";
+    }
+    for (const name of VOICE_PROGRESS_ORDER) {
+      const element = byId(`voice-${name.replace("_", "-")}-step`);
+      if (element && element.dataset.state !== "unknown") element.dataset.state = "unknown";
+    }
+    observeSaverHealth("voice", "down:transport", Date.now());
   }
 
   function renderNodeMetric(payload, metric, slot) {
@@ -824,6 +941,7 @@
     const totalHosts = finiteNumber(payload.cluster.total_hosts) || 3;
     const derivedAvailable = payload.hosts.filter((host) => normalizeState(host.state) === "online").length;
     const availableHosts = finiteNumber(payload.cluster.available_hosts) ?? derivedAvailable;
+    observeClusterSaverAttention(state, availableHosts, payload, stale, now);
     const labels = {
       online: "CLUSTER ONLINE",
       degraded: stale ? "TELEMETRY STALE" : "CLUSTER DEGRADED",
@@ -890,6 +1008,205 @@
     byId("connection-message").textContent = `STATUS API UNAVAILABLE · ${String(error && error.message ? error.message : error).slice(0, 90)}`;
     markClusterDataStale(elapsed, "Retained values; cluster telemetry transport is unavailable.");
     document.title = "LINK LOST · Cerberus Cluster Pulse";
+    observeSaverHealth("cluster", "error:transport", Date.now());
+  }
+
+  function saverStateAt(nowMs, lastAttentionMs, attentionActive, lastSweepMs = null) {
+    if (attentionActive) return "awake";
+    const now = finiteNumber(nowMs);
+    const last = finiteNumber(lastAttentionMs);
+    if (now === null || last === null || now < last) return "awake";
+    const previousSweep = finiteNumber(lastSweepMs);
+    const firstDue = last + SAVER_IDLE_MS;
+    const repeatDue = previousSweep === null ? firstDue : previousSweep + SAVER_REPEAT_MS;
+    return now >= Math.max(firstDue, repeatDue) ? "sweep" : "awake";
+  }
+
+  function setSaverActive(active) {
+    const next = active === true;
+    const changed = saverActive !== next;
+    saverActive = next;
+    const overlay = byId("lcd-refresh-sweep");
+    const dashboard = byId("dashboard");
+    if (overlay) {
+      overlay.hidden = !next;
+      overlay.dataset.active = next ? "true" : "false";
+      overlay.setAttribute("aria-hidden", "true");
+    }
+    if (dashboard) dashboard.dataset.saverState = next ? "sweeping" : "awake";
+    if (next && ambientTimer !== null) {
+      clearTimeout(ambientTimer);
+      ambientTimer = null;
+    }
+    if (changed && !next && typeof document !== "undefined" && !document.hidden) startAmbient();
+    return next;
+  }
+
+  function evaluateSaver(nowMs) {
+    if (typeof document !== "undefined" && document.hidden) {
+      setSaverActive(false);
+      return "awake";
+    }
+    const state = saverStateAt(
+      nowMs,
+      saverLastAttentionMs,
+      false,
+      saverLastSweepMs,
+    );
+    if (state === "sweep" && !saverActive) startSaverSweep(nowMs);
+    return saverActive ? "sweep" : "awake";
+  }
+
+  function finishSaverSweep(nowMs) {
+    if (saverFinishTimer !== null) clearTimeout(saverFinishTimer);
+    saverFinishTimer = null;
+    if (typeof document !== "undefined" && document.hidden) {
+      setSaverActive(false);
+      return;
+    }
+    // Only a sweep that stayed visible through completion earns the 30-minute
+    // interval. A hidden/cancelled pass must remain due when the panel returns.
+    saverLastSweepMs = finiteNumber(nowMs) ?? Date.now();
+    setSaverActive(false);
+    scheduleSaver(nowMs);
+  }
+
+  function startSaverSweep(nowMs) {
+    if (saverActive || (typeof document !== "undefined" && document.hidden)) return false;
+    const now = finiteNumber(nowMs) ?? Date.now();
+    setSaverActive(true);
+    saverFinishTimer = setTimeout(
+      () => finishSaverSweep(Date.now()),
+      SAVER_SWEEP_MS + 100,
+    );
+    return true;
+  }
+
+  function scheduleSaver(nowMs) {
+    if (saverTimer !== null) clearTimeout(saverTimer);
+    saverTimer = null;
+    if (saverActive || (typeof document !== "undefined" && document.hidden)) return;
+    const now = finiteNumber(nowMs) ?? Date.now();
+    if (saverLastAttentionMs === null) saverLastAttentionMs = now;
+    const firstDue = saverLastAttentionMs + SAVER_IDLE_MS;
+    const repeatDue = saverLastSweepMs === null
+      ? firstDue
+      : saverLastSweepMs + SAVER_REPEAT_MS;
+    const remaining = Math.max(0, Math.max(firstDue, repeatDue) - now);
+    if (remaining === 0) {
+      startSaverSweep(now);
+      return;
+    }
+    saverTimer = setTimeout(() => {
+      saverTimer = null;
+      if (evaluateSaver(Date.now()) !== "sweep") scheduleSaver(Date.now());
+    }, remaining + 16);
+  }
+
+  function noteSaverAttention(reason, nowMs) {
+    const overlay = byId("lcd-refresh-sweep");
+    if (!overlay) return false;
+    const now = finiteNumber(nowMs) ?? Date.now();
+    saverLastAttentionMs = now;
+    const dashboard = byId("dashboard");
+    if (dashboard) dashboard.dataset.saverWake = safeStatusToken(reason, "activity");
+    if (saverFinishTimer !== null) clearTimeout(saverFinishTimer);
+    saverFinishTimer = null;
+    setSaverActive(false);
+    scheduleSaver(now);
+    return true;
+  }
+
+  function observeSaverHealth(channel, troubleSignature, nowMs) {
+    if (!Object.prototype.hasOwnProperty.call(saverAttentionSignatures, channel)) return false;
+    const next = troubleSignature === null || troubleSignature === undefined
+      ? null
+      : String(troubleSignature).slice(0, 96);
+    const previous = saverAttentionSignatures[channel];
+    saverAttentionSignatures[channel] = next;
+    // A new problem, a materially changed problem, or recovery gets one full
+    // attention window. An unchanged outage may then receive the next sweep.
+    if (saverTroubleTransition(previous, next)) {
+      return noteSaverAttention(`${channel}-${next === null ? "recovered" : "attention"}`, nowMs);
+    }
+    return false;
+  }
+
+  function saverTroubleTransition(previous, next) {
+    return previous !== next && (previous !== null || next !== null);
+  }
+
+  function observeVoiceSaverAttention(model, nowMs) {
+    const trouble = voiceTroubleSignature(model);
+    observeSaverHealth("voice", trouble, nowMs);
+    if (model.active) noteSaverAttention("voice-active", nowMs);
+  }
+
+  function voiceTroubleSignature(model) {
+    const source = safeObject(model);
+    const steps = safeObject(source.steps);
+    const errorSteps = VOICE_PROGRESS_ORDER.filter((name) => steps[name] === "error");
+    if (errorSteps.length) return `error:${errorSteps.join(",")}`;
+    return ["down", "error", "stale", "starting"].includes(source.state)
+      ? `${source.state}:${source.stage || "unknown"}`
+      : null;
+  }
+
+  function observeClusterSaverAttention(state, availableHosts, payload, stale, nowMs) {
+    const trouble = clusterTroubleSignature(state, availableHosts, payload, stale);
+    observeSaverHealth("cluster", trouble, nowMs);
+    const throughputState = String(payload.throughput.state || "").trim().toLowerCase();
+    const rate = finiteNumber(payload.throughput.tokens_per_second);
+    if (!stale && throughputState === "active" && rate !== null && rate > 0) {
+      noteSaverAttention("model-active", nowMs);
+    }
+  }
+
+  function clusterTroubleSignature(state, availableHosts, payload, stale) {
+    const normalized = safeObject(payload);
+    const hosts = Array.isArray(normalized.hosts) ? normalized.hosts : [];
+    const hostStates = NODE_SLOTS.map((slot) => {
+      const host = hosts.find((candidate) => safeObject(candidate).slot === slot);
+      return host ? normalizeState(host.state) : "unknown";
+    });
+    if (state === "online" && !stale && hostStates.every((hostState) => hostState === "online")) return null;
+    const hostFingerprint = hostStates.map((hostState, index) => `c${index + 1}=${hostState}`).join(",");
+    return `${state}:${Math.max(0, finiteNumber(availableHosts) || 0)}:${stale ? "stale" : "fresh"}:${hostFingerprint}`;
+  }
+
+  function startSaver() {
+    const overlay = byId("lcd-refresh-sweep");
+    if (!overlay) return;
+    const now = Date.now();
+    saverLastAttentionMs = now;
+    saverLastSweepMs = null;
+    setSaverActive(false);
+    if (!saverLifecycleBound && typeof document.addEventListener === "function") {
+      saverLifecycleBound = true;
+      for (const eventName of ["pointerdown", "touchstart", "keydown"]) {
+        document.addEventListener(
+          eventName,
+          () => noteSaverAttention(`local-${eventName}`, Date.now()),
+          { passive: true, capture: true },
+        );
+      }
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          if (saverTimer !== null) clearTimeout(saverTimer);
+          saverTimer = null;
+          if (saverFinishTimer !== null) clearTimeout(saverFinishTimer);
+          saverFinishTimer = null;
+          // Do not mark an off-screen or interrupted pass as completed.
+          setSaverActive(false);
+          return;
+        }
+        if (evaluateSaver(Date.now()) !== "sweep") scheduleSaver(Date.now());
+      });
+      overlay.addEventListener("animationend", () => {
+        if (saverActive) finishSaverSweep(Date.now());
+      });
+    }
+    scheduleSaver(now);
   }
 
   function ambientSceneAt(elapsedMs) {
@@ -1081,10 +1398,9 @@
     const reducedMotion = settings.reducedMotion === true;
     const frame = ambientFrameAt(nowMs, reducedMotion);
     const dashboard = byId("dashboard");
-    const voiceCard = byId("voice-card");
     const mode = settings.mode || ambientDisplayMode(
       dashboard && dashboard.dataset.connection,
-      voiceCard && voiceCard.dataset.state,
+      dashboard && dashboard.dataset.voiceState,
     );
     // Reduced-motion snapshots are frozen within each scene.
     const seconds = reducedMotion
@@ -1122,6 +1438,8 @@
 
   function startAmbient() {
     if (ambientTimer !== null) clearTimeout(ambientTimer);
+    ambientTimer = null;
+    if (saverActive) return;
     const canvas = byId("ambient-canvas");
     if (!canvas || typeof canvas.getContext !== "function") return;
     if (!ambientMotionQuery && typeof global.matchMedia === "function") {
@@ -1139,7 +1457,7 @@
     if (document.hidden) return;
     const reducedMotion = Boolean(ambientMotionQuery && ambientMotionQuery.matches);
     const tick = () => {
-      if (document.hidden) return;
+      if (document.hidden || saverActive) return;
       const now = Date.now();
       paintAmbient(canvas, now, { reducedMotion });
       const cadence = reducedMotion ? AMBIENT_SCENE_MS : AMBIENT_FRAME_MS;
@@ -1202,6 +1520,7 @@
   function start() {
     if (pollTimer !== null) clearTimeout(pollTimer);
     if (voicePollTimer !== null) clearTimeout(voicePollTimer);
+    startSaver();
     startAmbient();
     poll();
     pollVoice();
@@ -1213,6 +1532,11 @@
     MAX_HISTORY_POINTS,
     AMBIENT_SCENE_MS,
     AMBIENT_FRAME_MS,
+    SAVER_IDLE_MS,
+    SAVER_BAND_PX,
+    SAVER_REPEAT_MS,
+    SAVER_SWEEP_MS,
+    VOICE_PROGRESS_ORDER,
     finiteNumber,
     hostSlot,
     normalizeState,
@@ -1228,9 +1552,11 @@
     formatCompact,
     sampleAgeSeconds,
     normalizeVoiceStatus,
+    normalizeVoiceProgressState,
     formatVoiceDuration,
     voiceStep,
     voiceViewModel,
+    voiceProgressModel,
     renderVoice,
     renderVoiceTransportError,
     inferredClusterState,
@@ -1240,6 +1566,15 @@
     ambientDisplayMode,
     ambientPixel,
     paintAmbient,
+    saverStateAt,
+    startSaverSweep,
+    setSaverActive,
+    evaluateSaver,
+    observeSaverHealth,
+    saverTroubleTransition,
+    voiceTroubleSignature,
+    clusterTroubleSignature,
+    startSaver,
     render,
     renderTransportError,
     start,

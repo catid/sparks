@@ -44,7 +44,7 @@ body {
   min-width: 780px;
   min-height: 240px;
   overflow: hidden;
-  background: var(--bg);
+  background: #000;
   color: var(--text);
   font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -95,9 +95,112 @@ body {
 .dashboard[data-ambient-mode="degraded"] .ambient-canvas { opacity: .25; }
 .dashboard[data-ambient-mode="critical"] .ambient-canvas { opacity: .28; }
 
+/*
+ * This is pipeline telemetry painted into the dashboard background, not a
+ * fifth card. The five fixed-width washes make progress readable from left to
+ * right while remaining behind every chart and label.
+ */
+.voice-progress {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.voice-progress-step {
+  position: relative;
+  min-width: 0;
+  border-left: 1px solid rgba(var(--voice-rgb), .025);
+  background: linear-gradient(180deg, rgba(var(--voice-rgb), .012), transparent 68%);
+}
+
+.voice-progress-step:first-child { border-left: 0; }
+.voice-progress-step b,
+.voice-progress-step em {
+  position: absolute;
+  top: 1px;
+  z-index: 1;
+  color: rgba(143, 164, 182, .3);
+  font: 700 6px/6px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-style: normal;
+  letter-spacing: .08em;
+  white-space: nowrap;
+}
+.voice-progress-step b { left: 7px; color: rgba(var(--voice-rgb), .22); }
+.voice-progress-step em { left: 24px; }
+
+.voice-progress-step[data-state="complete"] {
+  border-left-color: rgba(103, 245, 139, .13);
+  background:
+    linear-gradient(180deg, rgba(103, 245, 139, .105), transparent 72%),
+    linear-gradient(90deg, rgba(103, 245, 139, .035), transparent 88%);
+  box-shadow: inset 0 3px rgba(103, 245, 139, .62);
+}
+.voice-progress-step[data-state="complete"] b,
+.voice-progress-step[data-state="complete"] em { color: rgba(103, 245, 139, .9); }
+
+.voice-progress-step[data-state="active"] {
+  border-left-color: rgba(var(--voice-rgb), .32);
+  background:
+    radial-gradient(ellipse at 50% 34%, rgba(var(--voice-rgb), .25), transparent 66%),
+    linear-gradient(180deg, rgba(var(--voice-rgb), .19), rgba(var(--voice-rgb), .025) 78%);
+  box-shadow:
+    inset 0 3px var(--voice),
+    inset 0 0 32px rgba(var(--voice-rgb), .12);
+}
+.voice-progress-step[data-state="active"] b,
+.voice-progress-step[data-state="active"] em {
+  color: var(--voice);
+  text-shadow: 0 0 7px rgba(var(--voice-rgb), .65);
+}
+
+.voice-progress-step[data-state="error"] {
+  border-left-color: rgba(255, 101, 123, .32);
+  background:
+    radial-gradient(ellipse at 50% 34%, rgba(255, 101, 123, .22), transparent 66%),
+    linear-gradient(180deg, rgba(255, 101, 123, .18), transparent 76%);
+  box-shadow: inset 0 3px var(--bad), inset 0 0 30px rgba(255, 101, 123, .1);
+}
+.voice-progress-step[data-state="error"] b,
+.voice-progress-step[data-state="error"] em { color: var(--bad); }
+
+.voice-progress[data-state="down"] .voice-progress-step,
+.voice-progress[data-state="stale"] .voice-progress-step {
+  border-left-color: rgba(255, 101, 123, .18);
+  background: linear-gradient(180deg, rgba(255, 101, 123, .115), transparent 76%);
+  box-shadow: inset 0 3px rgba(255, 101, 123, .36);
+}
+.voice-progress[data-state="stale"] .voice-progress-step {
+  border-left-color: rgba(255, 209, 102, .18);
+  background: linear-gradient(180deg, rgba(255, 209, 102, .1), transparent 76%);
+  box-shadow: inset 0 3px rgba(255, 209, 102, .34);
+}
+.voice-progress[data-state="down"] .voice-progress-step b,
+.voice-progress[data-state="down"] .voice-progress-step em { color: rgba(255, 101, 123, .8); }
+.voice-progress[data-state="stale"] .voice-progress-step b,
+.voice-progress[data-state="stale"] .voice-progress-step em { color: rgba(255, 209, 102, .8); }
+
+.voice-progress::after {
+  position: absolute;
+  top: 1px;
+  right: 7px;
+  color: var(--bad);
+  font: 750 6px/6px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: .09em;
+}
+.voice-progress[data-state="down"]::after { content: "VOICE LINK DOWN"; }
+.voice-progress[data-state="stale"]::after { content: "VOICE STATUS STALE"; color: var(--warn); }
+.voice-progress[data-state="error"]::after { content: "VOICE ERROR"; }
+.voice-progress[data-state="starting"]::after { content: "VOICE STARTING"; color: var(--warn); }
+
 .topbar,
 .main-grid,
 .status-strip {
+  position: relative;
+  z-index: 2;
   transform: translate(var(--burnin-x), var(--burnin-y));
 }
 
@@ -205,7 +308,7 @@ body {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, .92fr) minmax(0, 1.16fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 7px;
 }
 
@@ -236,11 +339,6 @@ body {
 .metric-card--gpu { --accent: var(--gpu); --accent-rgb: var(--gpu-rgb); }
 .metric-card--ram { --accent: var(--ram); --accent-rgb: var(--ram-rgb); }
 .metric-card--tokens { --accent: var(--tokens); --accent-rgb: var(--tokens-rgb); grid-template-rows: 19px 21px 40px minmax(0, 1fr) 14px; }
-.metric-card--voice {
-  --accent: var(--voice);
-  --accent-rgb: var(--voice-rgb);
-  grid-template-rows: 19px 41px 32px minmax(0, 1fr) 14px;
-}
 .metric-card--tokens[data-throughput-state="warming"],
 .metric-card--tokens[data-throughput-state="stale"] { --accent: var(--warn); --accent-rgb: 255, 209, 102; }
 .metric-card--tokens[data-throughput-state="down"] {
@@ -248,18 +346,6 @@ body {
   --accent-rgb: 255, 101, 123;
   border-color: rgba(255, 101, 123, .58);
 }
-.metric-card--voice[data-state="stale"],
-.metric-card--voice[data-state="starting"] {
-  --accent: var(--warn);
-  --accent-rgb: 255, 209, 102;
-}
-.metric-card--voice[data-state="down"],
-.metric-card--voice[data-state="error"] {
-  --accent: var(--bad);
-  --accent-rgb: 255, 101, 123;
-  border-color: rgba(255, 101, 123, .58);
-}
-
 .metric-heading {
   display: flex;
   align-items: start;
@@ -278,14 +364,6 @@ body {
 #tokens-state[data-state="warming"],
 #tokens-state[data-state="stale"] { color: var(--warn); }
 #tokens-state[data-state="down"] { color: var(--bad); }
-#voice-state[data-state="ready"] { color: var(--ok); }
-#voice-state[data-state="busy"] { color: var(--voice); }
-#voice-state[data-state="armed"],
-#voice-state[data-state="starting"],
-#voice-state[data-state="stale"] { color: var(--warn); }
-#voice-state[data-state="down"],
-#voice-state[data-state="error"] { color: var(--bad); }
-
 .trace-stack {
   min-width: 0;
   min-height: 0;
@@ -450,117 +528,6 @@ body {
   letter-spacing: .04em;
 }
 
-.voice-pipeline {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 3px;
-  align-items: stretch;
-  padding: 3px 0 4px;
-  border-top: 1px solid rgba(55, 76, 93, .45);
-  border-bottom: 1px solid rgba(55, 76, 93, .45);
-}
-
-.voice-step {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 5px minmax(0, 1fr);
-  grid-template-rows: 1fr 1fr;
-  align-items: center;
-  column-gap: 3px;
-  padding: 3px 3px 2px;
-  border: 1px solid rgba(48, 70, 86, .75);
-  border-radius: 3px;
-  background: rgba(4, 10, 15, .7);
-  color: var(--faint);
-  font: 650 6px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  letter-spacing: .025em;
-  overflow: hidden;
-}
-
-.voice-step i {
-  grid-row: 1 / 3;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: currentColor;
-}
-.voice-step b,
-.voice-step small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.voice-step b { color: var(--text); font: inherit; letter-spacing: .07em; }
-.voice-step small { color: inherit; font: inherit; }
-.voice-step[data-state="active"] {
-  border-color: rgba(var(--voice-rgb), .65);
-  background: rgba(var(--voice-rgb), .09);
-  color: var(--voice);
-  box-shadow: inset 0 0 8px rgba(var(--voice-rgb), .08);
-}
-.voice-step[data-state="armed"] { border-color: rgba(255, 209, 102, .55); color: var(--warn); }
-.voice-step[data-state="complete"] { color: var(--ok); }
-.voice-step[data-state="error"],
-.voice-step[data-state="down"] { border-color: rgba(255, 101, 123, .55); color: var(--bad); }
-.voice-step[data-state="unknown"] { opacity: .48; }
-
-.voice-focus {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  border-bottom: 1px solid rgba(55, 76, 93, .3);
-  font-variant-numeric: tabular-nums;
-}
-.voice-focus strong {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  letter-spacing: .04em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.voice-focus output {
-  flex: 0 0 auto;
-  color: var(--accent);
-  font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-
-.voice-diagnostics {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 5px;
-  overflow: hidden;
-}
-.voice-diagnostics p {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font: 650 7px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  letter-spacing: .035em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-#voice-error {
-  padding: 3px 4px;
-  border-left: 2px solid var(--bad);
-  background: rgba(255, 101, 123, .09);
-  color: var(--bad);
-}
-#voice-error[hidden] { display: none; }
-.metric-card--voice[data-state="stale"] #voice-detail,
-.metric-card--voice[data-state="starting"] #voice-detail { color: var(--warn); }
-.metric-card--voice[data-state="down"] #voice-detail,
-.metric-card--voice[data-state="error"] #voice-detail { color: var(--bad); }
-
 .status-strip {
   min-width: 0;
   display: flex;
@@ -607,12 +574,44 @@ body {
   50% { opacity: 1; }
 }
 
-@keyframes voice-active {
-  0%, 100% { opacity: .45; }
-  50% { opacity: 1; }
+/*
+ * DP-0101 TFT maintenance sweep. The 48 px band crosses the 280 px panel in
+ * 3.2 s, holding each row at exact black for roughly 0.47 s (>9x the panel's
+ * specified 50 ms transition time). It runs only after five quiet minutes and
+ * then at most once per 30 minutes; the ordinary dashboard stays visible. The
+ * panel vendor does not specify a retention-recovery dose or interval.
+ */
+@keyframes lcd-refresh-sweep {
+  from { transform: translate3d(0, -100%, 0); }
+  to { transform: translate3d(0, 100vh, 0); }
 }
 
-.voice-step[data-state="active"] i { animation: voice-active 1s ease-in-out infinite; }
+.lcd-refresh-sweep[hidden] { display: none; }
+.lcd-refresh-sweep:not([hidden]) {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 2147483647;
+  display: block;
+  width: 100vw;
+  height: 48px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background-color: #000 !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  color: #000 !important;
+  opacity: 1 !important;
+  filter: none !important;
+  mix-blend-mode: normal !important;
+  animation: lcd-refresh-sweep 3.2s linear both;
+  transition: none !important;
+  will-change: transform;
+  pointer-events: none;
+}
+.lcd-refresh-sweep::before,
+.lcd-refresh-sweep::after { content: none !important; }
 
 @media (max-width: 1020px) {
   body { min-width: 0; overflow: auto; }
@@ -633,7 +632,6 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .status-dot--checking { animation: none; }
-  .voice-step[data-state="active"] i { animation: none; }
   .topbar,
   .main-grid,
   .status-strip { transition: none; }

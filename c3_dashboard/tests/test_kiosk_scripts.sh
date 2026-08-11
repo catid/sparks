@@ -12,7 +12,7 @@ runtime_home="${test_root}/runtime"
 command_log="${test_root}/commands.log"
 mkdir -p "${fake_bin}" "${runtime_home}"
 for command_name in \
-  Xorg mcookie startx xauth xinit xrandr xset dbus-run-session python3 sleep; do
+  Xorg mcookie startx xauth xinit xrandr xset xsetroot dbus-run-session python3 sleep; do
   ln -s "${fixture}" "${fake_bin}/${command_name}"
 done
 
@@ -27,7 +27,7 @@ sed "s|@HOME@|${HOME}|g" \
 "${dashboard_dir}/scripts/launch-kiosk.sh"
 grep -Eq '^python3 .*kiosk.py .*--check .*--url .*127.0.0.1:9763/' \
   "${command_log}"
-grep -Eq '^startx .*kiosk-session.sh -- .*/Xorg :0 vt7 -keeptty -nolisten tcp -noreset$' \
+grep -Eq '^startx .*kiosk-session.sh -- .*/Xorg :0 vt7 -keeptty -br -nolisten tcp -noreset$' \
   "${command_log}"
 grep -Fq "STARTX_ENV HOME=${runtime_home} XDG_RUNTIME_DIR=${runtime_home}" \
   "${command_log}"
@@ -49,7 +49,7 @@ ln -sfn "${fixture}" "${fake_bin}/startx"
 : >"${command_log}"
 C3_KIOSK_DISPLAY=:9 C3_KIOSK_VT=vt9 \
   "${dashboard_dir}/scripts/launch-kiosk.sh"
-grep -Eq '^startx .*kiosk-session.sh -- .*/Xorg :0 vt7 -keeptty -nolisten tcp -noreset$' \
+grep -Eq '^startx .*kiosk-session.sh -- .*/Xorg :0 vt7 -keeptty -br -nolisten tcp -noreset$' \
   "${command_log}"
 
 : >"${command_log}"
@@ -57,6 +57,7 @@ C3_TEST_XRANDR_STATE=connected \
   "${dashboard_dir}/scripts/kiosk-session.sh"
 grep -Fq 'xrandr --output TV-0 --mode 1424x280 --pos 0x0 --primary --fb 1424x280' \
   "${command_log}"
+grep -Fq 'xsetroot -solid black' "${command_log}"
 grep -Fq 'xset s off' "${command_log}"
 grep -Eq '^dbus-run-session -- python3 .*kiosk.py --url .*127.0.0.1:9763/ --size 1424x280 --retry-seconds 5$' \
   "${command_log}"

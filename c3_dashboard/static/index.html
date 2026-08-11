@@ -8,8 +8,15 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div id="dashboard" class="dashboard" data-connection="connecting" data-ambient-mode="degraded" data-ambient-phase="0" data-ambient-scene="0">
+  <div id="dashboard" class="dashboard" data-connection="connecting" data-voice-state="unknown" data-voice-stage="unknown" data-saver-state="awake" data-ambient-mode="degraded" data-ambient-phase="0" data-ambient-scene="0">
     <canvas id="ambient-canvas" class="ambient-canvas" width="178" height="35" aria-hidden="true"></canvas>
+    <div id="voice-progress" class="voice-progress" data-state="unknown" data-active="false" role="status" aria-live="polite" aria-label="Voice pipeline waiting">
+      <span id="voice-heard-name-step" class="voice-progress-step" data-state="idle"><b>01</b><em>HEARD NAME</em></span>
+      <span id="voice-asr-step" class="voice-progress-step" data-state="idle"><b>02</b><em>ASR</em></span>
+      <span id="voice-openclaw-step" class="voice-progress-step" data-state="idle"><b>03</b><em>CLAW</em></span>
+      <span id="voice-tts-step" class="voice-progress-step" data-state="idle"><b>04</b><em>TTS</em></span>
+      <span id="voice-play-step" class="voice-progress-step" data-state="idle"><b>05</b><em>PLAY</em></span>
+    </div>
 
     <header class="topbar">
       <div class="brand" aria-label="Cerberus three-node cluster">
@@ -226,31 +233,6 @@
         </footer>
       </article>
 
-      <article id="voice-card" class="metric-card metric-card--voice" data-metric="voice" data-state="waiting">
-        <header class="metric-heading">
-          <span><i aria-hidden="true"></i>VOICE AGENT</span>
-          <small id="voice-state">WAITING</small>
-        </header>
-        <div class="voice-pipeline" role="list" aria-label="Cerberus voice request pipeline">
-          <span id="voice-asr-step" class="voice-step" data-state="unknown" role="listitem"><i aria-hidden="true"></i><b>ASR</b><small id="voice-asr-state">—</small></span>
-          <span id="voice-watchword-step" class="voice-step" data-state="unknown" role="listitem"><i aria-hidden="true"></i><b>WAKE</b><small id="voice-watchword-state">—</small></span>
-          <span id="voice-openclaw-step" class="voice-step" data-state="unknown" role="listitem"><i aria-hidden="true"></i><b>CLAW</b><small id="voice-openclaw-state">—</small></span>
-          <span id="voice-tts-step" class="voice-step" data-state="unknown" role="listitem"><i aria-hidden="true"></i><b>TTS</b><small id="voice-tts-state">—</small></span>
-          <span id="voice-playback-step" class="voice-step" data-state="unknown" role="listitem"><i aria-hidden="true"></i><b>PLAY</b><small id="voice-playback-state">—</small></span>
-        </div>
-        <div class="voice-focus" role="status" aria-live="polite">
-          <strong id="voice-stage">STATUS WAITING</strong>
-          <output id="voice-elapsed" aria-label="Current voice stage duration">—</output>
-        </div>
-        <div class="voice-diagnostics">
-          <p id="voice-detail">Waiting for Cerberus voice heartbeat…</p>
-          <p id="voice-error" aria-live="assertive" hidden></p>
-        </div>
-        <footer>
-          <span id="voice-heartbeat">NO HEARTBEAT</span>
-          <span id="voice-last-event">NO TRIGGER</span>
-        </footer>
-      </article>
     </main>
 
     <footer class="status-strip">
@@ -263,6 +245,7 @@
       </div>
     </footer>
   </div>
+  <div id="lcd-refresh-sweep" class="lcd-refresh-sweep" hidden aria-hidden="true"></div>
   <script src="/app.js" defer></script>
 </body>
 </html>

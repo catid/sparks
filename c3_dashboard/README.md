@@ -14,18 +14,29 @@ cluster-wide output counter at the C1 API, so that panel is labelled as a
 C1+C2 API aggregate and never invents per-node token attribution.
 The API retains only the 60 samples the screen can display, keeping the rolling
 window to five minutes without shipping an unused hour of history every poll.
-The fifth panel follows the local Cerberus voice request through ASR,
-watchword listening/arming/classification, OpenClaw thinking, TTS synthesis, playback, and
-cooldown. It shows stage timing, TTS chunk progress, heartbeat freshness, and
-the sanitized type/stage of the last failure.
+A five-segment background ribbon follows the local Cerberus voice request from
+left to right through heard-name detection, ASR, OpenClaw, TTS, and playback.
+This keeps the four telemetry cards available while making the active stage and
+completed stages visible across the whole display.
 
 The fixed 1424x280 view includes a dependency-free, 178x35 pixel canvas behind
-the telemetry. Four inexpensive software-rendered scenes rotate every 30
-seconds at eight frames per second, and the foreground drifts by one pixel at
+the telemetry. Six inexpensive software-rendered scenes rotate every 30
+seconds at one frame per second, and the foreground drifts by one pixel at
 each scene change. This varies otherwise static pixels without moving the
 current values far enough to hurt glanceability. Reduced-motion clients render
 only one frame per 30-second scene. No image, font, shader, or other asset is
 downloaded.
+
+The ambient art is separate from the TFT-maintenance sweep. After five quiet
+minutes a topmost, exact-black 48-pixel band crosses the 1424x280 panel in 3.2
+seconds, then repeats no more than once per 30 minutes. At that speed every row
+stays black for about 0.47 seconds—over nine times the DP-0101's specified 50
+ms response time. Voice/model activity, changed health, recovery, or local
+input postpones the next pass. The dashboard remains visible outside the band.
+DeskPi publishes no image-retention recovery duration or cadence for this
+panel. The response-time figure is used only to ensure the band is not moving
+faster than the liquid crystals can visibly transition; the 30-minute cadence
+is a deliberately low-disruption heuristic, not a vendor pixel-refresh cycle.
 
 The on-screen deployment has two services:
 
@@ -56,7 +67,7 @@ prevents Xorg or WebKit processes from surviving a service restart.
 
 A read-only audit on Cerberus C3 found Ubuntu 24.04, systemd 255, Xorg 21.1.12,
 GTK 4.14.5, and WebKitGTK 2.52.3. The required `startx`, `xinit`, `xauth`,
-`mcookie`, `xrandr`, `xset`, `dbus-run-session`, Python GI, GTK4, and WebKit
+`mcookie`, `xrandr`, `xset`, `xsetroot`, `dbus-run-session`, Python GI, GTK4, and WebKit
 6.0 components are already installed. No package installation is part of this
 deployment.
 
@@ -139,6 +150,10 @@ it launches rootless Xorg with TCP listening disabled, discovers a connected
 XRandR output, disables other active outputs, and requires the selected output
 to accept 1424×280 before WebKit starts. X display `:0` and VT 7 are fixed so
 the Xorg VT always matches systemd's controlling TTY and PAM/logind session.
+Xorg starts with a black root window, the session reapplies an exact black root
+color after setting the native mode, and WebKit's own underlay is exact black.
+Consequently startup, navigation, and renderer-recovery gaps do not expose a
+bright frame around the page or a maintenance sweep.
 
 `startx` creates a fresh MIT-MAGIC-COOKIE, keeps the client authority in the
 mode-0700 runtime home and the server authority in the service's private temp
@@ -165,6 +180,10 @@ unit retains its systemd restrictions and the kiosk cannot navigate away from
 the exact loopback dashboard origin. GTK and WebKit use software rendering for
 this small page: on bare GB10 Xorg, accelerated WebKit surfaces can remain
 white without a compositor even while the page is loaded and polling.
+X11 blanking and DPMS intentionally remain disabled. The in-page maintenance
+sweep can run while local voice and cluster polling continues; a DPMS-off HDMI
+panel would require a second privileged wake controller and may show a
+vendor-specific no-signal screen.
 
 ## Operations
 
@@ -177,6 +196,24 @@ journalctl -u dgx-spark-c3-dashboard.service -u dgx-spark-c3-kiosk.service \
 curl -fsS http://127.0.0.1:9763/api/status | jq .
 curl -fsS http://127.0.0.1:9763/api/voice-status | jq .
 ```
+
+During a quiet period, verify the sweep at the final X framebuffer rather than
+trusting its CSS or DOM state. The verifier watches a small top-row probe until
+the band arrives, then succeeds only after every one of the 280 complete rows
+has remained exact RGB black for at least three samples spanning 100 ms:
+
+```bash
+sudo -u catid c3_dashboard/scripts/verify-black-sweep.py \
+  --display :0 \
+  --xauthority /run/dgx-spark-c3-kiosk/.Xauthority \
+  --wait-seconds 330
+```
+
+The check samples the real X root, not the DOM. It verifies digital scanout
+content; an LCD still has uniform backlight glow while the requested row is
+black. This TFT has no OLED-style pixel-refresh cycle: the sweep and existing
+nine-position one-pixel nudge simply avoid leaving identical liquid-crystal
+states and fixed chart edges in place indefinitely.
 
 `systemctl status` can show zero kiosk tasks and only the small PAM handler's
 memory even while the screen is active: logind accounts Xorg and WebKit in the
@@ -191,7 +228,7 @@ KiB, accepts only schema version 1 for `cerberus-voice`, and exposes only a
 fixed operational-field allowlist. Transcripts, requests, replies, API tokens,
 and raw exception messages are neither read into nor returned by the dashboard.
 Three missed two-second heartbeats mark the voice state stale after six seconds.
-The voice panel polls its dedicated endpoint every 750 ms, independently of
+The background voice progress ribbon polls its dedicated endpoint every 750 ms, independently of
 the five-second SSH/metrics collector. A voice heartbeat or endpoint failure
 therefore cannot mark the cluster telemetry offline.
 

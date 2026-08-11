@@ -104,6 +104,7 @@ function voiceStatus({
   lastError = null,
   chunkIndex = 0,
   chunkTotal = 0,
+  pipeline = null,
 } = {}) {
   return {
     schema: 1,
@@ -141,6 +142,7 @@ function voiceStatus({
       chunk_index: chunkIndex,
       chunk_total: chunkTotal,
     },
+    ...(pipeline ? { pipeline } : {}),
     last_error: lastError,
   };
 }
@@ -269,14 +271,13 @@ test("ambient painter reuses its image buffer and follows live health state", ()
   };
   const canvas = { width: 12, height: 4, getContext() { return context2d; } };
   const dashboard = {
-    dataset: { connection: "online" },
+    dataset: { connection: "online", voiceState: "busy" },
     style: { values: {}, setProperty(key, value) { this.values[key] = value; } },
   };
-  const voice = { dataset: { state: "busy" } };
   context.document = {
     hidden: false,
     getElementById(id) {
-      return { dashboard, "voice-card": voice }[id] || null;
+      return { dashboard }[id] || null;
     },
   };
 
@@ -305,7 +306,21 @@ test("throughput state distinguishes idle zero from warming, stale, and down", (
 test("voice status normalization drops content and preserves diagnostic metadata", () => {
   assert.equal(ui.VOICE_POLL_MS, 750);
   const normalized = ui.normalizeVoiceStatus({
-    ...voiceStatus({ state: "busy", stage: "openclaw", openclaw: "thinking" }),
+    ...voiceStatus({
+      state: "busy",
+      stage: "openclaw",
+      openclaw: "thinking",
+      pipeline: {
+        source: "producer",
+        active: true,
+        mode: "request",
+        request_id: "must-not-survive",
+        steps: {
+          heard_name: "complete", asr: "complete", openclaw: "active",
+          tts: "idle", play: "idle", private_step: "secret",
+        },
+      },
+    }),
     transcript: "private words",
     response: "private answer",
     openclaw_token: "private token",
@@ -314,7 +329,68 @@ test("voice status normalization drops content and preserves diagnostic metadata
   assert.equal(normalized.device, "Cerberus");
   assert.equal(normalized.stage, "openclaw");
   assert.equal(normalized.openclaw.state, "thinking");
+  assert.equal(normalized.pipeline.source, "producer");
+  assert.deepEqual(
+    { ...normalized.pipeline.steps },
+    { heard_name: "complete", asr: "complete", openclaw: "active", tts: "idle", play: "idle" },
+  );
   assert.doesNotMatch(JSON.stringify(normalized), /private/);
+  assert.doesNotMatch(JSON.stringify(normalized), /request_id|must-not-survive|secret/);
+  const unknownSource = ui.normalizeVoiceStatus(voiceStatus({
+    pipeline: {
+      source: "attacker-controlled-label",
+      active: false,
+      mode: "idle",
+      steps: { heard_name: "idle", asr: "idle", openclaw: "idle", tts: "idle", play: "idle" },
+    },
+  }));
+  assert.equal(unknownSource.pipeline.source, "unknown");
+  assert.doesNotMatch(JSON.stringify(unknownSource), /attacker/);
+});
+
+test("voice background progress is ordered and prefers the producer contract", () => {
+  assert.deepEqual(Array.from(ui.VOICE_PROGRESS_ORDER), ["heard_name", "asr", "openclaw", "tts", "play"]);
+  const explicit = ui.voiceProgressModel(voiceStatus({
+    state: "busy",
+    stage: "openclaw",
+    pipeline: {
+      source: "producer",
+      active: true,
+      mode: "request",
+      steps: {
+        heard_name: "complete", asr: "complete", openclaw: "active",
+        tts: "idle", play: "idle",
+      },
+    },
+  }), Date.parse("2026-08-10T18:30:05Z"));
+  assert.equal(explicit.source, "producer");
+  assert.equal(explicit.active, true);
+  assert.deepEqual(
+    Array.from(ui.VOICE_PROGRESS_ORDER, (name) => explicit.steps[name]),
+    ["complete", "complete", "active", "idle", "idle"],
+  );
+
+  const legacyPlayback = ui.voiceProgressModel(voiceStatus({
+    state: "busy", stage: "tts_playback", watchword: "triggered",
+    asr: "ok", openclaw: "ok", tts: "playing",
+  }), Date.parse("2026-08-10T18:30:05Z"));
+  assert.equal(legacyPlayback.source, "derived");
+  assert.deepEqual(
+    Array.from(ui.VOICE_PROGRESS_ORDER, (name) => legacyPlayback.steps[name]),
+    ["complete", "complete", "complete", "complete", "active"],
+  );
+
+  const persistentError = {
+    state: "ready", stage: "listening",
+    steps: { heard_name: "complete", asr: "error", openclaw: "idle", tts: "idle", play: "idle" },
+  };
+  assert.equal(ui.voiceTroubleSignature(persistentError), "error:asr");
+  assert.equal(ui.voiceTroubleSignature({ ...persistentError, heartbeat: 999 }), "error:asr");
+  assert.equal(ui.voiceTroubleSignature({
+    ...persistentError,
+    steps: { ...persistentError.steps, asr: "complete", tts: "error" },
+  }), "error:tts");
+  assert.equal(ui.voiceTroubleSignature({ ...persistentError, steps: {} }), null);
 });
 
 test("voice view model covers every live pipeline stage and failure mode", () => {
@@ -420,17 +496,13 @@ function fakeElement() {
     title: "",
     attributes: {},
     setAttribute(name, value) { this.attributes[name] = String(value); },
+    getAttribute(name) { return this.attributes[name] ?? null; },
   };
 }
 
 function installVoiceDom() {
-  const ids = [
-    "voice-card", "voice-state", "voice-stage", "voice-elapsed", "voice-detail",
-    "voice-error", "voice-heartbeat", "voice-last-event",
-  ];
-  for (const stage of ["asr", "watchword", "openclaw", "tts", "playback"]) {
-    ids.push(`voice-${stage}-step`, `voice-${stage}-state`);
-  }
+  const ids = ["dashboard", "voice-progress"];
+  for (const stage of ["heard-name", "asr", "openclaw", "tts", "play"]) ids.push(`voice-${stage}-step`);
   const elements = Object.fromEntries(ids.map((id) => [id, fakeElement()]));
   context.document = {
     title: "",
@@ -440,41 +512,146 @@ function installVoiceDom() {
   return elements;
 }
 
-test("voice renderer exposes stage, chunk progress, and last failed stage", () => {
+test("voice renderer paints the five background bands without a subdashboard", () => {
   const elements = installVoiceDom();
-  ui.renderVoice(voiceStatus({
+  let ariaWrites = 0;
+  const originalSetAttribute = elements["voice-progress"].setAttribute;
+  elements["voice-progress"].setAttribute = function setAttribute(name, value) {
+    if (name === "aria-label") ariaWrites += 1;
+    originalSetAttribute.call(this, name, value);
+  };
+  const payload = voiceStatus({
     state: "busy",
     stage: "tts_playback",
-    watchword: "triggered",
-    asr: "ok",
-    openclaw: "ok",
-    tts: "playing",
-    chunkIndex: 2,
-    chunkTotal: 4,
-    lastError: { stage: "asr", error_type: "timeout", at: "2026-08-10T18:29:00Z" },
-  }), Date.parse("2026-08-10T18:30:05Z"));
+    pipeline: {
+      source: "producer",
+      active: true,
+      mode: "responding",
+      steps: {
+        heard_name: "complete", asr: "complete", openclaw: "complete",
+        tts: "complete", play: "active",
+      },
+    },
+  });
+  ui.renderVoice(payload, Date.parse("2026-08-10T18:30:05Z"));
+  ui.renderVoice(payload, Date.parse("2026-08-10T18:30:06Z"));
 
-  assert.equal(elements["voice-card"].dataset.state, "busy");
-  assert.equal(elements["voice-stage"].textContent, "PLAYING RESPONSE");
-  assert.match(elements["voice-detail"].textContent, /CHUNK 2\/4/);
+  assert.equal(elements["voice-progress"].dataset.state, "busy");
+  assert.equal(elements["voice-progress"].dataset.active, "true");
+  assert.equal(elements["voice-progress"].dataset.source, "producer");
+  assert.equal(elements.dashboard.dataset.voiceState, "busy");
+  assert.equal(elements.dashboard.dataset.voiceStage, "tts_playback");
+  assert.equal(elements["voice-heard-name-step"].dataset.state, "complete");
   assert.equal(elements["voice-tts-step"].dataset.state, "complete");
-  assert.equal(elements["voice-tts-state"].textContent, "OK");
-  assert.equal(elements["voice-playback-step"].dataset.state, "active");
-  assert.equal(elements["voice-playback-state"].textContent, "PLAY");
-  assert.equal(elements["voice-error"].hidden, false);
-  assert.match(elements["voice-error"].textContent, /ASR · TIMEOUT/);
+  assert.equal(elements["voice-play-step"].dataset.state, "active");
+  assert.match(elements["voice-progress"].attributes["aria-label"], /^Voice pipeline busy at tts_playback: HEARD NAME complete.*ASR complete.*CLAW complete.*TTS complete.*PLAY active/);
+  assert.equal(ariaWrites, 1, "unchanged 750 ms polls must not repeat live-region announcements");
 });
 
-test("voice transport failure does not touch cluster status elements", () => {
+test("voice transport failure clears progress without touching cluster status", () => {
   const elements = installVoiceDom();
   const untouchedCluster = fakeElement();
   untouchedCluster.textContent = "CLUSTER ONLINE";
   elements["cluster-state"] = untouchedCluster;
   ui.renderVoiceTransportError(new Error("connection refused"));
-  assert.equal(elements["voice-card"].dataset.state, "down");
-  assert.equal(elements["voice-state"].textContent, "LINK DOWN");
-  assert.equal(elements["voice-playback-step"].dataset.state, "unknown");
+  assert.equal(elements["voice-progress"].dataset.state, "down");
+  assert.equal(elements["voice-progress"].dataset.active, "false");
+  assert.equal(elements["voice-progress"].dataset.source, "unavailable");
+  assert.equal(elements["voice-play-step"].dataset.state, "unknown");
+  assert.equal(elements.dashboard.dataset.voiceState, "down");
   assert.equal(elements["cluster-state"].textContent, "CLUSTER ONLINE");
+});
+
+test("voice live region announces safe stale and failure state without error content", () => {
+  const ids = ["dashboard", "voice-progress"];
+  for (const name of ui.VOICE_PROGRESS_ORDER) ids.push(`voice-${name.replace("_", "-")}-step`);
+  const elements = Object.fromEntries(ids.map((id) => [id, fakeElement()]));
+  context.document = { getElementById(id) { return elements[id] || null; } };
+  const privateError = "PRIVATE transcript and upstream response";
+
+  ui.renderVoice({
+    overall: { state: "ready", stage: "listening" },
+    status_error: "stale",
+    last_error: { stage: "asr", type: "TimeoutError", message: privateError },
+    pipeline: {
+      source: "producer", active: false, mode: "error",
+      steps: { heard_name: "complete", asr: "error", openclaw: "complete", tts: "complete", play: "complete" },
+    },
+  }, Date.now());
+
+  const announcement = elements["voice-progress"].attributes["aria-label"];
+  assert.match(announcement, /^Voice pipeline stale at listening; failure reported:/);
+  assert.match(announcement, /ASR error/);
+  assert.doesNotMatch(announcement, /PRIVATE|transcript|upstream|response|TimeoutError/);
+});
+
+test("infrequent TFT black sweep timing and overlay state are deterministic", () => {
+  assert.equal(ui.SAVER_IDLE_MS, 300000);
+  assert.equal(ui.SAVER_BAND_PX, 48);
+  assert.equal(ui.SAVER_REPEAT_MS, 1800000);
+  assert.equal(ui.SAVER_SWEEP_MS, 3200);
+  const rowBlackSeconds = ui.SAVER_BAND_PX
+    / ((280 + ui.SAVER_BAND_PX) / (ui.SAVER_SWEEP_MS / 1000));
+  assert.ok(rowBlackSeconds > 0.45 && rowBlackSeconds < 0.5);
+  assert.ok(rowBlackSeconds / 0.05 > 9, "each row gets >9 specified panel response times");
+  assert.equal(ui.saverStateAt(1000, 1000, false), "awake");
+  assert.equal(ui.saverStateAt(300999, 1000, false), "awake");
+  assert.equal(ui.saverStateAt(301000, 1000, false), "sweep");
+  assert.equal(ui.saverStateAt(2100999, 1000, false, 301000), "awake");
+  assert.equal(ui.saverStateAt(2101000, 1000, false, 301000), "sweep");
+  assert.equal(ui.saverStateAt(999999, 1000, true), "awake");
+  assert.equal(ui.saverStateAt(900, 1000, false), "awake");
+  assert.equal(ui.saverTroubleTransition(null, null), false);
+  assert.equal(ui.saverTroubleTransition(null, "offline:0"), true, "failure onset wakes");
+  assert.equal(ui.saverTroubleTransition("offline:0", "offline:0"), false, "unchanged failure does not reset idle time");
+  assert.equal(ui.saverTroubleTransition("offline:0", "degraded:2"), true, "meaningful change wakes");
+  assert.equal(ui.saverTroubleTransition("degraded:2", null), true, "recovery wakes");
+
+  const firstEndpointFailure = ui.normalizePayload({
+    hosts: {
+      cerberus1: { state: "online" },
+      cerberus2: { state: "offline", error: "private failure one" },
+      cerberus3: { state: "online" },
+    },
+  });
+  const replacementFailure = ui.normalizePayload({
+    hosts: {
+      cerberus1: { state: "offline", error: "private failure two" },
+      cerberus2: { state: "online" },
+      cerberus3: { state: "online" },
+    },
+  });
+  const firstSignature = ui.clusterTroubleSignature("degraded", 2, firstEndpointFailure, false);
+  const replacementSignature = ui.clusterTroubleSignature("degraded", 2, replacementFailure, false);
+  assert.notEqual(firstSignature, replacementSignature, "same-count endpoint replacement must wake");
+  assert.equal(ui.saverTroubleTransition(firstSignature, replacementSignature), true);
+  assert.doesNotMatch(`${firstSignature}${replacementSignature}`, /private|failure/);
+  const allOnline = ui.normalizePayload({
+    hosts: {
+      cerberus1: { state: "online" }, cerberus2: { state: "online" }, cerberus3: { state: "online" },
+    },
+  });
+  assert.equal(ui.clusterTroubleSignature("online", 3, allOnline, false), null);
+
+  const dashboard = fakeElement();
+  const overlay = fakeElement();
+  context.document = {
+    hidden: false,
+    getElementById(id) { return { dashboard, "lcd-refresh-sweep": overlay }[id] || null; },
+    addEventListener() {},
+  };
+  ui.setSaverActive(true);
+  assert.equal(overlay.hidden, false);
+  assert.equal(overlay.dataset.active, "true");
+  assert.equal(dashboard.dataset.saverState, "sweeping");
+  ui.setSaverActive(false);
+  assert.equal(overlay.hidden, true);
+  assert.equal(overlay.dataset.active, "false");
+  assert.equal(dashboard.dataset.saverState, "awake");
+  context.document.hidden = true;
+  assert.equal(ui.startSaverSweep(301000), false, "hidden pages never count an off-screen sweep");
+  assert.equal(overlay.hidden, true);
+  context.document.hidden = false;
 });
 
 test("renderer exposes per-node values and honest API-wide token scope", () => {
@@ -577,16 +754,17 @@ test("static shell is self-contained and contains the exact rack-display regions
   assert.match(html, /href="\/style\.css"/);
   assert.match(html, /src="\/app\.js"/);
   assert.doesNotMatch(`${html}\n${css}`, /https?:\/\//);
-  assert.equal((html.match(/class="metric-card /g) || []).length, 5);
+  assert.equal((html.match(/class="metric-card /g) || []).length, 4);
   assert.equal((html.match(/class="trace-row /g) || []).length, 9);
   assert.equal((html.match(/class="host-state"/g) || []).length, 3);
   assert.match(html, /id="tokens-state"/);
-  assert.match(html, /id="voice-card"/);
-  assert.equal((html.match(/class="voice-step"/g) || []).length, 5);
-  assert.ok(html.indexOf('id="voice-asr-step"') < html.indexOf('id="voice-watchword-step"'));
-  assert.ok(html.indexOf('id="voice-watchword-step"') < html.indexOf('id="voice-openclaw-step"'));
+  assert.doesNotMatch(html, /id="voice-card"|metric-card--voice|VOICE AGENT/);
+  assert.equal((html.match(/class="voice-progress-step"/g) || []).length, 5);
+  assert.ok(html.indexOf('id="voice-heard-name-step"') < html.indexOf('id="voice-asr-step"'));
+  assert.ok(html.indexOf('id="voice-asr-step"') < html.indexOf('id="voice-openclaw-step"'));
   assert.ok(html.indexOf('id="voice-openclaw-step"') < html.indexOf('id="voice-tts-step"'));
-  assert.ok(html.indexOf('id="voice-tts-step"') < html.indexOf('id="voice-playback-step"'));
+  assert.ok(html.indexOf('id="voice-tts-step"') < html.indexOf('id="voice-play-step"'));
+  assert.match(html, />HEARD NAME</);
   assert.match(html, /id="ambient-canvas"[^>]+width="178"[^>]+height="35"/);
   assert.match(html, /data-ambient-mode="degraded"/);
   assert.equal((html.match(/TEMP °C/g) || []).length, 3);
@@ -598,8 +776,10 @@ test("static shell is self-contained and contains the exact rack-display regions
   assert.doesNotMatch(html, /CLUSTER AVG/);
   assert.match(html, /C1\+C2 MODEL AGGREGATE/);
   assert.match(html, /NOT PER NODE/);
-  assert.match(css, /grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\) minmax\(0, \.92fr\) minmax\(0, 1\.16fr\)/);
+  assert.match(css, /\.main-grid[\s\S]*?grid-template-columns:\s*repeat\(4, minmax\(0, 1fr\)\)/);
   assert.match(css, /grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\)/);
+  assert.match(css, /\.voice-progress\[data-state="down"\]::after\s*\{\s*content:\s*"VOICE LINK DOWN"/);
+  assert.match(css, /\.voice-progress\[data-state="stale"\]::after\s*\{\s*content:\s*"VOICE STATUS STALE"/);
   assert.match(css, /grid-template-columns:\s*29px 24px 7px minmax\(28px, \.85fr\) 27px 11px minmax\(28px, \.85fr\)/);
   assert.match(css, /height:\s*100dvh/);
   assert.match(css, /grid-template-rows:\s*34px minmax\(0, 1fr\) 17px/);
@@ -607,6 +787,14 @@ test("static shell is self-contained and contains the exact rack-display regions
   assert.match(css, /contain:\s*strict/);
   assert.doesNotMatch(css, /filter:\s*saturate/);
   assert.match(css, /overflow:\s*hidden/);
+  assert.match(html, /<div id="lcd-refresh-sweep" class="lcd-refresh-sweep" hidden aria-hidden="true"><\/div>/);
+  assert.match(css, /@keyframes lcd-refresh-sweep[\s\S]*?translate3d\(0, -100%, 0\)[\s\S]*?translate3d\(0, 100vh, 0\)/);
+  assert.match(css, /\.lcd-refresh-sweep:not\(\[hidden\]\)[\s\S]*?z-index:\s*2147483647/);
+  assert.match(css, /\.lcd-refresh-sweep:not\(\[hidden\]\)[\s\S]*?height:\s*48px/);
+  assert.match(css, /\.lcd-refresh-sweep:not\(\[hidden\]\)[\s\S]*?background-color:\s*#000 !important/);
+  assert.match(css, /\.lcd-refresh-sweep:not\(\[hidden\]\)[\s\S]*?animation:\s*lcd-refresh-sweep 3\.2s linear both/);
+  assert.match(css, /\.lcd-refresh-sweep:not\(\[hidden\]\)[\s\S]*?pointer-events:\s*none/);
+  assert.doesNotMatch(css, /data-saver-state="black"/);
   assert.match(html, /aria-live="polite"/);
   assert.match(html, /aria-live="assertive"/);
   assert.match(html, />CERBERUS</);

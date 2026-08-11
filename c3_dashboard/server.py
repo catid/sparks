@@ -484,6 +484,23 @@ class VoiceStatusReader:
     ACTIVE_COMPONENT_STATES = frozenset(
         {"processing", "thinking", "synthesizing", "playing", "cooldown"}
     )
+    PIPELINE_STEPS = ("heard_name", "asr", "openclaw", "tts", "play")
+    PIPELINE_STEP_STATES = frozenset(
+        {"idle", "active", "complete", "error", "unknown"}
+    )
+    PIPELINE_MODES = frozenset(
+        {
+            "idle",
+            "scanning",
+            "armed",
+            "request",
+            "responding",
+            "complete",
+            "error",
+            "stopped",
+            "unknown",
+        }
+    )
 
     def __init__(self, path: str, stale_after_seconds: float) -> None:
         candidate = Path(path)
@@ -524,6 +541,12 @@ class VoiceStatusReader:
             "asr": dict(component),
             "openclaw": dict(component),
             "tts": {**component, "chunk_index": None, "chunk_total": None},
+            "pipeline": {
+                "source": "unavailable",
+                "active": False,
+                "mode": "unknown",
+                "steps": {step: "unknown" for step in self.PIPELINE_STEPS},
+            },
             "last_error": None,
             "status_error": error_code,
         }
@@ -609,6 +632,163 @@ class VoiceStatusReader:
             )
         return result
 
+    def _derived_pipeline(
+        self,
+        *,
+        state: str,
+        stage: str,
+        wake_word: dict[str, Any],
+        tts: dict[str, Any],
+        last_error: dict[str, Any] | None,
+        status_clock: float,
+    ) -> dict[str, Any]:
+        """Best-effort compatibility for a pre-pipeline voice producer."""
+        steps = {step: "idle" for step in self.PIPELINE_STEPS}
+        active = state in {"busy", "armed"}
+        mode = "idle"
+        armed_until = timestamp_epoch(wake_word.get("armed_until"))
+        armed = armed_until is not None and armed_until > status_clock
+
+        if stage == "speech_detected":
+            mode = "scanning"
+        elif stage == "asr":
+            mode = "scanning"
+            steps["asr"] = "active"
+            if armed:
+                steps["heard_name"] = "complete"
+        elif stage == "watchword":
+            mode = "request"
+            steps["heard_name"] = "complete"
+            steps["asr"] = "complete"
+        elif stage == "openclaw":
+            mode = "request"
+            steps.update(
+                {"heard_name": "complete", "asr": "complete", "openclaw": "active"}
+            )
+        elif stage in {"tts_synthesis", "tts_playback"}:
+            mode = "responding"
+            steps.update(
+                {"heard_name": "complete", "asr": "complete", "openclaw": "complete"}
+            )
+            chunk_index = tts.get("chunk_index")
+            chunk_total = tts.get("chunk_total")
+            final_chunk = (
+                isinstance(chunk_index, int)
+                and not isinstance(chunk_index, bool)
+                and isinstance(chunk_total, int)
+                and not isinstance(chunk_total, bool)
+                and chunk_total > 0
+                and chunk_index == chunk_total
+            )
+            steps["tts"] = (
+                "complete" if stage == "tts_playback" and final_chunk else "active"
+            )
+            if stage == "tts_playback" or (
+                isinstance(chunk_index, int)
+                and not isinstance(chunk_index, bool)
+                and chunk_index > 1
+            ):
+                steps["play"] = "active"
+        elif stage == "cooldown":
+            mode = "complete"
+            steps = {step: "complete" for step in self.PIPELINE_STEPS}
+        elif stage == "stopped":
+            mode = "stopped"
+            active = False
+        elif armed:
+            mode = "armed"
+            active = True
+            steps["heard_name"] = "complete"
+
+        error_stage = last_error.get("stage") if last_error else None
+        if error_stage and stage in {"retry_wait", "listening"}:
+            mode = "armed" if armed and stage == "listening" else "error"
+            active = bool(armed and stage == "listening")
+            if error_stage in {"capture", "asr"}:
+                if armed:
+                    steps["heard_name"] = "complete"
+                steps["asr"] = "error"
+            elif error_stage == "watchword":
+                steps["asr"] = "complete"
+                steps["heard_name"] = "error"
+            elif error_stage == "openclaw":
+                steps.update(
+                    {"heard_name": "complete", "asr": "complete", "openclaw": "error"}
+                )
+            elif error_stage == "tts_synthesis":
+                steps.update(
+                    {
+                        "heard_name": "complete",
+                        "asr": "complete",
+                        "openclaw": "complete",
+                        "tts": "error",
+                    }
+                )
+            elif error_stage == "tts_playback":
+                steps.update(
+                    {
+                        "heard_name": "complete",
+                        "asr": "complete",
+                        "openclaw": "complete",
+                        "tts": "complete",
+                        "play": "error",
+                    }
+                )
+
+        return {
+            "source": "derived",
+            "active": active,
+            "mode": mode,
+            "steps": steps,
+        }
+
+    def _pipeline(
+        self,
+        raw: Any,
+        *,
+        state: str,
+        stage: str,
+        wake_word: dict[str, Any],
+        tts: dict[str, Any],
+        last_error: dict[str, Any] | None,
+        status_clock: float,
+        stale: bool,
+    ) -> dict[str, Any]:
+        source = status_mapping(raw)
+        raw_steps = status_mapping(source.get("steps"))
+        if not raw_steps:
+            result = self._derived_pipeline(
+                state=state,
+                stage=stage,
+                wake_word=wake_word,
+                tts=tts,
+                last_error=last_error,
+                status_clock=status_clock,
+            )
+        else:
+            mode = status_token(source.get("mode"))
+            if mode not in self.PIPELINE_MODES:
+                mode = "unknown"
+            steps = {}
+            for step in self.PIPELINE_STEPS:
+                step_state = status_token(raw_steps.get(step))
+                steps[step] = (
+                    step_state
+                    if step_state in self.PIPELINE_STEP_STATES
+                    else "unknown"
+                )
+            result = {
+                "source": "producer",
+                "active": source.get("active") is True,
+                "mode": mode,
+                "steps": steps,
+            }
+        if stale:
+            result["active"] = False
+            result["mode"] = "unknown"
+            result["steps"] = {step: "unknown" for step in self.PIPELINE_STEPS}
+        return result
+
     def read(self, now: float | None = None) -> dict[str, Any]:
         now = time.time() if now is None else now
         try:
@@ -669,6 +849,19 @@ class VoiceStatusReader:
 
         pid = raw.get("pid")
         sequence = raw.get("sequence")
+        asr = self._component(raw.get("asr"), status_clock)
+        openclaw = self._component(raw.get("openclaw"), status_clock)
+        tts = self._component(raw.get("tts"), status_clock, include_chunks=True)
+        pipeline = self._pipeline(
+            raw.get("pipeline"),
+            state=state,
+            stage=stage,
+            wake_word=wake_word,
+            tts=tts,
+            last_error=last_error,
+            status_clock=status_clock,
+            stale=stale,
+        )
         return {
             "schema": 1,
             "service": "cerberus-voice",
@@ -715,11 +908,10 @@ class VoiceStatusReader:
                     else None
                 ),
             },
-            "asr": self._component(raw.get("asr"), status_clock),
-            "openclaw": self._component(raw.get("openclaw"), status_clock),
-            "tts": self._component(
-                raw.get("tts"), status_clock, include_chunks=True
-            ),
+            "asr": asr,
+            "openclaw": openclaw,
+            "tts": tts,
+            "pipeline": pipeline,
             "last_error": last_error,
             "status_error": "stale" if stale else None,
         }
