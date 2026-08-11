@@ -32,39 +32,54 @@ base (including NCCL, cuBLAS, cuDNN, and CUDA Python bindings). The remaining
 three Python packages are pinned explicitly in the Dockerfile.
 
 The image build still installs Ubuntu packages from the configured archive;
-those package versions are not snapshot-pinned. Git commits and the base image
-are immutable, but a completely air-gapped, bit-for-bit build requires
-mirroring those packages and both Git repositories.
+those package versions are not snapshot-pinned. Editable-install build tooling
+and the three Python wheels are version-pinned but not index/hash-pinned. The
+local model check trusts its `.pinned-revision` marker rather than hashing every
+checkpoint/config file. Git commits and the base image are immutable, but a
+bit-for-bit or hostile-local-storage build additionally requires snapshotting
+packages/wheels and storing a model-file hash manifest.
 
-## Measured C3 result
+## Final paired C3 result
 
-The isolated test used the production BF16 checkpoint and authorized reference,
-sampled decoding at Audio8's quality defaults (`temperature=0.8`, `top_p=0.95`,
-`top_k=50`), CUDA Graph batches 1 and 2, and Torch compile. Greedy fastpath was
-off.
+The final isolated test used commit `63e1813`, the production BF16 checkpoint
+and authorized reference, and explicit identical requests with
+`max_new_tokens=1024`, `temperature=0.8`, `top_p=0.95`, and `top_k=50`.
+It alternated backend order over ten real-world prompt classes and five nominal
+repeat seeds: 50 requests per backend at concurrency one. The SGLang adapter
+does not apply its accepted seed, so these are distributional repeats rather
+than matched-RNG pairs.
 
-| 120-character voice-bridge request | Median wall | Median RTF |
+| Concurrency-one result | Production | SGLang |
 |---|---:|---:|
-| Former stock production path (trial baseline) | 5.247 s | 0.720 |
-| SGLang Graph + compile | 2.048 s | 0.287 |
+| Successful requests | 50/50 | 50/50 |
+| Median client wall | 3.884 s | 2.304 s |
+| Median wall RTF | 0.478 | 0.282 |
+| Aggregate audio seconds / wall second | 2.091x | 3.536x |
+| 140-character agent reply median wall / RTF | 4.328 s / 0.477 | 2.501 s / 0.276 |
 
-That is 2.56x lower wall latency and 2.51x better real-time factor. Two
-simultaneous requests produced 14.77 seconds of audio in 3.268 seconds
-(aggregate RTF 0.221). Cold graph/compile capture took about 139 seconds, of
-which 131.4 seconds was CUDA Graph capture, so the executable cache must persist.
+SGLang reduced median wall latency by 41% and delivered 1.69x aggregate audio
+throughput. Its fresh-cache process took 144.88 seconds to become ready. The
+first short request took 1.312 seconds at RTF 0.614; subsequent identical-class
+requests had 0.802-second median wall and 0.311 median RTF.
 
-Production was subsequently optimized without changing backends. On a separate
-121-character prompt it now has a three-run median wall time of 3.748 seconds for 7.941
-seconds of audio (RTF 0.472). Because that was not the identical prompt/corpus,
-the SGLang result should be treated as roughly 1.64x potential RTF headroom over
-today's service, not as a new apples-to-apples claim. A paired rerun is part of
-the quality gate.
+At offered concurrency two, SGLang completed 50/50 requests across 25 batches;
+median batch wall was 2.910 seconds and aggregate audio throughput was 5.823x
+real time. Production was intentionally configured with one active request, so
+it completed 25/50 and returned HTTP 429 for the other 25; it was not restarted
+or retuned for the test. Do not compare only its successful half as if it were a
+two-request throughput result.
 
-Qwen3-ASR reproduced 4/5 long samples exactly and rendered one initial proper
-noun as the phonetic homophone `Serberus`; a shorter sample was exact. This is
-an intelligibility smoke test, not a speaker-similarity or listening gate.
-Production migration remains blocked on paired listening and speaker-embedding
-checks using the authorized voice.
+The fixed C1 outputs were scored following the pinned
+[Audio8 evaluation method](https://github.com/Audio8-AI/Audio8_TTS/tree/9393162327a0cfb7045f55652665bcc93c9be54f#evaluation)
+with FP32 Whisper-large-v3 and the official
+[Seed-TTS evaluator](https://github.com/BytedanceSpeech/seed-tts-eval/tree/752f4297f090c46bb1a55a1f7439e5944ddefe8d).
+Production versus SGLang WER was
+9.33% versus 10.08% (difference +0.75 percentage points; prompt-cluster CI
+-0.67 to +2.34), CER was 2.34% versus
+2.96% (+0.62; CI -0.61 to +2.28), and speaker similarity was 0.6578 versus
+0.6501 (-0.0077; CI -0.0215 to +0.0050). Signal checks were clean. The result is
+promising but statistically inconclusive against the preregistered margins;
+production migration remains blocked on blinded listening.
 
 ## Build and isolated launch
 
@@ -84,8 +99,9 @@ UID/GID and have no group or other permission bits (normally directory 0700 and
 files 0600). Symlinks and empty files are rejected before Docker starts.
 
 The first process stays in the foreground and exposes only
-`127.0.0.1:18010`. In a second terminal, run the hardened compatibility gateway
-on the side-by-side review port:
+`127.0.0.1:18010`. The experimental launcher rejects every other port. In a
+second terminal, run the hardened compatibility gateway on the side-by-side
+review port:
 
 ```bash
 export AUDIO8_SGLANG_EXPERIMENTAL=1
@@ -93,29 +109,43 @@ export AUDIO8_SGLANG_EXPERIMENTAL=1
 curl -fsS http://127.0.0.1:18011/health
 ```
 
-The backend cache defaults to
-`$HOME/.cache/cerberus-audio8-sglang`. It contains native Inductor/Triton code,
-must be mode 0700 on an executable filesystem, and must never be shared with an
-untrusted runtime. Clear it after changing Torch, SGLang, CUDA, adapter code, or
-the image digest. Both `/tmp` and `/cache` must allow executable mappings;
-Triton otherwise fails at its first real request with `failed to map segment`.
+The gateway is likewise locked to numeric loopback port 18011. This trial
+artifact cannot be promoted to wildcard or reserved production/ASR ports by an
+environment override; promotion requires a separate reviewed deployment mode.
+
+The build labels the image with the locked base digest, both upstream commits,
+and a deterministic fingerprint of the Dockerfile, runtime verifiers, source
+contract, and patch set. Both the builder and launcher verify those labels; a
+tag alone is never trusted, and an image with a different runtime identity is
+refused.
+The cache defaults to
+`$HOME/.cache/cerberus-audio8-sglang/<runtime-fingerprint>`, so incompatible
+runtimes do not share native Inductor/Triton code. Its root and fixed children
+must be real owner-only 0700 directories below non-writable parents, and its
+0600 marker must match the verified image fingerprint. Symlinks, unexpected or
+populated unmarked caches, and mismatched markers are refused without modifying
+their targets. Both `/tmp` and `/cache` must allow executable mappings; Triton
+otherwise fails at its first real request with `failed to map segment`.
 
 ## Compatibility and hardening
 
 The gateway preserves `POST /v1/audio/speech`, the served model name, PCM16
 mono 44.1-kHz WAV output, synthetic-audio headers, bounded queueing, and the
 existing `/health` field names. It reads a size-bounded request body under a
-deadline before acquiring a scarce synthesis slot, bounds active connections,
-and applies separate header, body, backend, and write deadlines. It rejects
+total monotonic deadline before acquiring a scarce synthesis slot, bounds
+active connections, and applies separate total header, body, backend, and write
+budgets. Trickle traffic cannot reset these budgets. It rejects
 client reference paths, unsupported fields and formats, oversized input,
 chunked requests, redirects, and oversized or invalid backend WAVs. Backend
-errors are never returned verbatim. The upstream process remains loopback-only;
-only the gateway may later bind the trusted LAN.
+errors are never returned verbatim. The upstream process remains loopback-only.
+Loopback is isolation from the LAN, not authentication from other local users.
 
 Gateway health does not infer optimization state from its environment. It
-requires and forwards backend evidence for the fixed-reference cache,
-FlashInfer on both attention paths, captured graph batches, and captured
-compile batches. The pinned Audio8 config has no multi-GPU placement, and the
+requires safe backend evidence for the fixed-reference cache and both
+FlashInfer attention paths, then forwards the actual graph/compile state and
+batch lists. A healthy eager fallback is representable; the production
+migration gate must separately require graph and compile active with batches
+`[1,2]`. The pinned Audio8 config has no multi-GPU placement, and the
 pinned SGLang Omni launcher uses its in-process runner unless more than one GPU
 ID is present. Consequently the preprocessing, engine, API, and module-global
 attestation share one interpreter. The attestation separately records the
@@ -128,8 +158,9 @@ values. Pinned SGLang Omni otherwise applies generic S2-Pro defaults
 `0.8/0.8/30`, silently changing Audio8 quality. A small backend patch ignores
 ordinary no-reference input and applies the one operator-controlled local audio
 and transcript before tokenization. It rejects every client-supplied reference,
-encodes the fixed reference before opening the healthy API, and retains only its
-VQ codes in RAM. The public gateway never reads the private transcript.
+encodes the fixed reference before opening the healthy API. Its VQ codes and
+transcript remain in private backend process RAM; the public gateway never
+reads or exposes the transcript.
 
 Known API differences:
 
@@ -148,31 +179,36 @@ Known API differences:
 The upstream server itself has no authentication, wildcard CORS restrictions,
 reference path allowlist, URL/redirect limits, or sanitized errors. Never bind
 it to the LAN. Its reference API can otherwise read local files, fetch arbitrary
-URLs, follow redirects, and accept unbounded data URIs. The gateway is the
-required public boundary, not an optional convenience.
+URLs, follow redirects, and accept unbounded data URIs. A future production
+design must place it on an unexposed gateway-only container network or socket
+and deny egress; publishing host loopback 18010 assumes every local process is
+trusted. The gateway is the required boundary, not an optional convenience.
 
 ## Reviewed production migration plan
 
-Do not perform these steps until the feature receives review and the quality
-gate passes:
+Do not perform these steps until the feature receives review and blinded
+listening resolves the currently inconclusive quality gate:
 
-1. Build the pinned image, retain the current stock image, and start the SGLang
-   backend on `127.0.0.1:18010` with persistent executable cache, graph and
+1. Build the pinned image and verify all OCI provenance labels. Retain the
+   current stock image, and start the SGLang review backend on
+   `127.0.0.1:18010` with its fingerprint-keyed executable cache, graph and
    compile enabled, FlashInfer explicit, greedy and streaming disabled.
 2. Start the gateway on review port 18011. Verify `/health`, fixed-reference
    rejection, redirects, slow/truncated body timeouts, connection and synthesis
-   limits, 429 behavior, valid WAV headers, attested optimization fields, and
-   backend restart failure/recovery without exposing port 18010.
+   limits, 429 behavior, valid WAV headers, and backend restart
+   failure/recovery. Require the attested graph and compile fields to be active
+   with batch lists `[1,2]`; HTTP 200 alone is not the optimization gate.
 3. Run paired stock/SGLang ASR, listening, and speaker-similarity checks over a
    punctuation, number, proper-noun, short, and 140-character corpus. Verify
    health reports the preloaded fixed-reference VQ cache as active.
-4. Add separate systemd backend and gateway units. The backend must start first;
-   the gateway must return 503 until it is healthy. Systemd, not Docker, owns
-   restart policy, and both units must retain current sandboxing and private
-   reference permissions.
-5. Stop (do not delete) stock Audio8, change only the gateway to `0.0.0.0:8010`,
-   and leave the voice bridge URL/model unchanged. Verify the current health
-   contract and a live voice turn before enabling the new units for boot.
+4. Build a separate production deployment with the backend on an unpublished
+   gateway-only container network or socket and deny its egress. Add separate
+   hardened systemd backend and gateway units; the gateway must return 503
+   until the backend attestation passes. Systemd, not Docker, owns restart.
+5. Stop (do not delete) stock Audio8 and promote only the separately reviewed
+   gateway to port 8010; the experimental launchers intentionally refuse this.
+   Leave the voice bridge URL/model unchanged. Verify the health contract and a
+   live voice turn before enabling the new units for boot.
 6. Roll back by stopping the gateway/backend and restarting the untouched stock
    `cerberus3-audio8.service`. Keep the old image and unit until a reboot and
    sustained voice-agent soak test pass.

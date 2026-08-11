@@ -14,36 +14,23 @@ backend_port="${AUDIO8_SGLANG_BACKEND_PORT:-18010}"
 max_requests="${AUDIO8_SGLANG_MAX_RUNNING_REQUESTS:-2}"
 compile="${AUDIO8_SGLANG_ENABLE_TORCH_COMPILE:-1}"
 disable_graph="${AUDIO8_SGLANG_DISABLE_CUDA_GRAPH:-0}"
-cache_dir="${AUDIO8_SGLANG_CACHE_DIR:-${HOME}/.cache/cerberus-audio8-sglang}"
+cache_override="${AUDIO8_SGLANG_CACHE_DIR:-}"
 reference_dir="${AUDIO8_REFERENCE_DIR:-}"
 
-mapfile -t values < <(python3 - "${lock}" <<'PY'
-import json
-import pathlib
-import sys
+identity_values="$(
+  python3 "${root}/runtime_identity.py" values "${lock}" "${root}"
+)"
+mapfile -t values <<<"${identity_values}"
+[[ "${#values[@]}" == 8 ]] || exit 2
+image="${AUDIO8_SGLANG_IMAGE:-${values[3]}}"
+model_dir="${AUDIO8_MODEL_DIR:-${HOME}/models/${values[4]}}"
+model_revision="${values[5]}"
+served_model_name="${values[6]}"
+runtime_fingerprint="${values[7]}"
+cache_dir="${cache_override:-${HOME}/.cache/cerberus-audio8-sglang/${runtime_fingerprint}}"
 
-data = json.loads(pathlib.Path(sys.argv[1]).read_text())
-for key in (
-    "image",
-    "model_directory",
-    "model_revision",
-    "served_model_name",
-):
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        raise SystemExit(f"invalid {key} in runtime lock")
-    print(value)
-PY
-)
-[[ "${#values[@]}" == 4 ]] || exit 2
-image="${AUDIO8_SGLANG_IMAGE:-${values[0]}}"
-model_dir="${AUDIO8_MODEL_DIR:-${HOME}/models/${values[1]}}"
-model_revision="${values[2]}"
-served_model_name="${values[3]}"
-
-if ! [[ "${backend_port}" =~ ^[1-9][0-9]{0,4}$ ]] ||
-   ((10#${backend_port} > 65535)); then
-  echo "Invalid AUDIO8_SGLANG_BACKEND_PORT: ${backend_port}" >&2
+if [[ "${backend_port}" != 18010 ]]; then
+  echo "Experimental Audio8 SGLang backend port is locked to 18010." >&2
   exit 2
 fi
 if ! [[ "${max_requests}" =~ ^[1-9][0-9]*$ ]] ||
@@ -78,23 +65,21 @@ esac
 }
 python3 "${root}/validate_reference.py" \
   "${reference_dir}" "${runtime_uid}" "${runtime_gid}"
-docker image inspect "${image}" >/dev/null || {
+image_labels="$(
+  docker image inspect --format '{{json .Config.Labels}}' "${image}"
+)" || {
   echo "Missing ${image}; run audio8-sglang/build-image.sh first." >&2
   exit 1
 }
+printf '%s\n' "${image_labels}" | \
+  python3 "${root}/runtime_identity.py" verify-labels "${lock}" "${root}"
 if ss -ltnH "sport = :${backend_port}" | grep -q .; then
   echo "Backend port ${backend_port} is already in use." >&2
   exit 1
 fi
 
-install -d -m 0700 -- "${cache_dir}" "${cache_dir}/cuda" \
-  "${cache_dir}/flashinfer" "${cache_dir}/huggingface" \
-  "${cache_dir}/torchinductor" "${cache_dir}/triton"
-[[ -d "${cache_dir}" && ! -L "${cache_dir}" && -O "${cache_dir}" &&
-   -w "${cache_dir}" && -x "${cache_dir}" ]] || {
-  echo "Audio8 SGLang cache must be owned, writable, and non-symlinked." >&2
-  exit 2
-}
+python3 "${root}/prepare_cache.py" \
+  "${cache_dir}" "${runtime_fingerprint}" "${runtime_uid}" "${runtime_gid}"
 mount_options="$(findmnt -n -o OPTIONS -T "${cache_dir}")"
 if [[ ",${mount_options}," == *,noexec,* ]]; then
   echo "Audio8 SGLang cache must permit executable mappings." >&2

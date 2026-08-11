@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import email.message
 import http.client
 import http.server
@@ -8,11 +9,12 @@ import importlib.util
 import io
 import json
 import pathlib
+import select
 import socket
 import sys
 import threading
+import time
 import unittest
-import urllib.error
 import wave
 from collections.abc import Iterator
 from unittest import mock
@@ -77,20 +79,10 @@ def wav_bytes() -> bytes:
     return output.getvalue()
 
 
-class FakeResponse:
-    def __init__(self, body: bytes, content_type: str = "audio/wav") -> None:
-        self.body = body
-        self.headers = email.message.Message()
-        self.headers["Content-Type"] = content_type
-
-    def __enter__(self) -> "FakeResponse":
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        return None
-
-    def read(self, limit: int = -1) -> bytes:
-        return self.body if limit < 0 else self.body[:limit]
+def response_headers(content_type: str) -> email.message.Message:
+    headers = email.message.Message()
+    headers["Content-Type"] = content_type
+    return headers
 
 
 @contextlib.contextmanager
@@ -161,17 +153,33 @@ class GatewayTests(unittest.TestCase):
                 "http://192.0.2.3:18010/v1/audio/speech", "/v1/audio/speech"
             )
 
+    def test_experimental_ports_and_host_are_immutable(self) -> None:
+        unsafe_environments = (
+            {"AUDIO8_SGLANG_GATEWAY_HOST": "0.0.0.0"},
+            {"AUDIO8_SGLANG_GATEWAY_PORT": "8010"},
+            {
+                "AUDIO8_SGLANG_BACKEND_URL": (
+                    "http://127.0.0.1:8020/v1/audio/speech"
+                )
+            },
+        )
+        for environment in unsafe_environments:
+            with self.subTest(environment=environment), mock.patch.dict(
+                gateway.os.environ, environment, clear=True
+            ), self.assertRaisesRegex(RuntimeError, "experimental"):
+                gateway.Settings.from_environment()
+
     def test_synthesis_validates_and_returns_pcm_wav(self) -> None:
         audio = wav_bytes()
-        opener = mock.Mock()
-        opener.open.return_value = FakeResponse(audio)
-        with mock.patch.object(gateway, "LOCAL_OPENER", opener):
+        backend = mock.Mock(
+            return_value=(response_headers("audio/wav"), audio, 0.125)
+        )
+        with mock.patch.object(self.runtime, "request_backend", backend):
             result, elapsed = self.runtime.synthesize({"input": "Hello."})
         self.assertEqual(result, audio)
-        self.assertGreaterEqual(elapsed, 0)
-        forwarded = opener.open.call_args.args[0]
-        self.assertEqual(forwarded.full_url, settings().backend_url)
-        self.assertNotIn(b"/etc/passwd", forwarded.data)
+        self.assertEqual(elapsed, 0.125)
+        self.assertEqual(backend.call_args.args[:2], ("POST", settings().backend_url))
+        self.assertNotIn(b"/etc/passwd", backend.call_args.kwargs["body"])
 
     def test_health_forwards_actual_backend_attestation(self) -> None:
         backend = {
@@ -187,11 +195,16 @@ class GatewayTests(unittest.TestCase):
                 torch_compile_batches=[],
             ),
         }
-        opener = mock.Mock()
-        opener.open.return_value = FakeResponse(
-            json.dumps(backend).encode(), "application/json"
+        request_backend = mock.Mock(
+            return_value=(
+                response_headers("application/json"),
+                json.dumps(backend).encode(),
+                0.01,
+            )
         )
-        with mock.patch.object(gateway, "LOCAL_OPENER", opener):
+        with mock.patch.object(
+            self.runtime, "request_backend", request_backend
+        ):
             status, document = self.runtime.health_document()
         self.assertEqual(status, 200)
         self.assertFalse(document["cuda_graph_active"])
@@ -249,12 +262,15 @@ class GatewayTests(unittest.TestCase):
                 ),
             },
         ):
-            opener = mock.Mock()
-            opener.open.return_value = FakeResponse(
-                json.dumps(backend).encode(), "application/json"
+            request_backend = mock.Mock(
+                return_value=(
+                    response_headers("application/json"),
+                    json.dumps(backend).encode(),
+                    0.01,
+                )
             )
             with self.subTest(backend=backend), mock.patch.object(
-                gateway, "LOCAL_OPENER", opener
+                self.runtime, "request_backend", request_backend
             ):
                 status, document = self.runtime.health_document()
                 self.assertEqual(status, 503)
@@ -285,12 +301,15 @@ class GatewayTests(unittest.TestCase):
         redirect_thread = threading.Thread(target=redirect.serve_forever, daemon=True)
         redirect_thread.start()
         try:
-            with self.assertRaises(urllib.error.HTTPError) as raised:
-                gateway.LOCAL_OPENER.open(
-                    f"http://127.0.0.1:{redirect.server_port}/health", timeout=1
+            redirect_url = f"http://127.0.0.1:{redirect.server_port}/health"
+            runtime = gateway.GatewayRuntime(
+                dataclasses.replace(
+                    settings(),
+                    backend_health_url=redirect_url,
                 )
-            self.assertEqual(raised.exception.code, 302)
-            raised.exception.close()
+            )
+            with self.assertRaisesRegex(RuntimeError, "rejected"):
+                runtime.backend_health()
             self.assertEqual(sink_hits, 0)
         finally:
             redirect.shutdown()
@@ -299,6 +318,45 @@ class GatewayTests(unittest.TestCase):
             sink.shutdown()
             sink.server_close()
             sink_thread.join(timeout=2)
+
+    def test_backend_trickle_has_total_deadline(self) -> None:
+        audio = wav_bytes()
+
+        class Trickle(SilentHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(audio)))
+                self.end_headers()
+                try:
+                    for byte in audio:
+                        self.wfile.write(bytes((byte,)))
+                        self.wfile.flush()
+                        time.sleep(0.03)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        backend = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Trickle)
+        thread = threading.Thread(target=backend.serve_forever, daemon=True)
+        thread.start()
+        runtime = gateway.GatewayRuntime(
+            dataclasses.replace(
+                settings(),
+                backend_url=(
+                    f"http://127.0.0.1:{backend.server_port}/v1/audio/speech"
+                ),
+                timeout_seconds=0.15,
+            )
+        )
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(TimeoutError, "total deadline"):
+                runtime.synthesize({"input": "Hello."})
+            self.assertLess(time.monotonic() - started, 0.75)
+        finally:
+            backend.shutdown()
+            backend.server_close()
+            thread.join(timeout=2)
 
     def test_partial_body_times_out_before_synthesis_slot(self) -> None:
         with running_gateway(self.runtime) as server:
@@ -317,6 +375,51 @@ class GatewayTests(unittest.TestCase):
             self.assertFalse(self.runtime.request_slots.acquire(blocking=False))
             self.runtime.request_slots.release()
             self.runtime.request_slots.release()
+
+    def test_trickled_body_has_total_deadline(self) -> None:
+        with running_gateway(self.runtime) as server:
+            with socket.create_connection(server.server_address, timeout=1) as client:
+                client.settimeout(2)
+                client.sendall(
+                    b"POST /v1/audio/speech HTTP/1.1\r\n"
+                    b"Host: 127.0.0.1\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 100\r\n\r\n"
+                )
+                started = time.monotonic()
+                response = b""
+                while time.monotonic() - started < 1:
+                    try:
+                        client.sendall(b"{")
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+                    readable, _, _ = select.select([client], [], [], 0)
+                    if readable:
+                        response = client.recv(4096)
+                        break
+                    time.sleep(0.04)
+                if not response:
+                    response = client.recv(4096)
+            self.assertLess(time.monotonic() - started, 0.5)
+            self.assertIn(b" 408 ", response)
+
+    def test_trickled_headers_have_total_deadline(self) -> None:
+        with running_gateway(self.runtime) as server:
+            with socket.create_connection(server.server_address, timeout=1) as client:
+                client.settimeout(2)
+                started = time.monotonic()
+                for byte in b"POST /v1/audio/speech HTTP/1.1\r\nHost: 127.0.0.1\r\n":
+                    try:
+                        client.sendall(bytes((byte,)))
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+                    time.sleep(0.04)
+                try:
+                    response = client.recv(4096)
+                except ConnectionResetError:
+                    response = b""
+            self.assertLess(time.monotonic() - started, 0.75)
+            self.assertEqual(response, b"")
 
     def test_full_synthesis_queue_returns_429_after_body_validation(self) -> None:
         self.assertTrue(self.runtime.request_slots.acquire(blocking=False))

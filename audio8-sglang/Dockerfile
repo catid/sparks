@@ -1,8 +1,15 @@
 ARG BASE_IMAGE=lmsysorg/sglang@sha256:032ac5457fdff735f21abc366aed0f76ddb699d51fdbe17745c2a0e53579b6ea
 FROM ${BASE_IMAGE}
 
+ARG BASE_IMAGE
 ARG SGLANG_OMNI_COMMIT=68a572348837f7b004857b4b07993c20ade4c017
 ARG AUDIO8_TTS_COMMIT=9393162327a0cfb7045f55652665bcc93c9be54f
+ARG AUDIO8_RUNTIME_FINGERPRINT
+
+LABEL io.cerberus.audio8-sglang.base-image="${BASE_IMAGE}" \
+      io.cerberus.audio8-sglang.sglang-omni-commit="${SGLANG_OMNI_COMMIT}" \
+      io.cerberus.audio8-sglang.audio8-tts-commit="${AUDIO8_TTS_COMMIT}" \
+      io.cerberus.audio8-sglang.source-contract-patchset-sha256="${AUDIO8_RUNTIME_FINGERPRINT}"
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates git libnuma1 \

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import http.client
 import ipaddress
 import json
 import math
@@ -11,9 +12,7 @@ import os
 import socket
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import wave
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +21,9 @@ from typing import Any
 
 MAX_HTTP_BODY = 32_768
 MAX_WAV_BYTES = 32 * 1024 * 1024
+EXPERIMENTAL_BACKEND_URL = "http://127.0.0.1:18010/v1/audio/speech"
+EXPERIMENTAL_GATEWAY_HOST = "127.0.0.1"
+EXPERIMENTAL_GATEWAY_PORT = 18_011
 ALLOWED_FIELDS = {
     "input",
     "max_new_tokens",
@@ -43,17 +45,6 @@ FORBIDDEN_REFERENCE_FIELDS = {
     "reference_text_file",
     "references",
 }
-
-
-class RejectRedirects(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
-
-
-LOCAL_OPENER = urllib.request.build_opener(
-    urllib.request.ProxyHandler({}),
-    RejectRedirects(),
-)
 
 
 def bounded_integer(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -133,23 +124,28 @@ class Settings:
 
     @classmethod
     def from_environment(cls) -> "Settings":
-        backend_url = loopback_http_url(
-            os.environ.get(
-                "AUDIO8_SGLANG_BACKEND_URL",
-                "http://127.0.0.1:18010/v1/audio/speech",
-            ),
-            "/v1/audio/speech",
+        backend_url = os.environ.get(
+            "AUDIO8_SGLANG_BACKEND_URL", EXPERIMENTAL_BACKEND_URL
         )
+        loopback_http_url(backend_url, "/v1/audio/speech")
+        if backend_url != EXPERIMENTAL_BACKEND_URL:
+            raise RuntimeError(
+                "experimental backend is fixed to 127.0.0.1:18010"
+            )
         parsed = urllib.parse.urlsplit(backend_url)
         backend_health_url = urllib.parse.urlunsplit(
             (parsed.scheme, parsed.netloc, "/health", "", "")
         )
-        listen_host = os.environ.get("AUDIO8_SGLANG_GATEWAY_HOST", "127.0.0.1")
-        if listen_host not in {"127.0.0.1", "0.0.0.0"}:
-            raise RuntimeError("gateway host must be 127.0.0.1 or 0.0.0.0")
-        listen_port = positive_environment_integer(
-            "AUDIO8_SGLANG_GATEWAY_PORT", 18011, 65_535
+        listen_host = os.environ.get(
+            "AUDIO8_SGLANG_GATEWAY_HOST", EXPERIMENTAL_GATEWAY_HOST
         )
+        if listen_host != EXPERIMENTAL_GATEWAY_HOST:
+            raise RuntimeError("experimental gateway is fixed to 127.0.0.1")
+        listen_port = positive_environment_integer(
+            "AUDIO8_SGLANG_GATEWAY_PORT", EXPERIMENTAL_GATEWAY_PORT, 65_535
+        )
+        if listen_port != EXPERIMENTAL_GATEWAY_PORT:
+            raise RuntimeError("experimental gateway is fixed to port 18011")
         return cls(
             backend_url=backend_url,
             backend_health_url=backend_health_url,
@@ -258,15 +254,104 @@ class GatewayRuntime:
             settings.max_active_requests
         )
 
-    def backend_health(self) -> tuple[dict[str, Any], dict[str, Any]]:
-        request = urllib.request.Request(
-            self.settings.backend_health_url,
-            headers={"Accept": "application/json", "User-Agent": "CerberusAudio8Gateway/1"},
+    @staticmethod
+    def _abort_connection(connection: http.client.HTTPConnection) -> None:
+        sock = connection.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        connection.close()
+
+    @staticmethod
+    def _read_backend_body(
+        response: http.client.HTTPResponse,
+        connection: http.client.HTTPConnection,
+        maximum_bytes: int,
+        deadline: float,
+    ) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        while total <= maximum_bytes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("backend response exceeded its total deadline")
+            if connection.sock is not None:
+                connection.sock.settimeout(remaining)
+            chunk = response.read1(min(65_536, maximum_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+
+    def request_backend(
+        self,
+        method: str,
+        url: str,
+        *,
+        body: bytes | None,
+        headers: dict[str, str],
+        maximum_bytes: int,
+        timeout_seconds: float,
+    ) -> tuple[http.client.HTTPMessage, bytes, float]:
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+        if parsed.scheme != "http" or host is None or port is None:
+            raise RuntimeError("backend URL is invalid")
+        started = time.monotonic()
+        deadline = started + timeout_seconds
+        connection = http.client.HTTPConnection(
+            host, port, timeout=timeout_seconds
         )
-        with LOCAL_OPENER.open(request, timeout=3) as response:
-            data = response.read(65_537)
+        expired = threading.Event()
+
+        def expire() -> None:
+            expired.set()
+            self._abort_connection(connection)
+
+        timer = threading.Timer(timeout_seconds, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            connection.request(method, parsed.path, body=body, headers=headers)
+            response = connection.getresponse()
+            if response.status != 200:
+                raise RuntimeError("backend rejected request")
+            data = self._read_backend_body(
+                response, connection, maximum_bytes, deadline
+            )
+        except (OSError, TimeoutError, http.client.HTTPException) as error:
+            if expired.is_set() or time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "backend request exceeded its total deadline"
+                ) from error
+            raise RuntimeError("backend request failed") from error
+        finally:
+            timer.cancel()
+            self._abort_connection(connection)
+        if expired.is_set() or time.monotonic() > deadline:
+            raise TimeoutError("backend request exceeded its total deadline")
+        return response.headers, data, time.monotonic() - started
+
+    def backend_health(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        headers, data, _elapsed = self.request_backend(
+            "GET",
+            self.settings.backend_health_url,
+            body=None,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "CerberusAudio8Gateway/1",
+            },
+            maximum_bytes=65_536,
+            timeout_seconds=3,
+        )
         if len(data) > 65_536:
             raise RuntimeError("backend health response is too large")
+        if headers.get_content_type() != "application/json":
+            raise RuntimeError("backend health content type is invalid")
         payload = json.loads(data)
         if (
             not isinstance(payload, dict)
@@ -369,30 +454,20 @@ class GatewayRuntime:
 
     def synthesize_normalized(self, payload: dict[str, Any]) -> tuple[bytes, float]:
         encoded = json.dumps(payload, separators=(",", ":")).encode()
-        request = urllib.request.Request(
+        headers, audio, elapsed = self.request_backend(
+            "POST",
             self.settings.backend_url,
-            data=encoded,
             headers={
                 "Accept": "audio/wav",
                 "Content-Type": "application/json",
                 "User-Agent": "CerberusAudio8Gateway/1",
             },
-            method="POST",
+            body=encoded,
+            maximum_bytes=MAX_WAV_BYTES,
+            timeout_seconds=self.settings.timeout_seconds,
         )
-        started = time.monotonic()
-        try:
-            with LOCAL_OPENER.open(
-                request, timeout=self.settings.timeout_seconds
-            ) as response:
-                if response.headers.get_content_type() not in {
-                    "audio/wav",
-                    "audio/x-wav",
-                }:
-                    raise RuntimeError("backend returned an invalid content type")
-                audio = response.read(MAX_WAV_BYTES + 1)
-        except urllib.error.HTTPError as error:
-            error.close()
-            raise RuntimeError("backend rejected synthesis") from error
+        if headers.get_content_type() not in {"audio/wav", "audio/x-wav"}:
+            raise RuntimeError("backend returned an invalid content type")
         if len(audio) > MAX_WAV_BYTES:
             raise RuntimeError("backend WAV is too large")
         try:
@@ -410,7 +485,6 @@ class GatewayRuntime:
                     raise RuntimeError("backend returned a truncated WAV")
         except (EOFError, wave.Error) as error:
             raise RuntimeError("backend returned a malformed WAV") from error
-        elapsed = time.monotonic() - started
         return audio, elapsed
 
     def synthesize(self, payload: Any) -> tuple[bytes, float]:
@@ -424,13 +498,80 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "CerberusAudio8SGLangGateway/1"
 
     def setup(self) -> None:
-        assert RUNTIME is not None
-        self.request.settimeout(RUNTIME.settings.header_timeout_seconds)
         super().setup()
+        assert RUNTIME is not None
+        self.connection.settimeout(RUNTIME.settings.header_timeout_seconds)
+        self._header_timer: threading.Timer | None = None
+
+    def _arm_header_deadline(self) -> None:
+        assert RUNTIME is not None
+
+        def expire() -> None:
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        self._header_timer = threading.Timer(
+            RUNTIME.settings.header_timeout_seconds, expire
+        )
+        self._header_timer.daemon = True
+        self._header_timer.start()
+
+    def _cancel_header_deadline(self) -> None:
+        if self._header_timer is not None:
+            self._header_timer.cancel()
+            self._header_timer = None
+
+    def handle_one_request(self) -> None:
+        self._arm_header_deadline()
+        try:
+            try:
+                super().handle_one_request()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                self.close_connection = True
+        finally:
+            self._cancel_header_deadline()
+
+    def parse_request(self) -> bool:
+        try:
+            return super().parse_request()
+        finally:
+            self._cancel_header_deadline()
 
     def set_write_timeout(self) -> None:
         assert RUNTIME is not None
         self.connection.settimeout(RUNTIME.settings.write_timeout_seconds)
+
+    def write_with_deadline(self, payload: bytes) -> None:
+        assert RUNTIME is not None
+        deadline = time.monotonic() + RUNTIME.settings.write_timeout_seconds
+        view = memoryview(payload)
+        while view:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("response write exceeded its total deadline")
+            self.connection.settimeout(remaining)
+            chunk = view[:65_536]
+            self.wfile.write(chunk)
+            view = view[len(chunk) :]
+
+    def read_body_with_deadline(self, content_length: int) -> bytes:
+        assert RUNTIME is not None
+        deadline = time.monotonic() + RUNTIME.settings.body_timeout_seconds
+        chunks: list[bytes] = []
+        total = 0
+        while total < content_length:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("request body exceeded its total deadline")
+            self.connection.settimeout(remaining)
+            chunk = self.rfile.read1(min(65_536, content_length - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
 
     def log_message(self, format_string: str, *args: Any) -> None:
         print(f"{self.client_address[0]} {format_string % args}", flush=True)
@@ -444,7 +585,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
-        self.wfile.write(encoded)
+        self.write_with_deadline(encoded)
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path != "/health":
@@ -474,8 +615,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         assert RUNTIME is not None
         try:
-            self.connection.settimeout(RUNTIME.settings.body_timeout_seconds)
-            body = self.rfile.read(content_length)
+            body = self.read_body_with_deadline(content_length)
         except (TimeoutError, socket.timeout, OSError):
             self.close_connection = True
             self.json_response(408, {"error": "request body timed out"})
@@ -499,7 +639,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Retry-After", "5")
             self.end_headers()
-            self.wfile.write(encoded)
+            self.write_with_deadline(encoded)
             return
         try:
             try:
@@ -519,7 +659,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Audio8-Synthetic", "true")
         self.send_header("X-Synthesis-Seconds", f"{elapsed:.3f}")
         self.end_headers()
-        self.wfile.write(audio)
+        self.write_with_deadline(audio)
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
