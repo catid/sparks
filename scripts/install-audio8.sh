@@ -19,7 +19,7 @@ verify   Validate repository inputs without changing the host.
 prepare  Download the pinned checkpoint and build the isolated image.
 install  Install the systemd unit, but do not enable or start it.
 enable   Install and enable the unit for the next boot.
-start    Install, enable, and start the service now.
+start    Install, enable, and restart the service now.
 
 Environment:
   SPARK_SERVICE_USER  Service account (default: invoking account)
@@ -235,6 +235,9 @@ sudo systemctl reset-failed "${legacy_unit}" >/dev/null 2>&1 || true
 case "${action}" in
   install) ;;
   enable) sudo systemctl enable cerberus3-audio8.service ;;
-  start) sudo systemctl enable --now cerberus3-audio8.service ;;
+  start)
+    sudo systemctl enable cerberus3-audio8.service
+    sudo systemctl restart cerberus3-audio8.service
+    ;;
 esac
 echo "Audio8 service ${action} completed."

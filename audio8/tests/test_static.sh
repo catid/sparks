@@ -99,6 +99,34 @@ PATH="${fake_bin}:/usr/bin:/bin" \
   AUDIO8_MAX_ACTIVE_REQUESTS=3 \
   "${repo_root}/audio8/run-server.sh"
 grep -Fxq 'AUDIO8_MAX_ACTIVE_REQUESTS=3' "${docker_log}"
+grep -Fxq 'AUDIO8_SDPA_BACKEND=efficient' "${docker_log}"
+grep -Fxq 'AUDIO8_COMPILE_CODEBOOKS=0' "${docker_log}"
+
+compile_cache="${test_root}/compile-cache"
+PATH="${fake_bin}:/usr/bin:/bin" \
+  TEST_DOCKER_LOG="${docker_log}" \
+  AUDIO8_MODEL_DIR="${model_dir}" \
+  AUDIO8_COMPILE_CODEBOOKS=1 \
+  AUDIO8_COMPILE_CACHE_DIR="${compile_cache}" \
+  "${repo_root}/audio8/run-server.sh"
+grep -Fxq 'AUDIO8_COMPILE_CODEBOOKS=1' "${docker_log}"
+grep -Fxq 'TMPDIR=/compile-cache/tmp' "${docker_log}"
+grep -Fxq 'TORCHINDUCTOR_CACHE_DIR=/compile-cache' "${docker_log}"
+grep -Fxq 'TRITON_CACHE_DIR=/compile-cache/triton' "${docker_log}"
+grep -Fxq "${compile_cache}:/compile-cache:rw" "${docker_log}"
+[[ -d "${compile_cache}" && ! -L "${compile_cache}" ]]
+
+set +e
+invalid_compile_output="$({
+  PATH="${fake_bin}:/usr/bin:/bin" \
+    AUDIO8_MODEL_DIR="${model_dir}" \
+    AUDIO8_COMPILE_CODEBOOKS=true \
+    "${repo_root}/audio8/run-server.sh"
+} 2>&1)"
+invalid_compile_status=$?
+set -e
+[[ "${invalid_compile_status}" == 2 ]]
+grep -Fq 'Invalid AUDIO8_COMPILE_CODEBOOKS' <<<"${invalid_compile_output}"
 
 set +e
 invalid_limit_output="$({
@@ -111,6 +139,18 @@ invalid_limit_status=$?
 set -e
 [[ "${invalid_limit_status}" == 2 ]]
 grep -Fq 'Invalid AUDIO8_MAX_ACTIVE_REQUESTS' <<<"${invalid_limit_output}"
+
+set +e
+invalid_backend_output="$({
+  PATH="${fake_bin}:/usr/bin:/bin" \
+    AUDIO8_MODEL_DIR="${model_dir}" \
+    AUDIO8_SDPA_BACKEND=flash \
+    "${repo_root}/audio8/run-server.sh"
+} 2>&1)"
+invalid_backend_status=$?
+set -e
+[[ "${invalid_backend_status}" == 2 ]]
+grep -Fq 'Invalid AUDIO8_SDPA_BACKEND' <<<"${invalid_backend_output}"
 
 victim="${test_root}/pin-victim"
 printf 'do not overwrite\n' >"${victim}"
@@ -138,8 +178,20 @@ grep -Fq 'not a valid WAV container' <<<"${invalid_wav_output}"
 [[ ! -e "${test_wav}" ]]
 
 grep -Fxq 'COPY server.py ./server.py' "${repo_root}/audio8/Dockerfile"
+grep -Fq 'sdpa_backend="${AUDIO8_SDPA_BACKEND:-efficient}"' \
+  "${repo_root}/audio8/run-server.sh"
+grep -Fq -- '--env "AUDIO8_SDPA_BACKEND=${sdpa_backend}"' \
+  "${repo_root}/audio8/run-server.sh"
 grep -Fq '"${root}/audio8"' "${repo_root}/scripts/install-audio8.sh"
+grep -Fq 'sudo systemctl restart cerberus3-audio8.service' \
+  "${repo_root}/scripts/install-audio8.sh"
 grep -Fxq 'Restart=always' \
+  "${repo_root}/systemd/cerberus3-audio8.service.in"
+grep -Fxq 'Environment=AUDIO8_COMPILE_CODEBOOKS=1' \
+  "${repo_root}/systemd/cerberus3-audio8.service.in"
+grep -Fxq 'CacheDirectory=cerberus-audio8' \
+  "${repo_root}/systemd/cerberus3-audio8.service.in"
+grep -Fxq 'CacheDirectoryMode=0700' \
   "${repo_root}/systemd/cerberus3-audio8.service.in"
 grep -Eq '^Conflicts=.*cerebrus3-audio8\.service' \
   "${repo_root}/systemd/cerberus3-audio8.service.in"

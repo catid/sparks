@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import io
 import json
 import math
 import os
+import pathlib
+import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,10 +29,62 @@ MAX_INPUT_CHARACTERS = int(os.environ.get("AUDIO8_MAX_INPUT_CHARACTERS", "300"))
 MAX_ACTIVE_REQUESTS = int(os.environ.get("AUDIO8_MAX_ACTIVE_REQUESTS", "2"))
 REFERENCE_AUDIO = os.environ.get("AUDIO8_REFERENCE_AUDIO", "").strip()
 REFERENCE_TEXT_FILE = os.environ.get("AUDIO8_REFERENCE_TEXT_FILE", "").strip()
+REQUESTED_SDPA_BACKEND = os.environ.get(
+    "AUDIO8_SDPA_BACKEND", "efficient"
+).strip().lower()
+
+
+def environment_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    raise RuntimeError(f"{name} must be 0 or 1")
+
+
+COMPILE_CODEBOOKS = environment_flag("AUDIO8_COMPILE_CODEBOOKS")
 INFERENCE_LOCK = threading.Lock()
 if not 1 <= MAX_ACTIVE_REQUESTS <= 32:
     raise RuntimeError("AUDIO8_MAX_ACTIVE_REQUESTS must be between 1 and 32")
 REQUEST_SLOTS = threading.BoundedSemaphore(MAX_ACTIVE_REQUESTS)
+
+
+def select_sdpa_backend(model: Any, requested: str) -> str:
+    """Select the pinned model's slow-AR SDPA kernel without editing its files.
+
+    Audio8's remote code explicitly requests the math backend around every
+    autoregressive slow-model step.  PyTorch's fused efficient backend accepts
+    that exact boolean-mask shape on GB10 and computes the same SDPA operation
+    without changing model weights, BF16, sampling, or codec settings.
+    """
+    if requested not in {"math", "efficient"}:
+        raise RuntimeError("AUDIO8_SDPA_BACKEND must be math or efficient")
+    generate = getattr(model, "generate", None)
+    function = getattr(generate, "__func__", generate)
+    namespace = getattr(function, "__globals__", None)
+    if not isinstance(namespace, dict):
+        raise RuntimeError("Audio8 generate implementation is not patchable")
+    kernel = namespace.get("sdpa_kernel")
+    backends = namespace.get("SDPBackend")
+    if not callable(kernel) or backends is None:
+        raise RuntimeError("Audio8 SDPA symbols are unavailable")
+    original_key = "_cerberus_original_sdpa_kernel"
+    original = namespace.setdefault(original_key, kernel)
+    if requested == "math":
+        namespace["sdpa_kernel"] = original
+        return "math"
+    efficient = getattr(backends, "EFFICIENT_ATTENTION", None)
+    if efficient is None:
+        raise RuntimeError("PyTorch efficient SDPA is unavailable")
+
+    def efficient_kernel(_upstream_backend: Any):
+        return original(efficient)
+
+    namespace["sdpa_kernel"] = efficient_kernel
+    return "efficient"
 
 
 def finite_number(
@@ -81,6 +137,16 @@ class Audio8Runtime:
             local_files_only=True,
             dtype=self.dtype,
         ).eval().to(self.device)
+        self.sdpa_backend = select_sdpa_backend(
+            self.model, REQUESTED_SDPA_BACKEND
+        )
+        self.codebook_compile_requested = COMPILE_CODEBOOKS
+        self.codebook_compile_active = False
+        self.codebook_compile_seconds: float | None = None
+        self.eager_generate_codebooks = getattr(
+            self.model, "_generate_codebooks", None
+        )
+        self.compiled_generate_codebooks: Any | None = None
         self.sample_rate = int(self.model.config.codec_sample_rate)
         if bool(REFERENCE_AUDIO) != bool(REFERENCE_TEXT_FILE):
             raise RuntimeError(
@@ -89,12 +155,151 @@ class Audio8Runtime:
             )
         self.reference_audio: str | None = REFERENCE_AUDIO or None
         self.reference_text: str | None = None
+        self.reference_codes: torch.Tensor | None = None
         if REFERENCE_TEXT_FILE:
             with open(REFERENCE_TEXT_FILE, encoding="utf-8") as source:
                 reference_text = source.read(4097)
             if not reference_text.strip() or len(reference_text) > 4096:
                 raise RuntimeError("reference transcript must contain 1-4096 characters")
             self.reference_text = reference_text.strip()
+        if self.reference_audio and self.reference_text:
+            self.reference_codes = self._encode_reference_once()
+        if self.codebook_compile_requested:
+            self._compile_and_prewarm_codebooks()
+
+    @staticmethod
+    def _verify_executable_compile_cache() -> None:
+        """Prove the exact Inductor cache mount can load native code."""
+        cache_text = os.environ.get("TORCHINDUCTOR_CACHE_DIR", "").strip()
+        if not cache_text:
+            raise RuntimeError("TORCHINDUCTOR_CACHE_DIR is required")
+        cache = pathlib.Path(cache_text)
+        if not cache.is_dir() or cache.is_symlink():
+            raise RuntimeError("Inductor cache is not a regular directory")
+        with tempfile.TemporaryDirectory(prefix=".exec-check-", dir=cache) as root:
+            directory = pathlib.Path(root)
+            source = directory / "probe.c"
+            library = directory / "probe.so"
+            source.write_text(
+                "int cerberus_audio8_cache_probe(void) { return 8; }\n",
+                encoding="ascii",
+            )
+            subprocess.run(
+                ["cc", "-shared", "-fPIC", "-O0", "-o", str(library), str(source)],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+            probe = ctypes.CDLL(str(library))
+            function = probe.cerberus_audio8_cache_probe
+            function.restype = ctypes.c_int
+            if function() != 8:
+                raise RuntimeError("executable cache probe returned the wrong value")
+
+    def _compile_and_prewarm_codebooks(self) -> None:
+        """Compile only Audio8's stock fast-codebook method before API bind.
+
+        Any failure restores the exact eager bound method. The surrounding
+        generation loop, BF16 weights, sampling settings, reference voice, and
+        codec remain unchanged.
+        """
+        original = self.eager_generate_codebooks
+        if not callable(original):
+            print(
+                "Audio8 codebook compile unavailable (missing method); using eager",
+                flush=True,
+            )
+            return
+        started = time.monotonic()
+        try:
+            self._verify_executable_compile_cache()
+            compiled = torch.compile(original)
+            self.model._generate_codebooks = compiled
+            inputs = self.processor(
+                **self.processor_inputs("."), return_tensors="pt"
+            )
+            inputs = {
+                name: value.to(self.device) for name, value in inputs.items()
+            }
+            with INFERENCE_LOCK, torch.inference_mode():
+                torch.manual_seed(260810)
+                self.model.generate(
+                    **inputs,
+                    max_new_tokens=1,
+                    temperature=0.8,
+                    top_p=0.95,
+                    top_k=50,
+                    do_sample=True,
+                    return_dict_in_generate=True,
+                )
+                torch.cuda.synchronize()
+        except Exception as error:
+            self.model._generate_codebooks = original
+            self.compiled_generate_codebooks = None
+            print(
+                "Audio8 codebook compile unavailable "
+                f"({type(error).__name__}); using eager",
+                flush=True,
+            )
+            return
+        self.model._generate_codebooks = original
+        self.compiled_generate_codebooks = compiled
+        self.codebook_compile_active = True
+        self.codebook_compile_seconds = time.monotonic() - started
+        print(
+            "Audio8 stock codebook generator compiled and prewarmed in "
+            f"{self.codebook_compile_seconds:.3f}s",
+            flush=True,
+        )
+
+    def _encode_reference_once(self) -> torch.Tensor:
+        """Keep the operator-approved voice conditioning in RAM across requests."""
+        assert self.reference_audio and self.reference_text
+        prepared = self.processor(
+            text=["."],
+            reference_audio=[self.reference_audio],
+            reference_text=[self.reference_text],
+            return_tensors="pt",
+        )
+        audio_values = prepared["reference_audio_values"].to(self.device)
+        audio_lengths = prepared["reference_audio_lengths"].to(self.device)
+        with torch.inference_mode():
+            codes, lengths = self.model.encode_audio(audio_values, audio_lengths)
+        length = int(lengths[0])
+        if length <= 0:
+            raise RuntimeError("reference voice produced no conditioning frames")
+        # The processor accepts a small CPU code tensor and moves its request
+        # batch to the GPU below. No voice data is written to persistent storage.
+        return codes[0, :, :length].long().cpu().contiguous()
+
+    def processor_inputs(self, text: str) -> dict[str, Any]:
+        inputs: dict[str, Any] = {"text": [text]}
+        if self.reference_codes is not None and self.reference_text:
+            inputs.update(
+                {
+                    "reference_codes": self.reference_codes,
+                    "reference_text": [self.reference_text],
+                }
+            )
+        return inputs
+
+    def codebook_generator_for(
+        self, temperature: float, top_p: float, top_k: int
+    ) -> tuple[Any, bool]:
+        compiled = self.compiled_generate_codebooks
+        use_compiled = bool(
+            self.codebook_compile_active
+            and compiled is not None
+            and temperature == 0.8
+            and top_p == 0.95
+            and top_k == 50
+        )
+        return (
+            compiled if use_compiled else self.eager_generate_codebooks,
+            use_compiled,
+        )
 
     def synthesize(self, request: dict[str, Any]) -> tuple[bytes, float]:
         text = request.get("input")
@@ -125,28 +330,38 @@ class Audio8Runtime:
         top_k = integer(request.get("top_k"), 50, 1, 4096)
         seed = integer(request.get("seed"), 260810, 0, 2**31 - 1)
 
-        processor_inputs: dict[str, Any] = {"text": [text]}
-        if self.reference_audio and self.reference_text:
-            processor_inputs.update(
-                {
-                    "reference_audio": [self.reference_audio],
-                    "reference_text": [self.reference_text],
-                }
-            )
-        inputs = self.processor(**processor_inputs, return_tensors="pt")
+        inputs = self.processor(
+            **self.processor_inputs(text), return_tensors="pt"
+        )
         inputs = {name: value.to(self.device) for name, value in inputs.items()}
         started = time.monotonic()
         with INFERENCE_LOCK, torch.inference_mode():
-            torch.manual_seed(seed)
-            output = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                do_sample=True,
-                return_dict_in_generate=True,
+            # Select only after taking the same lock that protects inference and
+            # compile-fallback mutation. A queued request must observe an eager
+            # fallback if the preceding compiled request disabled its wrapper.
+            selected_codebooks, use_compiled_codebooks = self.codebook_generator_for(
+                temperature, top_p, top_k
             )
+            torch.manual_seed(seed)
+            previous_codebooks = self.model._generate_codebooks
+            self.model._generate_codebooks = selected_codebooks
+            try:
+                output = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    do_sample=True,
+                    return_dict_in_generate=True,
+                )
+            except Exception:
+                if use_compiled_codebooks:
+                    self.codebook_compile_active = False
+                    self.compiled_generate_codebooks = None
+                raise
+            finally:
+                self.model._generate_codebooks = previous_codebooks
             waveforms, lengths = self.model.decode_audio(output.codes)
             audio = waveforms[0, : int(lengths[0])].float().cpu().numpy()
         elapsed = time.monotonic() - started
@@ -192,7 +407,27 @@ class Handler(BaseHTTPRequestHandler):
                     "reference_conditioned": bool(
                         RUNTIME and RUNTIME.reference_audio
                     ),
+                    "reference_conditioning_cached": bool(
+                        RUNTIME and RUNTIME.reference_codes is not None
+                    ),
                     "sample_rate": RUNTIME.sample_rate if RUNTIME else None,
+                    "sdpa_backend": RUNTIME.sdpa_backend if RUNTIME else None,
+                    "codebook_compile_requested": bool(
+                        RUNTIME and RUNTIME.codebook_compile_requested
+                    ),
+                    "codebook_compile_active": bool(
+                        RUNTIME and RUNTIME.codebook_compile_active
+                    ),
+                    "codebook_compile_state": (
+                        "compiled"
+                        if RUNTIME and RUNTIME.codebook_compile_active
+                        else "eager_fallback"
+                        if RUNTIME and RUNTIME.codebook_compile_requested
+                        else "eager"
+                    ),
+                    "codebook_compile_seconds": (
+                        RUNTIME.codebook_compile_seconds if RUNTIME else None
+                    ),
                 },
             )
             return
@@ -247,7 +482,12 @@ def main() -> None:
     print(f"Loading {MODEL_NAME} from {MODEL_PATH}", flush=True)
     RUNTIME = Audio8Runtime()
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
-    print(f"Audio8 listening on {LISTEN_HOST}:{LISTEN_PORT}", flush=True)
+    print(
+        f"Audio8 listening on {LISTEN_HOST}:{LISTEN_PORT} "
+        f"with {RUNTIME.sdpa_backend} SDPA and "
+        f"{'compiled' if RUNTIME.codebook_compile_active else 'eager'} codebooks",
+        flush=True,
+    )
     server.serve_forever()
 
 

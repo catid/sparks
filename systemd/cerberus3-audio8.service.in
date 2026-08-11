@@ -12,6 +12,8 @@ Group=@GROUP@
 WorkingDirectory=@PROJECT_DIR@
 Environment=HOME=@HOME@
 Environment=AUDIO8_MODEL_DIR=@MODEL_DIR@
+Environment=AUDIO8_COMPILE_CODEBOOKS=1
+Environment=AUDIO8_COMPILE_CACHE_DIR=/var/cache/cerberus-audio8/torchinductor
 EnvironmentFile=-/etc/default/cerberus3-audio8
 ExecStartPre=-/usr/bin/docker rm -f cerberus3-audio8
 ExecStart=@PROJECT_DIR@/audio8/run-server.sh
@@ -27,6 +29,8 @@ PrivateTmp=true
 RestrictSUIDSGID=true
 LockPersonality=true
 UMask=0077
+CacheDirectory=cerberus-audio8
+CacheDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target

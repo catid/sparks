@@ -6,6 +6,9 @@ lock="${root}/audio8/MODEL.lock.json"
 image="${AUDIO8_IMAGE:-cerberus/audio8-tts:0.6b-f9612f13}"
 port="${AUDIO8_PORT:-8010}"
 max_active_requests="${AUDIO8_MAX_ACTIVE_REQUESTS:-2}"
+sdpa_backend="${AUDIO8_SDPA_BACKEND:-efficient}"
+compile_codebooks="${AUDIO8_COMPILE_CODEBOOKS:-0}"
+compile_cache_dir="${AUDIO8_COMPILE_CACHE_DIR:-/var/cache/cerberus-audio8/torchinductor}"
 reference_dir="${AUDIO8_REFERENCE_DIR:-}"
 runtime_uid="$(id -u)"
 runtime_gid="$(id -g)"
@@ -41,6 +44,20 @@ model_dir="${AUDIO8_MODEL_DIR:-${HOME}/models/${directory}}"
   echo "Invalid AUDIO8_MAX_ACTIVE_REQUESTS: ${max_active_requests}" >&2
   exit 2
 }
+case "${sdpa_backend}" in
+  math|efficient) ;;
+  *)
+    echo "Invalid AUDIO8_SDPA_BACKEND: ${sdpa_backend}" >&2
+    exit 2
+    ;;
+esac
+case "${compile_codebooks}" in
+  0|1) ;;
+  *)
+    echo "Invalid AUDIO8_COMPILE_CODEBOOKS: ${compile_codebooks}" >&2
+    exit 2
+    ;;
+esac
 [[ -d "${model_dir}" && ! -L "${model_dir}" ]] || {
   echo "Missing regular Audio8 model directory: ${model_dir}" >&2
   exit 2
@@ -78,6 +95,36 @@ if [[ -n "${reference_dir}" ]]; then
   )
 fi
 
+compile_args=(--env "AUDIO8_COMPILE_CODEBOOKS=${compile_codebooks}")
+if [[ "${compile_codebooks}" == 1 ]]; then
+  [[ "${compile_cache_dir}" =~ ^/[A-Za-z0-9._/@+-]+$ ]] || {
+    echo "Unsafe AUDIO8_COMPILE_CACHE_DIR: ${compile_cache_dir}" >&2
+    exit 2
+  }
+  install -d -m 0700 -- "${compile_cache_dir}" \
+    "${compile_cache_dir}/tmp" "${compile_cache_dir}/triton"
+  [[ -d "${compile_cache_dir}" && ! -L "${compile_cache_dir}" &&
+     -O "${compile_cache_dir}" && -w "${compile_cache_dir}" &&
+     -x "${compile_cache_dir}" ]] || {
+    echo "Audio8 compile cache must be an owned writable regular directory." >&2
+    exit 2
+  }
+  mount_options="$(findmnt -n -o OPTIONS -T "${compile_cache_dir}")" || {
+    echo "Could not inspect Audio8 compile cache mount." >&2
+    exit 2
+  }
+  if [[ ",${mount_options}," == *,noexec,* ]]; then
+    echo "Audio8 compile cache filesystem must allow executable mappings." >&2
+    exit 2
+  fi
+  compile_args+=(
+    --env TMPDIR=/compile-cache/tmp
+    --env TORCHINDUCTOR_CACHE_DIR=/compile-cache
+    --env TRITON_CACHE_DIR=/compile-cache/triton
+    --volume "${compile_cache_dir}:/compile-cache:rw"
+  )
+fi
+
 exec docker run --rm \
   --name cerberus3-audio8 \
   --user "${runtime_uid}:${runtime_gid}" \
@@ -97,6 +144,8 @@ exec docker run --rm \
   --env AUDIO8_MODEL_PATH=/models/audio8 \
   --env "AUDIO8_MODEL_NAME=${served_model_name}" \
   --env "AUDIO8_MAX_ACTIVE_REQUESTS=${max_active_requests}" \
+  --env "AUDIO8_SDPA_BACKEND=${sdpa_backend}" \
+  "${compile_args[@]}" \
   --env AUDIO8_HOST=0.0.0.0 \
   --env "AUDIO8_PORT=${port}" \
   --volume "${model_dir}:/models/audio8:ro" \
