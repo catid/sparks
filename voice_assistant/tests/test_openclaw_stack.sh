@@ -22,6 +22,16 @@ assert lock["node"]["architecture"] == "arm64"
 assert lock["node"]["sha256"] == "f3d5a797b5d210ce8e2cb265544c8e482eaedcb8aa409a8b46da7e8595d0dda0"
 assert lock["openclaw"]["version"] == "2026.7.1-2"
 assert lock["openclaw"]["integrity"].startswith("sha512-")
+assert lock["plugins"]["exa"] == {
+    "package": "@openclaw/exa-plugin",
+    "version": "2026.7.1",
+    "integrity": "sha512-MjBD4FO7MXvnx8a7u2iuXQYziYuIUE4wOW6ggf1BCbFu65IeggEMRiOkG6f9cjLFwMDvqoSvIBeeqT7ffCqZzw==",
+}
+assert lock["plugins"]["slack"] == {
+    "package": "@openclaw/slack",
+    "version": "2026.7.1",
+    "integrity": "sha512-dwVGEVCmoTQrOIeZaSCIOPg8pT7hB883QQEXdp9EZUDzTGuvSc+KxH2iERSOV/59hROQctYdcobGn/vdB1H4XA==",
+}
 
 gateway = config["gateway"]
 assert gateway["mode"] == "local"
@@ -34,6 +44,31 @@ assert gateway["auth"]["token"] == {
 assert gateway["http"]["endpoints"]["chatCompletions"]["enabled"] is True
 assert gateway["http"]["endpoints"]["responses"]["enabled"] is False
 
+slack = config["channels"]["slack"]
+assert slack["enabled"] is True
+assert slack["mode"] == "http"
+assert slack["botToken"] == {
+    "source": "env", "provider": "default", "id": "SLACK_BOT_TOKEN"
+}
+assert slack["signingSecret"] == {
+    "source": "env", "provider": "default", "id": "SLACK_SIGNING_SECRET"
+}
+assert slack["groupPolicy"] == "disabled"
+assert slack["dmPolicy"] == "disabled"
+assert slack["actions"] == {
+    "reactions": False,
+    "messages": False,
+    "pins": False,
+    "memberInfo": False,
+    "emojiList": False,
+}
+
+assert config["plugins"]["allow"] == ["exa", "slack"]
+assert config["plugins"]["entries"] == {
+    "exa": {"enabled": True},
+    "slack": {"enabled": True},
+}
+
 agents = config["agents"]
 assert agents["defaults"]["thinkingDefault"] == "xhigh"
 assert agents["defaults"]["maxConcurrent"] == 1
@@ -42,8 +77,17 @@ voice = agents["list"][0]
 assert voice["id"] == "voice" and voice["default"] is True
 assert voice["thinkingDefault"] == "xhigh"
 assert voice["tools"]["profile"] == "minimal"
+assert voice["tools"]["alsoAllow"] == ["message", "web_fetch", "web_search"]
+assert "group:runtime" in voice["tools"]["deny"]
+assert "group:fs" in voice["tools"]["deny"]
+assert "group:messaging" not in voice["tools"]["deny"]
+assert "group:web" not in voice["tools"]["deny"]
 assert voice["skills"] == []
 assert config["tools"]["profile"] == "minimal"
+assert config["tools"]["alsoAllow"] == ["message", "web_fetch", "web_search"]
+assert config["tools"]["web"]["search"]["provider"] == "exa"
+assert "exec" not in config["tools"]["alsoAllow"]
+assert "code_execution" not in config["tools"]["alsoAllow"]
 
 provider = config["models"]["providers"]["vllm"]
 assert provider["baseUrl"] == "http://cerberus1.local:8889/v1"
@@ -127,11 +171,17 @@ fi
 rg -q '^InaccessiblePaths=.*docker\.sock.*@HOME@/\.ssh' "${bridge_unit}"
 rg -q '^InaccessiblePaths=.*docker\.sock.*@HOME@/\.ssh' \
   "${voice_dir}/systemd/cerberus3-openclaw-voice.service.in"
-if rg -n '(OPENCLAW_GATEWAY_TOKEN|VOICE_OPENCLAW_TOKEN)=[A-Za-z0-9_-]{16,}' \
+if rg -n '(OPENCLAW_GATEWAY_TOKEN|VOICE_OPENCLAW_TOKEN|SLACK_BOT_TOKEN|EXA_API_KEY|SLACK_SIGNING_SECRET)=[A-Za-z0-9_-]{16,}' \
   "${voice_dir}"; then
   echo "repository contains a materialized gateway token" >&2
   exit 1
 fi
+rg -Fq '"${openclaw_release}/bin/openclaw" plugins install "${plugin_spec}"' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
+rg -Fq 'SLACK_BOT_TOKEN must be provisioned in the secret dotenv' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
+rg -Fq 'EXA_API_KEY must be provisioned in the secret dotenv' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
 
 fake_bin="${temporary_dir}/fake-bin"
 legacy_runtime="${temporary_dir}/legacy-runtime"

@@ -51,6 +51,45 @@
     "debug": false,
     "restart": false
   },
+  "channels": {
+    "slack": {
+      "enabled": true,
+      "mode": "http",
+      "botToken": {
+        "source": "env",
+        "provider": "default",
+        "id": "SLACK_BOT_TOKEN"
+      },
+      "signingSecret": {
+        "source": "env",
+        "provider": "default",
+        "id": "SLACK_SIGNING_SECRET"
+      },
+      "groupPolicy": "disabled",
+      "dmPolicy": "disabled",
+      "actions": {
+        "reactions": false,
+        "messages": false,
+        "pins": false,
+        "memberInfo": false,
+        "emojiList": false
+      }
+    }
+  },
+  "plugins": {
+    "allow": [
+      "exa",
+      "slack"
+    ],
+    "entries": {
+      "exa": {
+        "enabled": true
+      },
+      "slack": {
+        "enabled": true
+      }
+    }
+  },
   "agents": {
     "defaults": {
       "workspace": "@WORKSPACE@",
@@ -122,12 +161,15 @@
         },
         "tools": {
           "profile": "minimal",
+          "alsoAllow": [
+            "message",
+            "web_fetch",
+            "web_search"
+          ],
           "deny": [
             "group:runtime",
             "group:fs",
-            "group:web",
             "group:automation",
-            "group:messaging",
             "group:nodes",
             "group:media",
             "gateway",
@@ -144,12 +186,15 @@
   },
   "tools": {
     "profile": "minimal",
+    "alsoAllow": [
+      "message",
+      "web_fetch",
+      "web_search"
+    ],
     "deny": [
       "group:runtime",
       "group:fs",
-      "group:web",
       "group:automation",
-      "group:messaging",
       "group:nodes",
       "group:media",
       "gateway",
@@ -159,6 +204,11 @@
     ],
     "elevated": {
       "enabled": false
+    },
+    "web": {
+      "search": {
+        "provider": "exa"
+      }
     },
     "loopDetection": {
       "enabled": true

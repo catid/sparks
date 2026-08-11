@@ -8,10 +8,12 @@ service at `http://cerberus1.local:8889/v1`. The `.local` name is published
 only on the management LAN; bare `cerberus1` is deliberately not required.
 
 The voice agent uses `xhigh` thinking, which the DS4F compatibility map sends
-as `reasoning_effort: max`. Its tool profile is deliberately `minimal`: speech
-captured by a room microphone cannot run shell commands, edit files, browse,
-send messages, or control the cluster. The checked-in workspace guidance also
-keeps answers short enough for TTS and prevents secrets from being spoken.
+as `reasoning_effort: max`. Its tool profile starts at `minimal` and adds only
+Exa web search, web fetch, and outbound Slack messages. Speech captured by a
+room microphone still cannot run shell commands, edit files, schedule
+automation, accept inbound Slack events, or control the cluster. The checked-in
+workspace guidance also keeps answers short enough for TTS and prevents secrets
+from being spoken.
 
 ## Installation
 
@@ -41,8 +43,12 @@ port overlap.
 
 The installer creates `/etc/cerberus3-voice/gateway.env` once as a root-owned
 mode-`0600` file. It stores the same random bearer token under the Gateway and
-bridge variable names without ever printing it. Existing valid token, config,
-and workspace files are preserved. During the first canonical install, the
+bridge variable names without ever printing it, and generates an independent
+Slack HTTP signing secret. Provision `SLACK_BOT_TOKEN` and `EXA_API_KEY` in that
+file before starting the service. The Slack channel runs in outbound-only HTTP
+mode on the loopback Gateway: it does not use the Slack app token and does not
+open a second Socket Mode connection. Existing valid token, config, and
+workspace files are preserved. During the first canonical install, the
 pre-rename token, optional root-owned mode-`0600` ASR and bridge overrides,
 OpenClaw state, workspace, and caches are copied without printing their
 contents, and only known host/path identity fields are updated.

@@ -104,6 +104,20 @@ legacy_asr_cache_dir="${service_home}/.cache/cerebrus-voice/qwen3-asr"
 config_path="${state_dir}/openclaw.json"
 node_dir="${runtime_root}/releases/node-v24.15.0-linux-arm64"
 openclaw_release="${runtime_root}/releases/openclaw-2026.7.1-2"
+mapfile -t pinned_openclaw_plugins < <(python3 - \
+  "${voice_dir}/openclaw/runtime.lock.json" <<'PY'
+import json
+import pathlib
+import sys
+
+lock = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+for plugin_id in sorted(lock["plugins"]):
+    plugin = lock["plugins"][plugin_id]
+    print(f'{plugin["package"]}@{plugin["version"]}')
+PY
+)
+[[ "${#pinned_openclaw_plugins[@]}" == "2" ]] ||
+  fail "expected exactly two pinned OpenClaw plugins"
 
 unit_names=(
   cerberus3-openclaw-voice.service
@@ -369,12 +383,14 @@ os.chown(directory, 0, 0)
 os.chmod(directory, 0o700)
 if not path.exists():
     token = secrets.token_hex(32)
+    slack_signing_secret = secrets.token_hex(32)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     fd = os.open(path, flags, 0o600)
     try:
         os.write(fd, (
             f"OPENCLAW_GATEWAY_TOKEN={token}\n"
             f"VOICE_OPENCLAW_TOKEN={token}\n"
+            f"SLACK_SIGNING_SECRET={slack_signing_secret}\n"
         ).encode("ascii"))
         os.fsync(fd)
     finally:
@@ -384,6 +400,7 @@ if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0:
     raise SystemExit("secret dotenv must be a root-owned regular file")
 if stat.S_IMODE(info.st_mode) != 0o600:
     raise SystemExit("secret dotenv must have mode 0600")
+
 values = {}
 for line in path.read_text(encoding="ascii").splitlines():
     if not line or line.startswith("#"):
@@ -394,10 +411,28 @@ for line in path.read_text(encoding="ascii").splitlines():
     if key in values:
         raise SystemExit("duplicate secret dotenv key")
     values[key] = value
+
+if "SLACK_SIGNING_SECRET" not in values:
+    signing_secret = secrets.token_hex(32)
+    with path.open("a", encoding="ascii") as stream:
+        stream.write(f"SLACK_SIGNING_SECRET={signing_secret}\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    values["SLACK_SIGNING_SECRET"] = signing_secret
+
 gateway = values.get("OPENCLAW_GATEWAY_TOKEN", "")
 bridge = values.get("VOICE_OPENCLAW_TOKEN", "")
 if gateway != bridge or len(gateway) < 48 or not gateway.isalnum():
     raise SystemExit("gateway and bridge tokens must be the same strong value")
+signing_secret = values.get("SLACK_SIGNING_SECRET", "")
+if len(signing_secret) < 48 or not signing_secret.isalnum():
+    raise SystemExit("Slack signing secret must be a strong alphanumeric value")
+slack_bot_token = values.get("SLACK_BOT_TOKEN", "")
+if len(slack_bot_token) < 20 or any(char.isspace() for char in slack_bot_token):
+    raise SystemExit("SLACK_BOT_TOKEN must be provisioned in the secret dotenv")
+exa_api_key = values.get("EXA_API_KEY", "")
+if len(exa_api_key) < 16 or any(char.isspace() for char in exa_api_key):
+    raise SystemExit("EXA_API_KEY must be provisioned in the secret dotenv")
 PY
 
 config_to_validate="${rendered_config}"
@@ -425,6 +460,16 @@ if [[ "${config_to_validate}" == "${rendered_config}" ]]; then
   "${elevate[@]}" install -o "${service_user}" -g "${service_group}" -m 0600 \
     "${rendered_config}" "${config_path}"
 fi
+
+for plugin_spec in "${pinned_openclaw_plugins[@]}"; do
+  run_as_service_user env \
+    OPENCLAW_STATE_DIR="${state_dir}" \
+    OPENCLAW_CONFIG_PATH="${config_path}" \
+    OPENCLAW_WORKSPACE_DIR="${workspace}" \
+    XDG_CACHE_HOME="${cache_dir}" \
+    PATH="${node_dir}/bin:${openclaw_release}/bin:/usr/bin:/bin" \
+    "${openclaw_release}/bin/openclaw" plugins install "${plugin_spec}"
+done
 
 agents_target="${workspace}/AGENTS.md"
 if "${elevate[@]}" test -e "${agents_target}" && ((replace_workspace == 0)); then

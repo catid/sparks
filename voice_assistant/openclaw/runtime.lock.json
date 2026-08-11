@@ -11,5 +11,17 @@
     "version": "2026.7.1-2",
     "tarball": "https://registry.npmjs.org/openclaw/-/openclaw-2026.7.1-2.tgz",
     "integrity": "sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g=="
+  },
+  "plugins": {
+    "exa": {
+      "package": "@openclaw/exa-plugin",
+      "version": "2026.7.1",
+      "integrity": "sha512-MjBD4FO7MXvnx8a7u2iuXQYziYuIUE4wOW6ggf1BCbFu65IeggEMRiOkG6f9cjLFwMDvqoSvIBeeqT7ffCqZzw=="
+    },
+    "slack": {
+      "package": "@openclaw/slack",
+      "version": "2026.7.1",
+      "integrity": "sha512-dwVGEVCmoTQrOIeZaSCIOPg8pT7hB883QQEXdp9EZUDzTGuvSc+KxH2iERSOV/59hROQctYdcobGn/vdB1H4XA=="
+    }
   }
 }
