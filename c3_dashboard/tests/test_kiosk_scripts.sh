@@ -148,5 +148,7 @@ kiosk_unit="${dashboard_dir}/systemd/dgx-spark-c3-kiosk.service.in"
 grep -Fq 'ExecStartPre=+/usr/bin/chvt 7' "${kiosk_unit}"
 grep -Fq 'Environment=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1' \
   "${kiosk_unit}"
+grep -Fq 'export GSK_RENDERER=cairo' \
+  "${dashboard_dir}/scripts/launch-kiosk.sh"
 
 echo "C3 kiosk launcher mock tests passed."

@@ -97,6 +97,13 @@ def run_kiosk(url: str, size: tuple[int, int], retry_seconds: int) -> int:
             self.webview.set_cursor_from_name("none")
             self.webview.set_background_color(Gdk.RGBA(0.02, 0.03, 0.04, 1.0))
             settings = self.webview.get_settings()
+            # Bare rootless Xorg has no compositor. On GB10, WebKit's
+            # accelerated surface can remain white even though the page is
+            # loaded and polling. Force the small local dashboard through the
+            # software renderer so the X window owns real, capturable pixels.
+            settings.set_hardware_acceleration_policy(
+                WebKit.HardwareAccelerationPolicy.NEVER
+            )
             settings.set_enable_developer_extras(False)
             if hasattr(settings, "set_enable_write_console_messages_to_stdout"):
                 settings.set_enable_write_console_messages_to_stdout(True)

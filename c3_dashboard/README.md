@@ -131,7 +131,9 @@ transient D-Bus session live under a systemd-owned runtime directory rather
 than the operator's home. WebKit's nested bubblewrap/FUSE sandbox is disabled
 because it cannot mount inside the already hardened systemd namespace; the
 unit retains its systemd restrictions and the kiosk cannot navigate away from
-the exact loopback dashboard origin.
+the exact loopback dashboard origin. GTK and WebKit use software rendering for
+this small page: on bare GB10 Xorg, accelerated WebKit surfaces can remain
+white without a compositor even while the page is loaded and polling.
 
 ## Operations
 

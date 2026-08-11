@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import pathlib
 import unittest
 
 from c3_dashboard import kiosk
@@ -78,6 +79,13 @@ class SizeTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 kiosk.parse_args(["--retry-seconds", "0"])
+
+
+class RenderingPolicyTests(unittest.TestCase):
+    def test_bare_xorg_uses_software_webkit_policy(self) -> None:
+        source = pathlib.Path(kiosk.__file__).read_text(encoding="utf-8")
+        self.assertIn("set_hardware_acceleration_policy", source)
+        self.assertIn("HardwareAccelerationPolicy.NEVER", source)
 
 
 if __name__ == "__main__":

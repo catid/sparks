@@ -56,6 +56,7 @@ export XDG_DATA_HOME="${runtime_home}/data"
 export XDG_STATE_HOME="${runtime_home}/state"
 export XDG_RUNTIME_DIR="${runtime_home}"
 export GDK_BACKEND=x11
+export GSK_RENDERER=cairo
 export GDK_SCALE=1
 export GDK_DPI_SCALE=1
 export GTK_CSD=0
