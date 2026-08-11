@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${CX7_INSTALLER_TEST_LOG:?missing CX7_INSTALLER_TEST_LOG}"
+printf '%q ' "$@" >>"${CX7_INSTALLER_TEST_LOG}"
+printf '\n' >>"${CX7_INSTALLER_TEST_LOG}"
+
+# Apply-path tests must never touch the host's real /etc/netplan.  Remap only
+# the installer's one exact target and its timestamped backup into the fixture.
+if [[ -n "${CX7_INSTALLER_TEST_TARGET:-}" ]]; then
+  remapped=()
+  for argument in "$@"; do
+    case "${argument}" in
+      /etc/netplan/40-cx7.yaml*)
+        argument="${CX7_INSTALLER_TEST_TARGET}${argument#/etc/netplan/40-cx7.yaml}"
+        ;;
+    esac
+    remapped+=("${argument}")
+  done
+  set -- "${remapped[@]}"
+  if [[ "${1:-}" == install ]]; then
+    filtered=("$1")
+    shift
+    while (($#)); do
+      case "$1" in
+        -o|-g)
+          shift 2
+          ;;
+        *)
+          filtered+=("$1")
+          shift
+          ;;
+      esac
+    done
+    set -- "${filtered[@]}"
+  fi
+fi
+
+# The fixture cannot actually elevate. Make the simulated root-owned Netplan
+# tree traversable immediately before executing the exact cleanup command.
+if [[ "${1:-}" == "/usr/bin/rm" && "${2:-}" == "-rf" ]]; then
+  target="${4:-}"
+  if [[ -n "${target}" && -d "${target}" ]]; then
+    chmod -R u+rwx -- "${target}" 2>/dev/null || true
+  fi
+fi
+
+exec "$@"

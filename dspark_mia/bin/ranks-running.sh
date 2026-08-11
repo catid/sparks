@@ -12,10 +12,7 @@ need_command sudo
 need_command timeout
 require_ssh_identity
 
-if [[ "$(/usr/bin/hostname -s)" != "spark1" ]]; then
-  echo "Run the two-node rank check from spark1." >&2
-  exit 2
-fi
+require_mia_head_host
 
 rank_timeout="${MIA_RANK_CHECK_TIMEOUT_SECONDS:-15}"
 if [[ ! "${rank_timeout}" =~ ^[1-9][0-9]*$ ]]; then

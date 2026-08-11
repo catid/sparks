@@ -1,12 +1,13 @@
 # Software inventory and pins
 
-This is the reproducibility snapshot from both Sparks on 2026-07-29. Versions
-are evidence of the working deployment, not an instruction to downgrade a
-newer supported DGX OS automatically.
+This is the reproducibility snapshot from the serving pair on 2026-07-29,
+rechecked on newly provisioned `cerebrus3` on 2026-08-10. Versions are evidence
+of the working deployment, not an instruction to downgrade a newer supported
+DGX OS automatically.
 
 ## Host stack
 
-Both nodes matched unless noted:
+All three nodes matched unless noted:
 
 | Component | Audited version |
 | --- | --- |
@@ -28,7 +29,7 @@ Both nodes matched unless noted:
 | OpenSSH | 9.6p1 |
 | ethtool | 6.7 |
 | nvme-cli | 2.8 |
-| Nginx, Spark 1 only | 1.24.0 |
+| Nginx, `cerebrus1` only | 1.24.0 |
 
 Do not copy `/etc/dgx-release` into an issue or report: it includes the
 machine's serial number. Record only its software-build and OTA fields.
@@ -52,8 +53,10 @@ Docker runtime supplied by DGX OS.
 | Recipe | `MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark` |
 | Recipe commit | `0220360b752349c9b3129d64799246a4ec106640` |
 | Container | `ghcr.io/anemll/dspark-vllm-gx10@sha256:a83948492cf13df455170fb42885f5ef4db54fefe0feff0f841ecbff464ac9d8` |
-| Model | `deepseek-ai/DeepSeek-V4-Flash-DSpark` |
-| Model revision | `62af8fffb2f7030cac4de2f0169f5b8d1101b646` |
+| Active model | `apetersson/DeepSeek-V4-Flash-0731-Abliterated-FP8` |
+| Active revision | `7d02640c72a2c8127f116d3d1933ddfec5e4c0fa` |
+| Reference model | `deepseek-ai/DeepSeek-V4-Flash-DSpark` |
+| Reference revision | `62af8fffb2f7030cac4de2f0169f5b8d1101b646` |
 
 The upstream recipe is a Git submodule checked out detached at that commit;
 local behavior is implemented by adjacent wrappers and the Compose override,
@@ -65,9 +68,9 @@ The audited arm64 image had image ID:
 sha256:3430d6614a8e2925f34d059af6caf05aff42387326db4d05639a60f10f2654d8
 ```
 
-The model lock additionally requires 48 Safetensors shards totaling
-166,886,535,336 bytes and hashes its checkpoint index and `config.json`.
-Each Spark stores a complete local copy outside Git. Use
+Both model locks require 48 Safetensors shards totaling
+166,886,535,336 bytes and hash the checkpoint index and `config.json`.
+Each Spark stores a complete local copy of the selected revision outside Git. Use
 `scripts/download-pinned-model.sh`, `scripts/sync-pinned-model-multirail.sh`,
 and `dspark_mia/bin/validate-model.sh`; lifecycle commands never download
 weights.
@@ -153,7 +156,7 @@ driver, or model revision:
 1. record all current pins and the model lock validation;
 2. use a new Compose project/profile and ports;
 3. confirm both ranks load the same NCCL library;
-4. prove four-rail RDMA counter deltas;
+4. prove RDMA counter deltas on the selected production edge or ring paths;
 5. inspect vLLM startup for rejected or renamed flags;
 6. repeat fixed 1/2/4/8/16/32-concurrency prompts;
 7. retest long-context reasoning/tool output, not only token rate;

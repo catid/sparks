@@ -1,21 +1,21 @@
 # Inference operations
 
-Spark 1 is the sole lifecycle coordinator. It runs rank 0, owns the
+C1 (`cerebrus1`) is the sole lifecycle coordinator. It runs rank 0, owns the
 OpenAI-compatible HTTP endpoint, supervises both ranks, and hosts the
-dashboard. Spark 2 runs one headless rank and must not run an independent
+dashboard. C2 (`cerebrus2`) runs one headless rank and must not run an independent
 model supervisor.
 
 The active low-concurrency agent deployment is:
 
 | Role | Location |
 | --- | --- |
-| vLLM API | Spark 1, `http://spark1.lan:8889/v1` |
-| Health and metrics | Spark 1, ports matching the selected profile |
-| TP rank 0 | Spark 1 |
-| TP rank 1 | Spark 2, headless; no separate HTTP API |
-| Model supervisor | Spark 1 systemd |
-| Telemetry collector | Spark 1, loopback port 8090 by safe default |
-| HTTP/HTTPS front end | Spark 1 Nginx |
+| vLLM API | C1, `http://cerebrus1:8889/v1` |
+| Health and metrics | C1, ports matching the selected profile |
+| TP rank 0 | C1 |
+| TP rank 1 | C2, headless; no separate HTTP API |
+| Model supervisor | C1 systemd |
+| Telemetry collector | C1, loopback port 8090 by safe default |
+| HTTP/HTTPS front end | C1 Nginx |
 
 If a generated local profile uses different ports or a different served model
 name, that profile is authoritative.
@@ -29,7 +29,7 @@ untrusted clients.
 ## Initial manual launch
 
 Before enabling boot persistence, perform one controlled manual launch from
-Spark 1:
+C1:
 
 ```bash
 cd /path/to/sparks
@@ -41,7 +41,7 @@ MIA_ENV_FILE="${MIA_ENV_FILE}" ./dspark_mia/bin/status.sh
 MIA_ENV_FILE="${MIA_ENV_FILE}" ./dspark_mia/bin/probe.sh
 ```
 
-The launcher synchronizes the selected integration to Spark 2, starts the
+The launcher synchronizes the selected integration to C2, starts the
 headless worker first, starts rank 0 second, and waits for `/v1/models`. Cold
 weight loading, FlashInfer warm-up, and CUDA-graph capture take several
 minutes. A running container is not the readiness signal; `/health`,
@@ -58,7 +58,7 @@ image or checkpoint.
 
 ## Boot-persistent supervisor
 
-Install from Spark 1 only. Select the generated local profile when invoking
+Install from C1 only. Select the generated local profile when invoking
 the installer:
 
 ```bash
@@ -72,7 +72,7 @@ MIA_ENV_FILE=mia-agent.local.env \
 The `verify` action renders paths, the profile, and the service account into
 the units and checks them without modifying the host. The `enable` action
 installs the units and ConnectX-7 readiness gate, disables retired conflicting
-model/router units, and enables the Spark 1 supervisor. Spark 2 must not enable
+model/router units, and enables the C1 supervisor. C2 must not enable
 this unit.
 
 The installer's `start` action is non-disruptive when the supervisor is
@@ -90,7 +90,7 @@ Render the C8 OpenClaw profile before the first installation or when switching
 back from the C32 throughput profile:
 
 ```bash
-./scripts/configure-dspark-profile.sh --profile agent
+./scripts/configure-dspark-profile.sh --profile agent --model active
 MIA_ENV_FILE=mia-agent.local.env \
   ./scripts/install-dspark-supervisor.sh restart
 ```
@@ -178,7 +178,7 @@ remains healthy.
 
 Probes, cleanup, and cold starts have wall-clock limits. Failed cold starts
 retry indefinitely with bounded exponential backoff. After a stable run, the
-backoff resets. Compose intentionally has `restart: "no"`: only the Spark 1
+backoff resets. Compose intentionally has `restart: "no"`: only the C1
 supervisor is allowed to replace ranks, and it always recycles both.
 
 The supervisor holds a lifecycle lock. Direct `start.sh` and `stop.sh` calls
@@ -221,15 +221,15 @@ sudo journalctl -fu dgx-spark-dspark-mia.service
 
 The expected outcome is two new container IDs/start timestamps followed by a
 healthy API advertising the same model. Cold recovery can take several
-minutes. A Spark 2 reboot is another valid test, but a targeted rank failure is
+minutes. A C2 reboot is another valid test, but a targeted rank failure is
 less disruptive and proves the same pair-replacement logic.
 
 ## Dashboard
 
-The read-only dashboard reports both Sparks' thermals, power, GPU utilization,
+The read-only dashboard reports both rank hosts' thermals, power, GPU utilization,
 unified-memory/RSS measurements, aggregate token rates, queue/KV/speculation
 metrics, and per-rail RDMA counters. Its three-minute rolling charts include
-generation throughput and Spark 1/2 GPU and CPU-cluster temperatures.
+generation throughput and C1/C2 GPU and CPU-cluster temperatures.
 
 Run the collector on loopback by default:
 
@@ -247,8 +247,10 @@ the protected web endpoint:
 
 On a fresh web installation, the helper generates a random Basic-auth
 password and stores it only in the root-readable service environment. Nginx
-publishes `https://spark1.lan` with a self-signed private certificate and
-redirects cleartext `http://spark1.lan` to HTTPS. See
+publishes the host selected with `DASHBOARD_WEB_HOST`, whose default is the
+canonical `https://cerebrus1.lan` endpoint. It redirects cleartext HTTP to
+HTTPS. Existing installations may retain a transitional `spark1.lan`
+certificate until deliberately re-rendered. See
 [`dashboard/README.md`](../dashboard/README.md) for credential retrieval,
 certificate trust, replacement-environment, and explicitly unauthenticated
 private-LAN options.
@@ -273,22 +275,62 @@ For a loopback-only manual collector with no `DASHBOARD_AUTH`, omit `--user`.
 
 An optional third-host collector probes both Sparks over restricted SSH and
 keeps this dashboard's memory off the inference pair. Follow
-[`REMOTE_DASHBOARD.md`](REMOTE_DASHBOARD.md); do not stop the current Spark 1
+[`REMOTE_DASHBOARD.md`](REMOTE_DASHBOARD.md); do not stop the current C1
 unit until the remote API reports fresh, healthy data for both nodes.
 
 For TP2, rank 0 is configured as `aggregate` and rank 1 as `worker`. Rank 1 has
 no HTTP endpoint, and the dashboard must not sum API counters from both ranks.
-RDMA hardware counters, rather than ordinary netdev bytes, prove that all four
-rails are active.
+RDMA hardware counters, rather than ordinary netdev bytes, must show payload
+traffic on both logical links of the direct production edge: C1 P1
+(`rocep1s0f1`, `roceP2p1s0f1`) and C2 P0 (`rocep1s0f0`,
+`roceP2p1s0f0`). The other ring ports may remain idle during TP2 inference.
+
+### Cerebrus 3 rack display
+
+C3 can run an independent five-second collector and a rootless-X kiosk sized
+for the attached 1424x280 rack panel. It polls all three hosts, shows current
+and rolling cluster-average CPU/GPU/RAM utilization, and derives generation
+tok/s from consecutive C1 vLLM counter samples. A stale or unreachable API is
+shown explicitly; a lifetime token counter is never presented as a live rate.
+
+```bash
+c3_dashboard/scripts/install.sh verify
+c3_dashboard/scripts/install.sh start
+systemctl status dgx-spark-c3-dashboard.service dgx-spark-c3-kiosk.service
+curl -fsS http://127.0.0.1:9763/api/status | jq .
+```
+
+The kiosk retries if the HDMI panel is absent at boot. It does not enable GDM,
+and C3 remains on `multi-user.target`. See
+[`c3_dashboard/README.md`](../c3_dashboard/README.md) for display and SSH
+preflight details.
+
+### Cerebrus 3 Audio8 API
+
+The optional C3 Audio8 service is independent of DS4F and exposes an
+OpenAI-compatible speech endpoint on port 8010. Prepare the pinned model/image,
+then install the boot unit:
+
+```bash
+scripts/install-audio8.sh prepare
+scripts/install-audio8.sh start
+curl -fsS http://127.0.0.1:8010/health | jq .
+```
+
+An operator-approved reference can be selected with the root-readable
+`/etc/default/cerebrus3-audio8`; the audio and exact transcript stay outside
+Git. The service never starts a speaker loop. See
+[`audio8/README.md`](../audio8/README.md).
 
 ## Reboot expectations
 
-The model unit waits for the network-online target, Docker, and a fresh
-four-rail readiness check. Spark 1 is the only orchestrator, so boot ordering
-between the machines is tolerated: unsuccessful cold starts back off until
-Spark 2, Docker, the fabric, image, and checkpoint are available.
+The model unit waits for the network-online target, Docker, and a fresh check
+of the direct C1-C2 TP2 edge. C1 is the only orchestrator, so rank-host boot
+ordering is tolerated: unsuccessful cold starts back off until C2, Docker,
+the direct edge, image, and checkpoint are available. C3 is not a production
+service dependency.
 
-After either machine reboots, return to Spark 1 and check the coordinator and
+After either rank host reboots, return to C1 and check the coordinator and
 complete generation:
 
 ```bash

@@ -1,0 +1,37 @@
+[Unit]
+Description=DGX Spark C3 cluster display collector
+Documentation=file:@PROJECT_DIR@/c3_dashboard/README.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@PROJECT_DIR@
+Environment=HOME=@HOME@
+Environment=PATH=/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/default/dgx-spark-c3-dashboard
+ExecStart=/usr/bin/python3 @PROJECT_DIR@/c3_dashboard/server.py
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

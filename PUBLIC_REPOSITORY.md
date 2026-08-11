@@ -25,10 +25,11 @@ The same checker runs in CI over every tracked file. It is deliberately
 conservative. A clean automated scan is necessary but not sufficient: raw
 model output and operational telemetry still require semantic review.
 
-The two DSpark `.env` profiles are tracked exceptions because they contain
+The audited DSpark `.env` profiles are tracked exceptions because they contain
 only reproducible topology and runtime settings, not credentials. Paths and
-private RFC1918 addresses describe this specific two-Spark installation and
-must be adapted before use elsewhere.
+the three allowlisted RFC1918 management addresses describe this specific
+installation and must be adapted before use elsewhere. The safety checker
+still rejects every other literal `10/8` address.
 
 No top-level license has been selected yet. Public visibility alone does not
 grant permission to copy or redistribute this repository; add the owner's

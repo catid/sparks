@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Cerebrus Cluster Pulse</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="dashboard" class="dashboard" data-connection="connecting">
+    <header class="topbar">
+      <div class="brand" aria-label="Cerebrus three-node cluster">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <div class="brand-copy">
+          <strong>CEREBRUS</strong>
+          <span>CLUSTER PULSE</span>
+        </div>
+      </div>
+
+      <div class="cluster-summary" role="status" aria-live="polite">
+        <span id="cluster-indicator" class="status-dot status-dot--checking" aria-hidden="true"></span>
+        <strong id="cluster-state">CONNECTING</strong>
+        <span class="summary-divider" aria-hidden="true"></span>
+        <span id="host-count">0 / 3 NODES</span>
+      </div>
+
+      <div class="sample-meta">
+        <span><b>5S</b> REFRESH</span>
+        <span class="summary-divider" aria-hidden="true"></span>
+        <span id="sample-age">NO SAMPLE</span>
+        <time id="sample-time">--:--:--</time>
+      </div>
+    </header>
+
+    <main class="main-grid" aria-label="Cluster telemetry">
+      <section class="metrics-grid" aria-label="Cluster averages and throughput">
+        <article class="metric-card metric-card--cpu" data-metric="cpu" data-state="waiting">
+          <header class="metric-heading">
+            <span><i aria-hidden="true"></i>CPU</span>
+            <small>CLUSTER AVG</small>
+          </header>
+          <div class="metric-reading">
+            <output id="cpu-value" aria-label="Current cluster average CPU utilization">—</output>
+            <span>%</span>
+          </div>
+          <div class="sparkline-wrap">
+            <svg id="cpu-chart" class="sparkline" viewBox="0 0 240 84" preserveAspectRatio="none"
+                 role="img" aria-label="Rolling CPU utilization graph">
+              <line class="chart-guide" x1="0" y1="42" x2="240" y2="42"></line>
+              <path id="cpu-area" class="chart-area"></path>
+              <path id="cpu-line" class="chart-line"></path>
+              <circle id="cpu-dot" class="chart-dot" r="3" hidden></circle>
+            </svg>
+            <span id="cpu-scale" class="chart-scale">100%</span>
+          </div>
+          <footer><span id="cpu-range">MIN — · MAX —</span><span id="cpu-delta">Δ —</span></footer>
+        </article>
+
+        <article class="metric-card metric-card--gpu" data-metric="gpu" data-state="waiting">
+          <header class="metric-heading">
+            <span><i aria-hidden="true"></i>GPU</span>
+            <small>CLUSTER AVG</small>
+          </header>
+          <div class="metric-reading">
+            <output id="gpu-value" aria-label="Current cluster average GPU utilization">—</output>
+            <span>%</span>
+          </div>
+          <div class="sparkline-wrap">
+            <svg id="gpu-chart" class="sparkline" viewBox="0 0 240 84" preserveAspectRatio="none"
+                 role="img" aria-label="Rolling GPU utilization graph">
+              <line class="chart-guide" x1="0" y1="42" x2="240" y2="42"></line>
+              <path id="gpu-area" class="chart-area"></path>
+              <path id="gpu-line" class="chart-line"></path>
+              <circle id="gpu-dot" class="chart-dot" r="3" hidden></circle>
+            </svg>
+            <span id="gpu-scale" class="chart-scale">100%</span>
+          </div>
+          <footer><span id="gpu-range">MIN — · MAX —</span><span id="gpu-delta">Δ —</span></footer>
+        </article>
+
+        <article class="metric-card metric-card--ram" data-metric="ram" data-state="waiting">
+          <header class="metric-heading">
+            <span><i aria-hidden="true"></i>RAM</span>
+            <small>CLUSTER AVG</small>
+          </header>
+          <div class="metric-reading">
+            <output id="ram-value" aria-label="Current cluster average RAM utilization">—</output>
+            <span>%</span>
+          </div>
+          <div class="sparkline-wrap">
+            <svg id="ram-chart" class="sparkline" viewBox="0 0 240 84" preserveAspectRatio="none"
+                 role="img" aria-label="Rolling RAM utilization graph">
+              <line class="chart-guide" x1="0" y1="42" x2="240" y2="42"></line>
+              <path id="ram-area" class="chart-area"></path>
+              <path id="ram-line" class="chart-line"></path>
+              <circle id="ram-dot" class="chart-dot" r="3" hidden></circle>
+            </svg>
+            <span id="ram-scale" class="chart-scale">100%</span>
+          </div>
+          <footer><span id="ram-range">MIN — · MAX —</span><span id="ram-delta">Δ —</span></footer>
+        </article>
+
+        <article class="metric-card metric-card--tokens" data-metric="tokens" data-state="waiting">
+          <header class="metric-heading">
+            <span><i aria-hidden="true"></i>TOKENS</span>
+            <small id="tokens-state" data-state="unknown">WAITING</small>
+          </header>
+          <div class="metric-reading metric-reading--rate">
+            <output id="tokens-value" aria-label="Current aggregate tokens per second">—</output>
+            <span>TOK/S</span>
+          </div>
+          <div class="sparkline-wrap">
+            <svg id="tokens-chart" class="sparkline" viewBox="0 0 240 84" preserveAspectRatio="none"
+                 role="img" aria-label="Rolling token throughput graph">
+              <line class="chart-guide" x1="0" y1="42" x2="240" y2="42"></line>
+              <path id="tokens-area" class="chart-area"></path>
+              <path id="tokens-line" class="chart-line"></path>
+              <circle id="tokens-dot" class="chart-dot" r="3" hidden></circle>
+            </svg>
+            <span id="tokens-scale" class="chart-scale">AUTO</span>
+          </div>
+          <footer><span id="tokens-range">MIN — · MAX —</span><span id="tokens-delta">Δ —</span></footer>
+        </article>
+      </section>
+
+      <aside class="nodes-panel" aria-labelledby="nodes-title">
+        <header class="nodes-heading">
+          <div>
+            <span class="section-kicker">LIVE HOSTS</span>
+            <h1 id="nodes-title">SPARK ARRAY</h1>
+          </div>
+          <span id="history-window">5 MIN WINDOW</span>
+        </header>
+
+        <div class="node-columns" aria-hidden="true">
+          <span>NODE</span><span>CPU</span><span>GPU</span><span>RAM</span>
+        </div>
+
+        <div class="node-list">
+          <article id="host-c1" class="node-row" data-state="unknown">
+            <div class="node-name">
+              <span class="status-dot" aria-hidden="true"></span>
+              <div><strong>C1</strong><small id="c1-state">WAITING</small></div>
+            </div>
+            <output id="c1-cpu" aria-label="C1 CPU utilization">—</output>
+            <output id="c1-gpu" aria-label="C1 GPU utilization">—</output>
+            <output id="c1-ram" aria-label="C1 RAM utilization">—</output>
+          </article>
+
+          <article id="host-c2" class="node-row" data-state="unknown">
+            <div class="node-name">
+              <span class="status-dot" aria-hidden="true"></span>
+              <div><strong>C2</strong><small id="c2-state">WAITING</small></div>
+            </div>
+            <output id="c2-cpu" aria-label="C2 CPU utilization">—</output>
+            <output id="c2-gpu" aria-label="C2 GPU utilization">—</output>
+            <output id="c2-ram" aria-label="C2 RAM utilization">—</output>
+          </article>
+
+          <article id="host-c3" class="node-row" data-state="unknown">
+            <div class="node-name">
+              <span class="status-dot" aria-hidden="true"></span>
+              <div><strong>C3</strong><small id="c3-state">WAITING</small></div>
+            </div>
+            <output id="c3-cpu" aria-label="C3 CPU utilization">—</output>
+            <output id="c3-gpu" aria-label="C3 GPU utilization">—</output>
+            <output id="c3-ram" aria-label="C3 RAM utilization">—</output>
+          </article>
+        </div>
+
+        <p id="connection-message" class="connection-message" aria-live="assertive">
+          Waiting for telemetry…
+        </p>
+      </aside>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

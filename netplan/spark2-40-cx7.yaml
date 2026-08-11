@@ -1,27 +1,29 @@
+# Transitional filename for the cerebrus2 role. Keep its assignments aligned
+# with cerebrus2-40-cx7.yaml until the spark2 alias is retired.
 network:
   version: 2
   renderer: NetworkManager
   ethernets:
     enp1s0f0np0:
-      addresses: [192.168.100.11/24]
+      addresses: [192.168.0.2/24]
       dhcp4: false
       dhcp6: false
       link-local: []
       mtu: 9000
     enP2p1s0f0np0:
-      addresses: [192.168.101.11/24]
+      addresses: [192.168.1.2/24]
       dhcp4: false
       dhcp6: false
       link-local: []
       mtu: 9000
     enp1s0f1np1:
-      addresses: [192.168.102.11/24]
+      addresses: [192.168.4.1/24]
       dhcp4: false
       dhcp6: false
       link-local: []
       mtu: 9000
     enP2p1s0f1np1:
-      addresses: [192.168.103.11/24]
+      addresses: [192.168.5.1/24]
       dhcp4: false
       dhcp6: false
       link-local: []

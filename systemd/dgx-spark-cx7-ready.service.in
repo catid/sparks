@@ -1,5 +1,5 @@
 [Unit]
-Description=Wait for all four DGX Spark ConnectX-7 RoCE rails
+Description=Wait for the cerebrus1-cerebrus2 TP2 RoCE edge
 Documentation=file:@PROJECT_DIR@/docs/NETWORKING.md
 Wants=NetworkManager.service network-online.target
 After=NetworkManager.service network-online.target local-fs.target
@@ -10,7 +10,8 @@ Type=oneshot
 User=@USER@
 Group=@GROUP@
 Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=@PROJECT_DIR@/bin/wait-cx7-ready.sh --wait
+Environment=CX7_NODE_ROLE=cerebrus1
+ExecStart=@PROJECT_DIR@/bin/wait-cx7-ready.sh --wait --scope tp2
 # Do not remain active: each model start must pull in a fresh rail check.
 TimeoutStartSec=infinity
 NoNewPrivileges=true

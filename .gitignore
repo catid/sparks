@@ -30,6 +30,8 @@ htmlcov/
 *.key
 id_rsa*
 id_ed25519*
+id_*.pub
+authorized_keys*
 known_hosts
 .env
 .env.*
@@ -38,6 +40,8 @@ known_hosts
 !/dspark_mia/mia.env
 !/dspark_mia/mia-agent.env
 !/dspark_mia/mia-throughput.env
+!/dspark_mia3/mia3.env
+!/dspark_mia3/profiles/*.env
 /dashboard/dashboard.env.lan
 /openclaw/openclaw.json
 
@@ -48,10 +52,12 @@ known_hosts
 # Raw benchmark and agent trajectories can contain prompts, reasoning, shell
 # output, host paths, PIDs, and runtime identifiers. Publish only the curated
 # aggregate files explicitly allowed below.
+/.bench-private/
 /results/*
 !/results/AGENT_EVAL.md
 !/results/BASELINE.md
 !/results/DEEPSEEK_V4_2SPARK_REPORT.md
+!/results/DEEPSEEK_V4_3SPARK_REPORT.md
 !/results/DEEPSEEK_V4_C8_AGENT_PROFILE.md
 !/results/DEEPSEEK_V4_AGENT_EVAL_MAX.md
 !/results/DEEPSEEK_V4_DSPARK_AGENT_EVAL_MAX.md
@@ -76,3 +82,9 @@ known_hosts
 *.tar
 *.tar.gz
 *.zip
+
+# Private voice references and generated speech
+*.wav
+*.mp3
+*.flac
+*.ogg

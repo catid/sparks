@@ -1,27 +1,33 @@
-# Fresh two-Spark setup
+# Fresh three-Spark fabric and two-rank inference setup
 
 This runbook reproduces the selected DeepSeek V4 Flash DSpark deployment on
-two DGX Sparks without relying on files from the original hosts. It assumes:
+two inference ranks over a three-DGX-Spark ring. It assumes:
 
-- both machines run a current DGX OS image and use their supplied 240 W NVIDIA
+- all three machines run a current DGX OS image and use their supplied 240 W NVIDIA
   power adapters;
-- the machines are named `spark1` and `spark2`, and `spark2` resolves from
-  Spark 1 over a separate management network;
-- the same unprivileged service user exists on both;
+- each machine is reachable at its documented management address; section 2
+  installs the canonical `cerebrus1` through `cerebrus3` identities and local
+  name map;
+- the same unprivileged service user exists on all three;
 - that user's home and checkout paths contain no whitespace or shell
   metacharacters (the renderers reject ambiguous service paths);
-- two ConnectX-7 cables join the machines in the NVIDIA-supported topology;
+- three ConnectX-7 cables use the audited service ring: C1-P1/C2-P0,
+  C1-P0/C3-P0, and C2-P1/C3-P1. This is sufficient for the independent C3
+  workload role; the unsupported three-rank NCCL experiment requires the
+  explicit crossed C3 variant documented in `NETWORKING.md`;
 - each host has at least 400 GB free for the 166.9 GB checkpoint, an 18.8 GB
   container image, caches, and working headroom;
-- the Hugging Face account used for provisioning can access
-  `deepseek-ai/DeepSeek-V4-Flash-DSpark`.
+- the Hugging Face account used for provisioning can access the checkpoint
+  selected by `--model` (active abliterated revision by default, or the
+  original `deepseek-ai/DeepSeek-V4-Flash-DSpark` reference).
 
-Commands labeled **both** must be run separately on Spark 1 and Spark 2.
-Commands labeled **Spark 1** coordinate the pair.
+Commands labeled **both ranks** run on C1 and C2. Ring Netplan and fabric
+validation commands run on all three nodes. Commands labeled **C1** coordinate
+the TP2 pair; C3 is not a vLLM rank.
 
 ## 1. Clone and temporarily enable passwordless sudo
 
-**Both:**
+**All three ring nodes:**
 
 ```bash
 git clone --recurse-submodules https://github.com/catid/sparks.git ~/sparks
@@ -36,20 +42,52 @@ unrestricted root authority so an automation agent can complete the bootstrap
 without password prompts.
 
 Treat this as an attended installation window. Do not expose an agent or SSH
-account with this authority to untrusted users. Section 12 replaces it with a
+account with this authority to untrusted users. Section 13 replaces it with a
 narrower policy and removes it.
 
 Never copy an existing `.bashrc`, API-key file, Hugging Face token, SSH private
 key, Docker auth file, OpenClaw state directory, or TLS private key into this
 checkout. This is a public repository.
 
-## 2. Verify the DGX base and install host tools
+## 2. Assign canonical host identities
+
+Run the role-specific dry run and apply over the independent management
+connection. The installer binds each role to its exact management address,
+backs up `/etc/hosts`, sets the short hostname, installs all canonical and
+transitional aliases, and rolls back both files if validation fails:
+
+```bash
+# On the host at 10.10.84.28:
+scripts/install-cluster-host-identity.sh cerebrus1
+scripts/install-cluster-host-identity.sh cerebrus1 --apply
+
+# On the host at 10.10.84.12:
+scripts/install-cluster-host-identity.sh cerebrus2
+scripts/install-cluster-host-identity.sh cerebrus2 --apply
+
+# On the host at 10.10.84.121:
+scripts/install-cluster-host-identity.sh cerebrus3
+scripts/install-cluster-host-identity.sh cerebrus3 --apply
+```
+
+Open a new shell after the hostname change, then verify on every node:
+
+```bash
+hostname -s
+getent ahostsv4 cerebrus1 cerebrus2 cerebrus3
+```
+
+The checked-in `hosts/cerebrus*.hosts` files intentionally publish this
+non-routable reference topology. Adapt and review those sources before using
+the runbook on a different management subnet.
+
+## 3. Verify the DGX base and install host tools
 
 The playbook builds on DGX OS; it does not replace the vendor kernel, firmware,
 NVIDIA driver, CUDA toolkit, Docker Engine, Compose plugin, or NVIDIA Container
 Toolkit.
 
-**Both:**
+**All three ring nodes:**
 
 ```bash
 cd ~/sparks
@@ -73,9 +111,9 @@ confirm that no capsule update remains staged. Do not interrupt a firmware
 update. The original pair received SoC/GPU and USB-C power-delivery firmware
 before its final validation.
 
-## 3. Run headlessly
+## 4. Run headlessly
 
-**Both:**
+**All three ring nodes:**
 
 ```bash
 cd ~/sparks
@@ -95,91 +133,111 @@ No custom GPU clock or power limit is part of this setup. Do not add one
 unless a measured workload and the hardware's supported controls justify it.
 See [`HOST_TUNING.md`](HOST_TUNING.md).
 
-## 4. Configure and validate the four ConnectX-7 rails
+## 5. Configure and validate the ConnectX-7 ring
 
-The two physical cables expose four logical netdev/RDMA pairs. The checked-in
-Netplan files assign MTU-9000 point-to-point subnets:
-
-| Rail | Spark 1 | Spark 2 |
-| --- | --- | --- |
-| `enp1s0f0np0` | `192.168.100.10/24` | `192.168.100.11/24` |
-| `enP2p1s0f0np0` | `192.168.101.10/24` | `192.168.101.11/24` |
-| `enp1s0f1np1` | `192.168.102.10/24` | `192.168.102.11/24` |
-| `enP2p1s0f1np1` | `192.168.103.10/24` | `192.168.103.11/24` |
-
-Dry-run validation is the default:
+The exact six-subnet matrix and port mapping are in
+[`NETWORKING.md`](NETWORKING.md). Dry-run each canonical file first:
 
 ```bash
-# Spark 1
 cd ~/sparks
-scripts/install-cx7-netplan.sh spark1
-
-# Spark 2
-cd ~/sparks
-scripts/install-cx7-netplan.sh spark2
+scripts/install-cx7-netplan.sh cerebrus1
+ssh cerebrus2 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus2'
+ssh cerebrus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus3 --c3-port-map c3-p0-to-c1'
 ```
 
-Retain console or management-network access while changing networking. When
-the proposed files are correct:
+Retain console or management-network access, then apply on all three nodes:
 
 ```bash
-# Spark 1
-scripts/install-cx7-netplan.sh spark1 --apply
-
-# Spark 2
-scripts/install-cx7-netplan.sh spark2 --apply
+scripts/install-cx7-netplan.sh cerebrus1 --apply
+ssh cerebrus2 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus2 --apply'
+ssh cerebrus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus3 --c3-port-map c3-p0-to-c1 --apply'
 ```
 
-Each installer backs up an existing `/etc/netplan/40-cx7.yaml`, applies only
-the four CX-7 interfaces, then checks carrier, MTU, address, RDMA state, and
-peer ping. Recheck either host at any time:
+Validate the whole ring with `--scope ring`. Production preflight and systemd
+use `--scope tp2`, which checks only C1-P1 to C2-P0 and cannot be blocked by
+C3:
 
 ```bash
-bin/wait-cx7-ready.sh --check-once
+CX7_NODE_ROLE=cerebrus1 bin/wait-cx7-ready.sh --check-once --scope ring
+CX7_NODE_ROLE=cerebrus1 bin/wait-cx7-ready.sh --check-once --scope tp2
+ssh cerebrus3 'CX7_NODE_ROLE=cerebrus3 ~/sparks/bin/wait-cx7-ready.sh --check-once --scope ring --c3-port-map c3-p0-to-c1'
 rdma link show
 ```
 
-All four rails should report `ACTIVE/LINK_UP`. Read
-[`NETWORKING.md`](NETWORKING.md) before changing interface names, addresses,
-GID selection, or NCCL HCA ordering.
+## 6. Install the shared three-node cluster identity
 
-## 5. Create the Spark 1 to Spark 2 service identity
+The systemd supervisor has no interactive SSH agent. All three nodes use the
+same dedicated on-disk cluster key so any Spark can reach either peer without
+a laptop or forwarded agent. This intentionally increases the key's blast
+radius; do not reuse a personal identity.
 
-The systemd supervisor has no interactive SSH agent, so Spark 1 needs a
-dedicated on-disk key that can log in as the service user on Spark 2.
-
-**Spark 1:**
+**C1:**
 
 ```bash
 install -d -m 0700 ~/.ssh
 ssh-keygen -t ed25519 \
   -f ~/.ssh/id_ed25519_dgx_cluster \
   -C dspark-cluster
-ssh-copy-id -i ~/.ssh/id_ed25519_dgx_cluster.pub spark2
 chmod 0600 ~/.ssh/id_ed25519_dgx_cluster
-ssh -i ~/.ssh/id_ed25519_dgx_cluster \
-  -o IdentitiesOnly=yes spark2 hostname -s
+
+# Bootstrap authorization through the already authenticated management path.
+ssh-copy-id -i ~/.ssh/id_ed25519_dgx_cluster.pub cerebrus1
+ssh-copy-id -i ~/.ssh/id_ed25519_dgx_cluster.pub cerebrus2
+ssh-copy-id -i ~/.ssh/id_ed25519_dgx_cluster.pub cerebrus3
+
+# Build a cluster-only known-hosts file. Compare every displayed fingerprint
+# with `sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on that host's
+# already authenticated console/session before installing this file.
+cluster_scan="$(mktemp)"
+for host in cerebrus1 cerebrus2 cerebrus3; do
+  ssh-keyscan -H -t ed25519 "$host" >>"${cluster_scan}"
+done
+ssh-keygen -lf "${cluster_scan}"
+install -m 0600 "${cluster_scan}" ~/.ssh/dgx_cluster_known_hosts
+rm -f -- "${cluster_scan}"
+
+# The installer copies only the dedicated keypair and verified cluster
+# known-hosts file; it never copies a general ~/.ssh/config.
+scripts/install-shared-cluster-key.sh --install \
+  cerebrus1 cerebrus2 cerebrus3
+scripts/install-shared-cluster-key.sh --verify \
+  cerebrus1 cerebrus2 cerebrus3
 ```
+
+`ssh/cluster.config.example` is an optional, cluster-only alias block for
+interactive SSH. Review its user/path values and include a copied fragment
+from `~/.ssh/config`; do not replace or distribute a workstation's complete
+SSH configuration. Lifecycle scripts already pass their key options
+explicitly and rely on the installed `/etc/hosts` aliases.
 
 Use an empty key passphrase only when unattended boot recovery is required,
 and compensate with a dedicated account, trusted management network, and
-tightly controlled file permissions. Verify the Spark 2 host-key fingerprint
-through an independent channel before accepting it.
+tightly controlled file permissions. The installer defaults to strict host-key
+checking and never copies or overwrites a peer's general `~/.ssh/config`.
+Use `CLUSTER_STRICT_HOST_KEY_CHECKING=accept-new` only during an attended first
+contact after comparing fingerprints through an independent channel.
 
-The four-rail model-copy helper connects to each direct IP with strict host-key
-checking. Connect once to `192.168.100.11` through `192.168.103.11`, verify
-that each presented key matches Spark 2, and allow OpenSSH to record those
-aliases in the user's `known_hosts`. Neither `known_hosts` nor either key file
+Rotate the shared identity as one maintenance operation: stop the supervisor,
+generate a new cluster-only key in a temporary mode-0700 directory, add its
+public key to all three nodes through the still-working old identity, install
+the new private/public pair as `id_ed25519_dgx_cluster` on every node, verify
+all six directed peer paths, then remove the old public-key line everywhere.
+If any step fails, keep the old key authorized until all nodes are recovered.
+
+The model-copy helper connects to both C2 direct-edge addresses with strict
+host-key checking. Connect once to `192.168.0.2` and `192.168.1.2`, verify
+that each key matches C2, and record those aliases in the user's
+`known_hosts`. Neither `known_hosts`, `authorized_keys`, nor either key file
 belongs in Git.
 
-## 6. Render a local DSpark profile
+## 7. Render a local DSpark profile
 
 The tracked profiles preserve the audited installation. For a new path or
 username, generate a local ignored profile:
 
 ```bash
 cd ~/sparks
-scripts/configure-dspark-profile.sh
+scripts/configure-dspark-profile.sh --model active
 ```
 
 The default output is `dspark_mia/mia-throughput.local.env`. Review at least:
@@ -187,18 +245,25 @@ The default output is `dspark_mia/mia-throughput.local.env`. Review at least:
 - `WORKER_HOST` and `WORKER_INSTALL_DIR`;
 - `CLUSTER_SSH_KEY`;
 - `DSPARK_MODEL_HOST_PATH`;
-- Spark 1/2 addresses and the rendezvous/API ports;
-- the four NCCL HCA names.
+- C1/C2 management addresses and rendezvous/API ports;
+- the rank-specific C1-P1 and C2-P0 HCA expressions;
+- `enP7s7` for NCCL socket bootstrap, TP control, and Gloo.
 
 For an OpenClaw-oriented C1-C8 deployment, render the agent profile instead:
 
 ```bash
-scripts/configure-dspark-profile.sh --profile agent
+scripts/configure-dspark-profile.sh --profile agent --model active
 ```
 
-That output is `dspark_mia/mia-agent.local.env`. It retains the one-million
+That output is `dspark_mia/mia-agent.local.env` and selects the active
+abliterated FP8 revision plus `MODEL.abliterated-fp8.lock.json` atomically. It retains the one-million
 token model ceiling, port 8889, and both served model IDs while using an
 isolated Compose project/rendezvous/tmp identity and a C8 graph ceiling.
+
+Use `--model official` only when deliberately reproducing the original
+`deepseek-ai/DeepSeek-V4-Flash-DSpark` reference lock. Do not hand-edit just
+the model path: the renderer changes the host path, container path, repository,
+revision, and model-lock selector as one profile choice.
 
 Select exactly one rendered profile and keep it exported for every lifecycle
 or provisioning command:
@@ -214,7 +279,7 @@ export MIA_ENV_FILE="$HOME/sparks/dspark_mia/mia-agent.local.env"
 Do not add the generated profile to Git. It contains no required secret, but
 it describes the local paths and topology.
 
-Sync the pinned integration and selected profile to Spark 2:
+Sync the pinned integration and selected profile to C2:
 
 ```bash
 cd ~/sparks/dspark_mia
@@ -225,12 +290,12 @@ This verifies that the MiaAI-Lab submodule is clean at the locked commit,
 copies the integration to the exact worker path, and compares the selected
 profile hash on both machines.
 
-## 7. Install the rootful-Docker policy
+## 8. Install the rootful-Docker policy
 
 The lifecycle wrappers explicitly use `sudo -n /usr/bin/docker`; they do not
 fall back to a user/rootless Docker socket.
 
-**Both:**
+**All three ring nodes:**
 
 ```bash
 cd ~/sparks
@@ -239,24 +304,31 @@ scripts/install-docker-sudoers.sh status
 ```
 
 This is narrower than unrestricted `NOPASSWD: ALL`, but Docker remains
-root-equivalent. Keep the service account and its SSH key protected.
+root-equivalent. Keep the service account and its SSH key protected. C1 and C2
+need this policy for the active TP2 service. C3 retains it only so the
+independent model workloads (and the retained maintenance experiments) can
+launch pinned containers after the broad bootstrap policy is removed.
 
-## 8. Pull the exact container on both hosts
+## 9. Pull the exact container on all three hosts
 
 ```bash
-# Spark 1
+# C1
 cd ~/sparks
-MIA_ENV_FILE="${MIA_ENV_FILE}" scripts/pull-dspark-container.sh
+MIA_ENV_FILE="${MIA_ENV_FILE}" scripts/pull-dspark-container.sh describe
 MIA_ENV_FILE="${MIA_ENV_FILE}" \
-  scripts/pull-dspark-container.sh --pull-both
+  scripts/pull-dspark-container.sh --pull-all
 ```
 
 The image reference comes from `dspark_mia/UPSTREAM.lock` and includes a
-SHA-256 digest. The paired helper uses the selected cluster identity and
-requires identical image IDs on both nodes. Compose uses `pull_policy: never`,
-so a model start cannot silently change the runtime.
+SHA-256 digest. `--pull-all` uses the selected cluster identity, verifies that
+the exact repository digest is present on C1, C2, and C3, and requires
+identical image IDs on all three. Compose uses `pull_policy: never`, so a model
+start cannot silently change the runtime. C3 is not needed by production TP2,
+but the ring verifier and retained three-node harness require the same local
+image. `--pull-both` remains available for an intentionally two-rank-only
+installation.
 
-## 9. Download and copy the exact checkpoint
+## 10. Download and copy the exact checkpoint
 
 After installing the host prerequisites, install the Hugging Face CLI in its
 own isolated user environment:
@@ -270,7 +342,7 @@ hf auth login
 The token stays in the user's Hugging Face credential store; do not put it in
 the profile, shell history, command arguments, or repository.
 
-**Spark 1:**
+**C1:**
 
 ```bash
 cd ~/sparks
@@ -281,16 +353,20 @@ MIA_ENV_FILE="${MIA_ENV_FILE}" \
   scripts/sync-pinned-model-multirail.sh --sync
 ```
 
-The first script requests the exact revision in the selected profile's model
-lock (`MODEL.lock.json` by default). A profile may select another regular JSON
-lock directly inside `dspark_mia` with `MIA_MODEL_LOCK=NAME.json`. The second
-copies metadata once and stripes the 48 Safetensors shards round-robin over
-all four direct links. Logs are written under the user's state directory,
-outside the repository.
+The first script requests the exact revision in the selected profile's lock.
+`--model active` selects `MODEL.abliterated-fp8.lock.json` and revision
+`7d02640c72a2c8127f116d3d1933ddfec5e4c0fa`; `--model official` selects
+`MODEL.lock.json` and revision
+`62af8fffb2f7030cac4de2f0169f5b8d1101b646`. A profile may select another
+regular JSON lock directly inside `dspark_mia` with
+`MIA_MODEL_LOCK=NAME.json`. The second script copies metadata once and stripes
+the 48 Safetensors shards round-robin over the two logical links on the direct
+C1-C2 edge. Logs are written under the user's state directory, outside the
+repository.
 
-For the default lock, the validator requires:
+For either checked-in lock, the validator requires:
 
-- revision `62af8fffb2f7030cac4de2f0169f5b8d1101b646`;
+- the exact repository and revision selected by that lock;
 - 48 indexed Safetensors shards;
 - exactly `166886535336` Safetensors bytes;
 - locked SHA-256 and byte sizes for `config.json` and the checkpoint index;
@@ -307,7 +383,7 @@ cd ~/sparks/dspark_mia
 ./bin/validate-model.sh
 
 remote_profile="$HOME/sparks/dspark_mia/$(basename "${MIA_ENV_FILE}")"
-ssh -i ~/.ssh/id_ed25519_dgx_cluster -o IdentitiesOnly=yes spark2 \
+ssh -i ~/.ssh/id_ed25519_dgx_cluster -o IdentitiesOnly=yes cerebrus2 \
   "MIA_ENV_FILE='${remote_profile}' \
    '$HOME/sparks/dspark_mia/bin/validate-model.sh'"
 ```
@@ -315,13 +391,34 @@ ssh -i ~/.ssh/id_ed25519_dgx_cluster -o IdentitiesOnly=yes spark2 \
 If the two accounts have different home paths, use the worker path from the
 profile in the remote command.
 
-## 10. Validate without launching
+The active TP2 service does not read checkpoint files from C3. The retained
+PP3 compatibility harness has its own lock for the active abliterated
+checkpoint. To stage that checkpoint on C3, first render a portable, ignored
+trial profile and keep its selector exported for every trial command:
+
+```bash
+cd ~/sparks
+scripts/configure-mia3-profile.sh
+export MIA3_ENV_FILE=mia3.local.env
+
+cd dspark_mia3
+./bin/sync.sh
+./bin/sync-model.sh 2
+./bin/preflight.sh
+```
+
+`sync-model.sh 2` copies from C1 to C3 over their direct ring edge and validates
+the exact trial lock remotely. The ring NCCL verifier needs the pinned image,
+not the model; stage the 166.9 GB checkpoint on C3 only when preserving the PP3
+reproduction path or preparing another explicitly reviewed model trial.
+
+## 11. Validate without launching
 
 Stop any other GPU model service deliberately before this step. The preflight
 will refuse to continue when another vLLM workload or either selected port is
 active; it never stops that workload for you.
 
-**Spark 1:**
+**C1:**
 
 ```bash
 cd ~/sparks/dspark_mia
@@ -334,14 +431,14 @@ MIA_ENV_FILE=mia-throughput.env ./tests/test-supervisor.sh
 ./bin/preflight.sh
 ```
 
-`preflight.sh` checks both rendered Compose ranks, both pinned artifacts, all
-four rails on both hosts, SSH, Docker authority, ports, and absence of a
+`preflight.sh` checks both rendered Compose ranks, both pinned artifacts, both
+logical links on the direct TP2 edge, SSH, Docker authority, ports, and absence of a
 conflicting vLLM process. It performs no pull, download, launch, stop, or
 service mutation.
 
-## 11. Install the supervisor and dashboard
+## 12. Install the supervisor and dashboard
 
-Only Spark 1 owns the DSpark service:
+Only C1 owns the DSpark service:
 
 ```bash
 cd ~/sparks
@@ -349,9 +446,9 @@ MIA_ENV_FILE="${MIA_ENV_FILE}" \
   scripts/install-dspark-supervisor.sh start
 ```
 
-Do not enable an independent model service on Spark 2. Containers deliberately
+Do not enable an independent model service on C2. Containers deliberately
 use `restart: "no"` because a single TP rank cannot rejoin an existing NCCL
-generation safely. Spark 1's long-running supervisor detects either failed,
+generation safely. C1's long-running supervisor detects either failed,
 rebooted, OOM-killed, or replaced rank and recycles the pair in worker-first
 order.
 
@@ -370,19 +467,21 @@ curl -fsS http://127.0.0.1:8889/health
 curl -fsS http://127.0.0.1:8889/v1/models | jq
 ```
 
-Install the read-only dashboard and Nginx front end on Spark 1:
+Install the read-only dashboard and Nginx front end on C1:
 
 ```bash
 cd ~/sparks
-scripts/install-dashboard.sh start --web
+DASHBOARD_WEB_HOST=cerebrus1.lan \
+  scripts/install-dashboard.sh start --web
 ```
 
 The public template binds the Python collector to loopback. Nginx accepts the
-friendly port-80 URL, redirects it to HTTPS, and serves `spark1.lan` on port
-443 using a locally generated self-signed certificate. On a fresh install the
-script creates a random Basic-auth password in the mode-0600 host environment;
-the TLS private key and password never enter Git. Configure `DASHBOARD_AUTH`
-explicitly before any direct non-loopback collector bind.
+friendly port-80 URL and redirects it to HTTPS. `cerebrus1.lan` is both the
+code default and the canonical dashboard endpoint; set `DASHBOARD_WEB_HOST`
+only when the site's resolvable DNS name differs. On a fresh install the script
+creates a random Basic-auth password in the mode-0600 host environment; the TLS
+private key and password never enter Git. Configure `DASHBOARD_AUTH` explicitly
+before any direct non-loopback collector bind.
 See [`OPERATIONS.md`](OPERATIONS.md) and
 [`dashboard/README.md`](../dashboard/README.md).
 
@@ -392,9 +491,9 @@ fixed-command SSH key, sanitized remote environment, systemd flow, and safe
 cutover are in [`REMOTE_DASHBOARD.md`](REMOTE_DASHBOARD.md). The default above
 remains the supported on-Spark mode.
 
-## 12. Remove broad sudo and review network exposure
+## 13. Remove broad sudo and review network exposure
 
-**Both:**
+**All provisioned ring nodes:**
 
 ```bash
 cd ~/sparks
@@ -417,16 +516,16 @@ No provider API key is required by vLLM. Any OpenClaw or client credentials
 belong on the separate agent machine or in an external mode-0600 secret store,
 not in either model-server checkout.
 
-## 13. Prove boot recovery
+## 14. Prove boot recovery
 
 First test recovery without rebooting by following the exact scoped procedure
 in [`OPERATIONS.md`](OPERATIONS.md). It resolves the rank through both Compose
-labels, kills only that verified container, and confirms that Spark 1 replaces
+labels, kills only that verified container, and confirms that C1 replaces
 both rank identities and restores the advertised model.
 
 After that passes, schedule a reboot test. A TP pair is unavailable while
-either host is down; Spark 1 is the sole coordinator and will rebuild one
-coherent generation when both hosts and all four rails return.
+either rank host is down; C1 is the sole coordinator and will rebuild one
+coherent generation when both rank hosts and their direct TP2 edge return.
 
 Verify after the reboot:
 
@@ -435,9 +534,9 @@ systemctl is-enabled dgx-spark-dspark-mia.service
 systemctl is-active dgx-spark-dspark-mia.service
 cd ~/sparks/dspark_mia
 ./bin/probe.sh
-../bin/wait-cx7-ready.sh --check-once
+CX7_NODE_ROLE=cerebrus1 ../bin/wait-cx7-ready.sh --check-once --scope tp2
 ```
 
 Finally run the checks in [`VALIDATION.md`](VALIDATION.md), including the
 fixed-length 1/2/4/8/16/32 matrix and RDMA-counter proof that traffic crossed
-all four HCAs.
+both logical links on the direct C1-P1/C2-P0 production edge.

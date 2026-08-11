@@ -1,4 +1,13 @@
-# Persistent two-Spark DeepSeek V4 service
+# Legacy persistent two-Spark DeepSeek V4 rank-service architecture
+
+> [!WARNING]
+> This is a retired architecture retained for audit and rollback context. It is
+> not the active DSpark service and must not be installed alongside the current
+> C1-owned Mia supervisor. For a new or repaired deployment, follow
+> [`docs/SETUP.md`](../docs/SETUP.md) and
+> [`docs/OPERATIONS.md`](../docs/OPERATIONS.md). The host-specific paths,
+> four-link layout, ports, model settings, and controller below describe the
+> historical installation only.
 
 This layout runs one logical vLLM server using TP2 across the two DGX Sparks:
 
@@ -20,7 +29,7 @@ Repository files:
 - `dgx-spark-deepseek-v4-rank1.service`: install on Spark 2, but do not enable.
 - `dgx-spark-deepseek-v4.env.example`: copy to
   `/etc/dgx-spark-deepseek-v4.env` on both nodes and keep inference values
-  identical. The checked-in production profile runs both target and DFlash
+  identical. The checked-in historical profile runs both target and DFlash
   eager, uses `0.90` GPU-memory utilization, and auto-fits one maximum-context
   request (`DEEPSEEK_MAX_MODEL_LEN=-1`, `DEEPSEEK_MAX_NUM_SEQS=1`).
 - `libexec/dgx-spark-deepseek-v4-rank1-control`: root-owned forced-command
@@ -90,7 +99,7 @@ wrapper because the existing interactive account may independently have
 broader administrative rights.
 
 `manage-deepseek-v4-rank1.sh` retains `legacy-shell-v1` as its default only so
-an existing, not-yet-migrated environment keeps working. The production
+an existing, not-yet-migrated environment keeps working. The historical
 environment example explicitly selects `forced-command-v1`; the rank-0 service
 installer rejects the legacy protocol and the old general cluster key.
 
@@ -185,7 +194,7 @@ progress. A TP2 server has only one HTTP endpoint: monitor
 `http://127.0.0.1:8000` on Spark 1, while continuing to collect Spark 2 hardware
 telemetry over a separately authorized read-only path.
 
-With the production `DEEPSEEK_MAX_MODEL_LEN=-1` setting, vLLM resolves the
+With the historical `DEEPSEEK_MAX_MODEL_LEN=-1` setting, vLLM resolves the
 actual maximum from the KV cache during startup. Record that resolved value
 from the rank-0 journal after every vLLM, CUDA, model, or memory-layout change;
 do not infer it from the checkpoint metadata. `DEEPSEEK_MAX_NUM_SEQS=1` is an

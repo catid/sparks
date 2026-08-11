@@ -1,0 +1,161 @@
+# Isolated three-node TP1/PP3 trial. This file never shares a Compose project,
+# API port, rendezvous port, or temporary directory with production.
+services:
+  vllm-dspark:
+    image: ${DSPARK_VLLM_IMAGE:?DSPARK_VLLM_IMAGE must be a pinned digest}
+    pull_policy: never
+    restart: "no"
+    entrypoint: []
+    network_mode: host
+    ipc: host
+    shm_size: "64gb"
+    gpus: all
+
+    devices:
+      - /dev/infiniband:/dev/infiniband
+
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile:
+        soft: 500000
+        hard: 500000
+
+    volumes:
+      - ${HF_CACHE:?missing HF cache}:/cache/huggingface
+      - ${DSPARK_TMP_HOST:?missing temp path}:/tmp
+      - ${DSPARK_MODEL_HOST_PATH:?missing host model path}:${DSPARK_MODEL:?missing container model path}:ro
+
+    environment:
+      HF_HOME: /cache/huggingface
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_XET: "1"
+      VLLM_CACHE_ROOT: /cache/huggingface/vllm-cache
+
+      DSPARK_MODEL: "${DSPARK_MODEL}"
+      SERVED_MODEL_NAME: "${SERVED_MODEL_NAME}"
+      SERVED_MODEL_ALIASES: "${SERVED_MODEL_ALIASES:-}"
+      VLLM_HOST: "${VLLM_HOST}"
+      VLLM_PORT: "${VLLM_PORT}"
+      VLLM_HOST_IP: "${VLLM_HOST_IP}"
+      NODE_RANK: "${NODE_RANK}"
+      HEADLESS: "${HEADLESS:-}"
+      MASTER_ADDR: "${MASTER_ADDR}"
+      MASTER_PORT: "${MASTER_PORT}"
+      TP_SIZE: "${TP_SIZE}"
+      PP_SIZE: "${PP_SIZE}"
+      NNODES: "${NNODES}"
+      MAX_MODEL_LEN: "${MAX_MODEL_LEN}"
+      MAX_NUM_SEQS: "${MAX_NUM_SEQS}"
+      MAX_NUM_BATCHED_TOKENS: "${MAX_NUM_BATCHED_TOKENS}"
+      MAX_CUDAGRAPH_CAPTURE_SIZE: "${MAX_CUDAGRAPH_CAPTURE_SIZE}"
+      GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION}"
+      MTP_NUM_TOKENS: "${MTP_NUM_TOKENS}"
+      ENABLE_DSPARK: "${ENABLE_DSPARK}"
+      VLLM_PP_LAYER_PARTITION: "${VLLM_PP_LAYER_PARTITION:-}"
+
+      NCCL_NET: "${NCCL_NET}"
+      NCCL_IB_DISABLE: "${NCCL_IB_DISABLE}"
+      NCCL_IB_HCA: "${NCCL_IB_HCA}"
+      NCCL_IB_SUBNET_AWARE_ROUTING: "${NCCL_IB_SUBNET_AWARE_ROUTING}"
+      NCCL_NET_PLUGIN: "${NCCL_NET_PLUGIN}"
+      NCCL_IB_MERGE_NICS: "${NCCL_IB_MERGE_NICS}"
+      NCCL_SOCKET_IFNAME: "${NCCL_SOCKET_IFNAME}"
+      NCCL_SOCKET_FAMILY: "${NCCL_SOCKET_FAMILY}"
+      NCCL_IB_ADDR_FAMILY: "${NCCL_IB_ADDR_FAMILY}"
+      NCCL_IB_ROCE_VERSION_NUM: "${NCCL_IB_ROCE_VERSION_NUM}"
+      TP_SOCKET_IFNAME: "${TP_SOCKET_IFNAME}"
+      GLOO_SOCKET_IFNAME: "${GLOO_SOCKET_IFNAME}"
+      NCCL_DMABUF_ENABLE: "${NCCL_DMABUF_ENABLE}"
+      NCCL_NET_GDR_C2C: "${NCCL_NET_GDR_C2C}"
+      NCCL_IB_QPS_PER_CONNECTION: "${NCCL_IB_QPS_PER_CONNECTION}"
+      NCCL_IB_SPLIT_DATA_ON_QPS: "${NCCL_IB_SPLIT_DATA_ON_QPS}"
+      NCCL_CUMEM_ENABLE: "${NCCL_CUMEM_ENABLE}"
+      NCCL_IGNORE_CPU_AFFINITY: "${NCCL_IGNORE_CPU_AFFINITY}"
+      NCCL_NVLS_ENABLE: "${NCCL_NVLS_ENABLE}"
+      NCCL_DEBUG: "${NCCL_DEBUG}"
+      NCCL_DEBUG_SUBSYS: "${NCCL_DEBUG_SUBSYS}"
+      TORCH_NCCL_ASYNC_ERROR_HANDLING: "${TORCH_NCCL_ASYNC_ERROR_HANDLING}"
+
+      CUTE_DSL_ARCH: "${CUTE_DSL_ARCH}"
+      TORCH_CUDA_ARCH_LIST: "${TORCH_CUDA_ARCH_LIST}"
+      FLASHINFER_CUDA_ARCH_LIST: "${FLASHINFER_CUDA_ARCH_LIST}"
+      FLASHINFER_DISABLE_VERSION_CHECK: "${FLASHINFER_DISABLE_VERSION_CHECK}"
+      VLLM_USE_FLASHINFER_SAMPLER: "${VLLM_USE_FLASHINFER_SAMPLER}"
+      VLLM_USE_B12X_MOE: "${VLLM_USE_B12X_MOE}"
+      VLLM_B12X_W4A16_FORCE_BLOCKS_PER_SM: "${VLLM_B12X_W4A16_FORCE_BLOCKS_PER_SM}"
+      VLLM_B12X_W4A16_FORCE_BLOCKS_MAX_M: "${VLLM_B12X_W4A16_FORCE_BLOCKS_MAX_M}"
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "${VLLM_ALLOW_LONG_MAX_MODEL_LEN}"
+      VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: "${VLLM_SPARSE_INDEXER_MAX_LOGITS_MB}"
+      VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "${VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS}"
+      PYTORCH_CUDA_ALLOC_CONF: "${PYTORCH_CUDA_ALLOC_CONF}"
+
+      # Null removes the unsafe scalar inherited by some images/host shells.
+      NCCL_IB_GID_INDEX: null
+
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        export PATH="/usr/local/cuda/bin:/usr/local/bin:$${PATH:-}"
+        export CUDA_HOME="$${CUDA_HOME:-/usr/local/cuda}"
+        export CUDA_PATH="$${CUDA_PATH:-$${CUDA_HOME}}"
+        export CUDAToolkit_ROOT="$${CUDAToolkit_ROOT:-$${CUDA_HOME}}"
+        export LD_LIBRARY_PATH="${NCCL_RUNTIME_PATH}:/usr/local/cuda/lib64:$${LD_LIBRARY_PATH:-}"
+
+        if [[ -z "$${VLLM_PP_LAYER_PARTITION:-}" ]]; then
+          unset VLLM_PP_LAYER_PARTITION
+        fi
+
+        served_models=("$${SERVED_MODEL_NAME}")
+        if [[ -n "$${SERVED_MODEL_ALIASES:-}" ]]; then
+          read -r -a model_aliases <<<"$${SERVED_MODEL_ALIASES}"
+          served_models+=("$${model_aliases[@]}")
+        fi
+
+        args=(
+          serve "$${DSPARK_MODEL}"
+          --served-model-name "$${served_models[@]}"
+          --host "$${VLLM_HOST}"
+          --port "$${VLLM_PORT}"
+          --trust-remote-code
+          --tensor-parallel-size "$${TP_SIZE}"
+          --pipeline-parallel-size "$${PP_SIZE}"
+          --kv-cache-dtype nvfp4_ds_mla
+          --block-size 256
+          --max-model-len "$${MAX_MODEL_LEN}"
+          --max-num-seqs "$${MAX_NUM_SEQS}"
+          --max-num-batched-tokens "$${MAX_NUM_BATCHED_TOKENS}"
+          --max-cudagraph-capture-size "$${MAX_CUDAGRAPH_CAPTURE_SIZE}"
+          --gpu-memory-utilization "$${GPU_MEMORY_UTILIZATION}"
+          --enable-prefix-caching
+          --async-scheduling
+          --enable-chunked-prefill
+          --tokenizer-mode deepseek_v4
+          --distributed-executor-backend mp
+          --distributed-timeout-seconds 1800
+          --moe-backend flashinfer_b12x
+          --tool-call-parser deepseek_v4
+          --enable-auto-tool-choice
+          --reasoning-parser deepseek_v4
+          --reasoning-config '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"<think>","reasoning_end_str":"</think>"}'
+          --default-chat-template-kwargs '{"thinking":true}'
+          --generation-config vllm
+          --enable-flashinfer-autotune
+          --nnodes "$${NNODES}"
+          --node-rank "$${NODE_RANK}"
+          --master-addr "$${MASTER_ADDR}"
+          --master-port "$${MASTER_PORT}"
+        )
+
+        if [[ "$${ENABLE_DSPARK}" == "1" ]]; then
+          speculative_config="{\"method\":\"dspark\",\"num_speculative_tokens\":$${MTP_NUM_TOKENS},\"draft_sample_method\":\"probabilistic\"}"
+          args+=(--speculative-config "$${speculative_config}")
+        fi
+        if [[ -n "$${HEADLESS:-}" ]]; then
+          args+=(--headless)
+        fi
+
+        exec /usr/local/bin/vllm "$${args[@]}"

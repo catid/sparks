@@ -80,6 +80,8 @@ unset NCCL_IB_GID_INDEX
 : "${DSPARK_MODEL_HOST_PATH:?missing DSPARK_MODEL_HOST_PATH}"
 : "${DSPARK_MODEL:?missing DSPARK_MODEL}"
 : "${SERVED_MODEL_NAME:?missing SERVED_MODEL_NAME}"
+: "${HEAD_NCCL_IB_HCA:?missing HEAD_NCCL_IB_HCA}"
+: "${WORKER_NCCL_IB_HCA:?missing WORKER_NCCL_IB_HCA}"
 
 # shellcheck disable=SC2034  # Shared library array is consumed by callers.
 MIA_SSH_OPTIONS=(
@@ -94,6 +96,25 @@ need_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Missing required command: $1" >&2
     exit 2
+  fi
+}
+
+canonical_cluster_role() {
+  case "$1" in
+    cerebrus1|spark1) printf 'cerebrus1\n' ;;
+    cerebrus2|spark2) printf 'cerebrus2\n' ;;
+    cerebrus3|spark3) printf 'cerebrus3\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+require_mia_head_host() {
+  local short_host role
+  short_host="$(/usr/bin/hostname -s)"
+  if ! role="$(canonical_cluster_role "${short_host}")" ||
+      [[ "${role}" != "cerebrus1" ]]; then
+    echo "Run this two-node coordinator from cerebrus1 (the exact spark1 alias is accepted during migration); current host: ${short_host}." >&2
+    return 2
   fi
 }
 
@@ -161,6 +182,17 @@ node_host_ip() {
   case "$1" in
     0) printf '%s\n' "${VLLM_HOST_IP}" ;;
     1) printf '%s\n' "${WORKER_VLLM_HOST_IP}" ;;
+    *)
+      echo "Node rank must be 0 or 1." >&2
+      return 2
+      ;;
+  esac
+}
+
+node_nccl_hca() {
+  case "$1" in
+    0) printf '%s\n' "${HEAD_NCCL_IB_HCA}" ;;
+    1) printf '%s\n' "${WORKER_NCCL_IB_HCA}" ;;
     *)
       echo "Node rank must be 0 or 1." >&2
       return 2

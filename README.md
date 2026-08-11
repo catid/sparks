@@ -1,21 +1,26 @@
-# Two DGX Sparks serving DeepSeek V4 Flash
+# Three-Spark fabric with two DGX Sparks serving DeepSeek V4 Flash
 
-This repository captures an audited live deployment for serving
-`deepseek-ai/DeepSeek-V4-Flash-DSpark` across two NVIDIA DGX Sparks, together
-with reproducible fresh-host automation. Spark 1 owns the OpenAI-compatible
-endpoint and supervises both ranks; Spark 2 is a headless worker. The selected
+This repository captures an audited live deployment for serving the pinned
+`apetersson/DeepSeek-V4-Flash-0731-Abliterated-FP8` revision across two ranks
+on a three-node NVIDIA DGX Spark ring, together with reproducible fresh-host
+automation. The original `deepseek-ai/DeepSeek-V4-Flash-DSpark` lock remains
+available as a reference profile. `cerebrus1`
+owns the OpenAI-compatible endpoint and supervises both ranks; `cerebrus2` is
+a headless worker; `cerebrus3` completes the physical ring but is not a vLLM
+rank. The selected
 profile uses TP=2, native DSpark speculative decoding (`k=5`), NVFP4 DS-MLA KV
-cache, FlashInfer B12X kernels, thinking mode, and four logical RoCE rails
-carried by two ConnectX-7 cables. The active scheduler is the C8 agent profile;
+cache, FlashInfer B12X kernels, thinking mode, and the two logical RoCE links
+on the direct C1-P1 to C2-P0 edge. The active scheduler is the C8 agent profile;
 the C32 throughput profile remains available for bulk request waves.
 
-The active pair and its installed artifacts were inspected directly. The new
-portable renderers/installers have static, unit, and non-mutating integration
-coverage, but have not yet been replayed as a bare-metal installation on a
-third fresh pair.
+The active pair and its installed artifacts were inspected directly. The
+fresh-host tooling was also replayed on newly unboxed `cerebrus3`: DGX updates,
+firmware inspection, host packages, headless boot, performance governor, ring Netplan,
+pinned image, and exact checkpoint were validated there. A completely fresh
+two-rank serving pair has not yet been rebuilt solely from the public runbook.
 
-The current endpoint is `http://spark1.lan:8889/v1`. The optional dashboard is
-available through Nginx at `http://spark1.lan` and `https://spark1.lan`.
+The canonical model endpoint is `http://cerebrus1:8889/v1`. The dashboard
+defaults to `https://cerebrus1.lan` (self-signed certificate).
 
 ## Give an installer temporary sudo access first
 
@@ -32,7 +37,8 @@ scripts/bootstrap-sudo.sh enable
 This creates `/etc/sudoers.d/90-sparks-bootstrap-nopasswd` and grants the
 selected user unrestricted passwordless root access. It is deliberately broad
 and temporary. After setup, retain only the narrower Docker policy needed by
-the model supervisor, then remove the bootstrap rule on both machines:
+the model supervisor and optional ring-maintenance tools, then remove the
+bootstrap rule on all three machines:
 
 ```bash
 cd ~/sparks
@@ -50,32 +56,50 @@ OpenClaw state in this public checkout.
 
 | Component | Selected deployment |
 | --- | --- |
-| Model | `DeepSeek-V4-Flash-DSpark@62af8ff…` |
+| Active model | `DeepSeek-V4-Flash-0731-Abliterated-FP8@7d02640c…` |
+| Reference model | `DeepSeek-V4-Flash-DSpark@62af8ff…` |
 | Container | digest-pinned `ghcr.io/anemll/dspark-vllm-gx10` |
 | Parallelism | one TP=2 generation spanning both Sparks; PP=1 |
 | Speculation | native probabilistic DSpark, five draft tokens |
 | Context | 1,048,576-token ceiling; 8 active scheduler slots |
-| API | Spark 1 only, port 8889; canonical `deepseek-v4-flash` alias |
-| Fabric | four 200 Gb/s, MTU-9000 RoCE interfaces |
-| Recovery | Spark 1 systemd supervisor recycles the complete TP pair |
-| Dashboard | GPU/CPU/SoC/NVMe/CX-7 thermals, memory, vLLM and RDMA history |
+| API | C1 only, port 8889; canonical `deepseek-v4-flash` alias |
+| Fabric | three-node CX-7 ring; production uses the two C1-C2 logical links |
+| Recovery | C1 systemd supervisor recycles the complete TP pair; C3 is not a dependency |
+| Dashboards | C1 operator telemetry plus a 1424x280 C3 rack display with three-host utilization and live token rate |
+| C3 TTS | isolated Audio8 0.6B BF16 OpenAI-compatible service; optional private, operator-approved reference |
 
 The model and container are both pinned and validated before launch. Model
 weights remain outside Git and are mounted read-only. The MiaAI-Lab recipe is
 kept as a clean, pinned submodule; all local overlays and lifecycle code live
 beside it.
 
-The live two-Spark audit found no unexplained installed drift. It also found no
+The rank-host audit found no unexplained installed drift. It also found no
 custom GPU power limit, forced clocks, inference sysctl bundle, preallocated
-hugepages, or replacement Linux kernel. Both hosts boot to
+hugepages, or replacement Linux kernel. All three hosts boot to
 `multi-user.target`; the stock NVIDIA X configuration remains installed for
 easy rollback, but GDM/X is not running.
 
 ## Measured throughput
 
-The native DSpark C32 throughput baseline was measured with realistic coding-agent
-prompts calibrated to 1,024 ± 12 input tokens, maximum reasoning, thinking
-enabled, and exactly 1,024 generated tokens per request:
+The active C8 FP8/direct-edge profile was measured for three waves per row
+with 1,027–1,030 input tokens and exactly 1,024 output tokens:
+
+| Concurrent requests | Aggregate output tok/s, median | Mean |
+| ---: | ---: | ---: |
+| 1 | 64.72 | 62.73 |
+| 2 | 107.46 | 104.95 |
+| 4 | 146.27 | 145.11 |
+| 8 | 219.43 | 215.28 |
+
+DFlash draft-token acceptance was 79.96%. RDMA counters proved that only the
+two logical links on C1-P1↔C2-P0 carried this run; C3 and the other ring edges
+were idle. Forced 1,024-token output makes this a capacity benchmark, not an
+agent-quality score. The complete current result and the failed TP3/PP3
+compatibility findings are in
+[`results/DEEPSEEK_V4_3SPARK_REPORT.md`](results/DEEPSEEK_V4_3SPARK_REPORT.md).
+
+For context, the historical official-NVFP4, pre-ring C32 profile used two
+physical C1-C2 cables and produced:
 
 | Concurrent requests | Aggregate output tok/s | Mean post-first-token tok/s/request |
 | ---: | ---: | ---: |
@@ -96,14 +120,16 @@ qualitative agent evaluation are in
 
 ## Start here
 
-- [Fresh two-host setup](docs/SETUP.md)
+- [Fresh three-node fabric / two-rank setup](docs/SETUP.md)
 - [Architecture and ownership](docs/ARCHITECTURE.md)
-- [ConnectX-7 and four-rail RoCE](docs/NETWORKING.md)
+- [ConnectX-7 three-node ring and production TP2 edge](docs/NETWORKING.md)
 - [Headless, power, firmware, and host tuning](docs/HOST_TUNING.md)
 - [Software inventory](docs/SOFTWARE.md)
 - [Container and checkpoint provenance](docs/CONTAINERS.md)
 - [vLLM and DSpark tuning](docs/VLLM_TUNING.md)
 - [Boot, recovery, dashboard, and routine operations](docs/OPERATIONS.md)
+- [Cerebrus 3 rack dashboard](c3_dashboard/README.md)
+- [Cerebrus 3 Audio8 TTS](audio8/README.md)
 - [Move the dashboard to a dedicated Linux host](docs/REMOTE_DASHBOARD.md)
 - [Validation and benchmarks](docs/VALIDATION.md)
 - [Installed-file map](docs/INSTALLED_ARTIFACTS.md)
@@ -112,7 +138,7 @@ qualitative agent evaluation are in
 The short path, after completing the prerequisites in the setup guide, is:
 
 ```bash
-# Spark 1
+# C1
 MIA_ENV_FILE=mia-agent.local.env \
   dspark_mia/bin/preflight.sh
 MIA_ENV_FILE=mia-agent.local.env \
@@ -136,6 +162,10 @@ minutes for weight loading, warm-up, and CUDA-graph capture.
   service installers
 - `systemd/`, `netplan/`, `dashboard/`, `security/`, `libexec/`: installed
   artifacts plus portable templates
+- `c3_dashboard/`: lightweight three-host collector and 1424x280 rootless-X
+  rack kiosk for Cerebrus 3
+- `audio8/`: pinned Audio8 0.6B BF16 TTS container and service wrapper for
+  Cerebrus 3; reference media remains private
 - `deepseek_v4_bench/`: fixed-length realistic streaming benchmark
 - `deepseek_v4_agent_eval/`: disposable-sandbox coding-agent evaluation
 - `bench/`: NCCL/RDMA and lower-level benchmark helpers

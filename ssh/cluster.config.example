@@ -1,0 +1,36 @@
+# Replace the user and key path if your DGX Spark account differs. The fixed
+# management addresses keep orchestration working when local DNS/mDNS fails.
+# Verify each host fingerprint independently and populate known_hosts before
+# enabling unattended use; strict checking is intentionally fail-closed.
+Host cerebrus1 cerebrus1.lan spark1 spark1.lan
+    HostName 10.10.84.28
+    User catid
+    IdentityFile ~/.ssh/id_ed25519_dgx_cluster
+    IdentityAgent none
+    IdentitiesOnly yes
+    UserKnownHostsFile ~/.ssh/dgx_cluster_known_hosts
+    BatchMode yes
+    ConnectTimeout 10
+    StrictHostKeyChecking yes
+
+Host cerebrus2 cerebrus2.lan spark2 spark2.lan
+    HostName 10.10.84.12
+    User catid
+    IdentityFile ~/.ssh/id_ed25519_dgx_cluster
+    IdentityAgent none
+    IdentitiesOnly yes
+    UserKnownHostsFile ~/.ssh/dgx_cluster_known_hosts
+    BatchMode yes
+    ConnectTimeout 10
+    StrictHostKeyChecking yes
+
+Host cerebrus3 cerebrus3.lan spark3 spark3.lan
+    HostName 10.10.84.121
+    User catid
+    IdentityFile ~/.ssh/id_ed25519_dgx_cluster
+    IdentityAgent none
+    IdentitiesOnly yes
+    UserKnownHostsFile ~/.ssh/dgx_cluster_known_hosts
+    BatchMode yes
+    ConnectTimeout 10
+    StrictHostKeyChecking yes

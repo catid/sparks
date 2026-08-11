@@ -1,0 +1,55 @@
+[Unit]
+Description=DGX Spark C3 1424x280 Xorg dashboard kiosk
+Documentation=file:@PROJECT_DIR@/c3_dashboard/README.md
+Wants=network-online.target dgx-spark-c3-dashboard.service
+After=network-online.target
+After=systemd-user-sessions.service systemd-logind.service plymouth-quit-wait.service
+After=dgx-spark-c3-dashboard.service
+After=getty@tty7.service
+Conflicts=getty@tty7.service
+ConditionPathExists=/dev/tty0
+ConditionPathExists=/dev/dri/card0
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+PAMName=login
+TTYPath=/dev/tty7
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+UtmpIdentifier=tty7
+UtmpMode=user
+WorkingDirectory=@PROJECT_DIR@
+EnvironmentFile=/etc/default/dgx-spark-c3-dashboard
+Environment=PATH=/usr/bin:/bin
+Environment=RUNTIME_DIRECTORY=/run/dgx-spark-c3-kiosk
+RuntimeDirectory=dgx-spark-c3-kiosk
+RuntimeDirectoryMode=0700
+ExecStart=@PROJECT_DIR@/c3_dashboard/scripts/launch-kiosk.sh
+Restart=always
+RestartSec=15s
+TimeoutStopSec=15s
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

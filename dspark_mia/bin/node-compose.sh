@@ -20,6 +20,7 @@ need_command docker
 need_command sudo
 host_ip="$(node_host_ip "${rank}")"
 headless="$(node_headless "${rank}")"
+node_hca="$(node_nccl_hca "${rank}")"
 
 exec sudo -n /usr/bin/env \
   -u NCCL_IB_GID_INDEX \
@@ -27,6 +28,7 @@ exec sudo -n /usr/bin/env \
   NODE_RANK="${rank}" \
   HEADLESS="${headless}" \
   VLLM_HOST_IP="${host_ip}" \
+  NCCL_IB_HCA="${node_hca}" \
   /usr/bin/docker compose \
     --project-name "${MIA_PROJECT_NAME}" \
     --env-file "${MIA_ENV_FILE}" \

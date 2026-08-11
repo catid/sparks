@@ -20,7 +20,7 @@ services:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
 
-      # Four-rail profile already proven on this Spark pair.
+      # The wrapper injects the facing HCA pair separately for each rank.
       NCCL_NET: IB
       NCCL_IB_DISABLE: "0"
       NCCL_IB_HCA: "${NCCL_IB_HCA}"
@@ -49,6 +49,9 @@ services:
 
     # Upstream hard-codes thinking=false, so the local overlay replaces only
     # the command surface while retaining its image layout and runtime flags.
+    # Put the image's container-compatible NCCL 2.30.7 wheel ahead of the
+    # older PyTorch-bundled library. Keep comments outside the folded shell
+    # scalar: a folded inline shell comment would consume the launch command.
     command:
       - bash
       - -lc
@@ -57,7 +60,7 @@ services:
         export CUDA_HOME="$${CUDA_HOME:-/usr/local/cuda}";
         export CUDA_PATH="$${CUDA_PATH:-$${CUDA_HOME}}";
         export CUDAToolkit_ROOT="$${CUDAToolkit_ROOT:-$${CUDA_HOME}}";
-        export LD_LIBRARY_PATH="/usr/local/cuda/lib64:$${LD_LIBRARY_PATH:-}";
+        export LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib:/usr/local/cuda/lib64:$${LD_LIBRARY_PATH:-}";
         SPECULATIVE_CONFIG="{\"method\":\"dspark\",\"num_speculative_tokens\":$${MTP_NUM_TOKENS:-5},\"draft_sample_method\":\"probabilistic\"}";
         exec /usr/local/bin/vllm serve ${DSPARK_MODEL}
         --served-model-name ${SERVED_MODEL_NAME} ${SERVED_MODEL_ALIASES:-}

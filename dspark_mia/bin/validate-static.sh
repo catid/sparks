@@ -9,6 +9,27 @@ need_command docker
 need_command git
 need_command jq
 
+expected_head_hca='=rocep1s0f1:1:0,roceP2p1s0f1:1:0'
+expected_worker_hca='=rocep1s0f0:1:0,roceP2p1s0f0:1:0'
+[[ "${HEAD_NCCL_IB_HCA}" == "${expected_head_hca}" ]] || {
+  echo "HEAD_NCCL_IB_HCA must select only the cerebrus1 P1 pair." >&2
+  exit 1
+}
+[[ "${WORKER_NCCL_IB_HCA}" == "${expected_worker_hca}" ]] || {
+  echo "WORKER_NCCL_IB_HCA must select only the cerebrus2 P0 pair." >&2
+  exit 1
+}
+[[ "${MASTER_ADDR}" == "${VLLM_HOST_IP}" ]] || {
+  echo "MASTER_ADDR must equal the cerebrus1 management VLLM_HOST_IP." >&2
+  exit 1
+}
+[[ "${NCCL_SOCKET_IFNAME}" == "=enP7s7" &&
+   "${TP_SOCKET_IFNAME}" == "enP7s7" &&
+   "${GLOO_SOCKET_IFNAME}" == "enP7s7" ]] || {
+  echo "NCCL socket bootstrap, TP control, and Gloo must use enP7s7." >&2
+  exit 1
+}
+
 expected_capture_size="$((MAX_NUM_SEQS * (MTP_NUM_TOKENS + 1)))"
 [[ "${MAX_CUDAGRAPH_CAPTURE_SIZE}" == "${expected_capture_size}" ]] || {
   echo "MAX_CUDAGRAPH_CAPTURE_SIZE=${MAX_CUDAGRAPH_CAPTURE_SIZE}, expected=${expected_capture_size} (seqs*(k+1))." >&2
@@ -74,12 +95,17 @@ for rendered in "${rank0_json}" "${rank1_json}"; do
     any(.services["vllm-dspark"].volumes[];
       .type == "bind" and .source == $source and .target == $target and .read_only == true)
   ' "${rendered}" >/dev/null
-  jq -e --arg hca "${NCCL_IB_HCA}" '
+  jq -e \
+    --arg socket_if "${NCCL_SOCKET_IFNAME}" \
+    --arg tp_if "${TP_SOCKET_IFNAME}" \
+    --arg gloo_if "${GLOO_SOCKET_IFNAME}" '
     .services["vllm-dspark"].environment as $e |
-    $e.NCCL_IB_HCA == $hca and
     $e.NCCL_NETDEVS_POLICY == "ALL" and
     $e.NCCL_CROSS_NIC == "0" and
     $e.NCCL_IB_MERGE_NICS == "0" and
+    $e.NCCL_SOCKET_IFNAME == $socket_if and
+    $e.TP_SOCKET_IFNAME == $tp_if and
+    $e.GLOO_SOCKET_IFNAME == $gloo_if and
     (((($e | has("NCCL_IB_GID_INDEX")) | not) or
       $e.NCCL_IB_GID_INDEX == null)) and
     $e.MTP_NUM_TOKENS == "5"
@@ -104,6 +130,9 @@ for rendered in "${rank0_json}" "${rank1_json}"; do
     ($c | contains("--max-num-batched-tokens " + $max_batched_tokens)) and
     ($c | contains("--max-cudagraph-capture-size " + $capture_size)) and
     ($c | contains("--kv-cache-dtype nvfp4_ds_mla")) and
+    ($c | contains("export LD_LIBRARY_PATH=\"/usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib:")) and
+    ($c | contains("exec /usr/local/bin/vllm serve")) and
+    (($c | test(";[[:space:]]*#")) | not) and
     ($c | contains("method")) and
     ($c | contains("dspark")) and
     ($c | contains("num_speculative_tokens")) and
@@ -122,14 +151,20 @@ for rendered in "${rank0_json}" "${rank1_json}"; do
   done < <(served_model_ids)
 done
 
-jq -e '
+jq -e \
+  --arg host_ip "${VLLM_HOST_IP}" \
+  --arg hca "${HEAD_NCCL_IB_HCA}" '
   .services["vllm-dspark"].environment.NODE_RANK == "0" and
-  .services["vllm-dspark"].environment.VLLM_HOST_IP == "192.168.100.10" and
+  .services["vllm-dspark"].environment.VLLM_HOST_IP == $host_ip and
+  .services["vllm-dspark"].environment.NCCL_IB_HCA == $hca and
   ((.services["vllm-dspark"].command | join(" ") | contains("--headless")) | not)
 ' "${rank0_json}" >/dev/null
-jq -e '
+jq -e \
+  --arg host_ip "${WORKER_VLLM_HOST_IP}" \
+  --arg hca "${WORKER_NCCL_IB_HCA}" '
   .services["vllm-dspark"].environment.NODE_RANK == "1" and
-  .services["vllm-dspark"].environment.VLLM_HOST_IP == "192.168.100.11" and
+  .services["vllm-dspark"].environment.VLLM_HOST_IP == $host_ip and
+  .services["vllm-dspark"].environment.NCCL_IB_HCA == $hca and
   (.services["vllm-dspark"].command | join(" ") | contains("--headless"))
 ' "${rank1_json}" >/dev/null
 
@@ -137,5 +172,5 @@ echo "Static validation passed."
 echo "profile_file=${MIA_ENV_BASENAME} project=${MIA_PROJECT_NAME}"
 echo "upstream=${expected_commit} tree=${expected_tree}"
 echo "image=${DSPARK_VLLM_IMAGE}"
-echo "profile=TP2/PP1 DSpark-k5 thinking=true API=${VLLM_PORT} master=${MASTER_PORT} four-rail"
+echo "profile=TP2/PP1 DSpark-k5 thinking=true API=${VLLM_PORT} master=${MASTER_PORT} direct-edge"
 echo "limits=max_model_len=${MAX_MODEL_LEN} max_num_seqs=${MAX_NUM_SEQS} max_batched_tokens=${MAX_NUM_BATCHED_TOKENS} capture=${MAX_CUDAGRAPH_CAPTURE_SIZE} gpu_util=${GPU_MEMORY_UTILIZATION}"

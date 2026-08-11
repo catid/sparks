@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$(basename "$0")" in
+  hostname)
+    [[ "${1:-}" == "-s" ]]
+    printf '%s\n' "${TEST_HOSTNAME:?TEST_HOSTNAME is required}"
+    ;;
+  sudo)
+    printf '%s\n' "$*" >>"${TEST_SUDO_LOG:?TEST_SUDO_LOG is required}"
+    ;;
+  docker)
+    [[ "${1:-}" == "compose" && "${2:-}" == "version" ]]
+    ;;
+  nvidia-smi|nvcc|pipx|systemd-analyze|nginx)
+    ;;
+  *)
+    echo "Unexpected fixture command: $(basename "$0")" >&2
+    exit 64
+    ;;
+esac

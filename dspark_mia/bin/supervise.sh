@@ -253,7 +253,7 @@ recover_until_healthy() {
   return 1
 }
 
-log "Spark 1 DSpark supervisor started for project ${MIA_PROJECT_NAME}."
+log "Cerebrus1 DSpark supervisor started for project ${MIA_PROJECT_NAME}."
 failure_count=0
 healthy_checks=0
 check_count=0
@@ -315,4 +315,4 @@ if should_stop; then
     log "Could not acquire the recovery lock during shutdown; ExecStopPost will retry cleanup."
   fi
 fi
-log "Spark 1 DSpark supervisor stopped."
+log "Cerebrus1 DSpark supervisor stopped."

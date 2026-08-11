@@ -8,7 +8,7 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 nginx_source="${root_dir}/dashboard/nginx-spark1-dashboard.conf"
 site_target="/etc/nginx/sites-available/dgx-spark-dashboard"
 cert_dir="/etc/nginx/ssl"
-dashboard_web_host="${DASHBOARD_WEB_HOST:-spark1.lan}"
+dashboard_web_host="${DASHBOARD_WEB_HOST:-cerebrus1.lan}"
 dashboard_lan_ip="${DASHBOARD_LAN_IP:-}"
 
 if ! [[ "${dashboard_web_host}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]] ||

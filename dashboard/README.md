@@ -1,9 +1,9 @@
 # DGX Spark inference dashboard
 
-This is a dependency-free, read-only dashboard for the two-Spark Laguna
-deployment. Its default topology is the current two-node tensor-parallel
-service: Spark 1/rank 0 owns the only vLLM HTTP endpoint and exports
-cluster-wide counters, while Spark 2/rank 1 is a headless worker. It samples
+This is a dependency-free, read-only dashboard for the two-rank DSpark
+deployment. Its default topology is the current tensor-parallel service:
+C1/rank 0 owns the only vLLM HTTP endpoint and exports cluster-wide counters,
+while C2/rank 1 is a headless worker. It samples
 every two seconds and reports:
 
 - GPU temperature, power, utilization, and SM clock
@@ -16,9 +16,10 @@ every two seconds and reports:
 - an explicit rank-1 worker state based on the remote vLLM process, without
   probing a nonexistent HTTP API or counting cluster token rates twice
 - RDMA RX/TX rates and packet totals from each ConnectX-7 hardware port,
-  alongside the Linux interface state, MTU, and error totals for all four rails
+  alongside Linux interface state, MTU, and error totals for all four local
+  CX-7 functions (production TP2 uses the two functions facing the direct edge)
 - rolling three-minute server-retained plots for aggregate generation
-  throughput and Spark 1/2 GPU and CPU-cluster temperatures
+  throughput and C1/C2 GPU and CPU-cluster temperatures
 
 GB10 does not expose a discrete framebuffer total through `nvidia-smi`.
 Unified-memory use and vLLM RSS are therefore the truthful memory measurements.
@@ -40,7 +41,7 @@ dashboard/run-dashboard.sh
 ```
 
 Nginx exposes the dashboard on standard web ports. Open
-<http://spark1.lan> or <https://spark1.lan>; cleartext HTTP redirects to
+<http://cerebrus1.lan> or <https://cerebrus1.lan>; cleartext HTTP redirects to
 HTTPS so Basic credentials are never sent unencrypted. The private `.lan`
 endpoint uses a self-signed certificate, so the browser requires a one-time
 trust exception unless the certificate is imported locally.
@@ -52,7 +53,7 @@ Binding the collector itself directly to the LAN still requires Basic
 authentication:
 
 ```bash
-DASHBOARD_HOST=spark1.lan \
+DASHBOARD_HOST=cerebrus1.lan \
 DASHBOARD_AUTH='operator:a-long-random-password' \
 dashboard/run-dashboard.sh
 ```
@@ -118,7 +119,7 @@ sudo sed -n 's/^DASHBOARD_AUTH=//p' \
   /etc/default/dgx-spark-laguna-dashboard
 ```
 
-Open <http://spark1.lan> or <https://spark1.lan>; the former redirects to the
+Open <http://cerebrus1.lan> or <https://cerebrus1.lan>; the former redirects to the
 latter. HTTPS uses a locally generated self-signed certificate. Existing
 environment files are preserved; use
 `--replace-environment` only when you intend to deploy a replacement. The

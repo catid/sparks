@@ -6,12 +6,15 @@ repo_root="$(cd "${integration_root}/.." && pwd -P)"
 agent_basename="mia-agent-render-test-${$}.env"
 throughput_basename="mia-throughput-render-test-${$}.env"
 invalid_basename="mia-invalid-render-test-${$}.env"
+official_basename="mia-official-render-test-${$}.env"
 agent_path="${integration_root}/${agent_basename}"
 throughput_path="${integration_root}/${throughput_basename}"
 invalid_path="${integration_root}/${invalid_basename}"
+official_path="${integration_root}/${official_basename}"
 
 cleanup() {
-  rm -f -- "${agent_path}" "${throughput_path}" "${invalid_path}"
+  rm -f -- \
+    "${agent_path}" "${throughput_path}" "${invalid_path}" "${official_path}"
 }
 trap cleanup EXIT
 
@@ -24,6 +27,15 @@ DSPARK_PROFILE_NAME="${agent_basename}" \
   source "${agent_path}"
   set +a
   [[ "${MIA_PROJECT_NAME}" == "mia-dspark-agent" ]]
+  [[ "${WORKER_HOST}" == "cerebrus2" ]]
+  [[ "${MASTER_ADDR}" == "10.10.84.28" ]]
+  [[ "${VLLM_HOST_IP}" == "10.10.84.28" ]]
+  [[ "${WORKER_VLLM_HOST_IP}" == "10.10.84.12" ]]
+  [[ "${HEAD_NCCL_IB_HCA}" == '=rocep1s0f1:1:0,roceP2p1s0f1:1:0' ]]
+  [[ "${WORKER_NCCL_IB_HCA}" == '=rocep1s0f0:1:0,roceP2p1s0f0:1:0' ]]
+  [[ "${NCCL_SOCKET_IFNAME}" == '=enP7s7' ]]
+  [[ "${TP_SOCKET_IFNAME}" == 'enP7s7' ]]
+  [[ "${GLOO_SOCKET_IFNAME}" == 'enP7s7' ]]
   [[ "${MASTER_PORT}" == "29632" ]]
   [[ "${VLLM_PORT}" == "8889" ]]
   [[ "${SERVED_MODEL_NAME}" == "deepseek-v4-flash-dspark-mia-throughput" ]]
@@ -33,6 +45,9 @@ DSPARK_PROFILE_NAME="${agent_basename}" \
   [[ "${MAX_NUM_BATCHED_TOKENS}" == "8192" ]]
   [[ "${MAX_CUDAGRAPH_CAPTURE_SIZE}" == "48" ]]
   [[ "${GPU_MEMORY_UTILIZATION}" == "0.78" ]]
+  [[ "${DSPARK_MODEL_REPO}" == "apetersson/DeepSeek-V4-Flash-0731-Abliterated-FP8" ]]
+  [[ "${DSPARK_MODEL_REVISION}" == "7d02640c72a2c8127f116d3d1933ddfec5e4c0fa" ]]
+  [[ "${MIA_MODEL_LOCK}" == "MODEL.abliterated-fp8.lock.json" ]]
 )
 MIA_ENV_FILE="${agent_basename}" \
   "${integration_root}/bin/validate-static.sh" >/dev/null
@@ -47,12 +62,32 @@ DSPARK_PROFILE_NAME="${throughput_basename}" \
   source "${throughput_path}"
   set +a
   [[ "${MIA_PROJECT_NAME}" == "mia-dspark-throughput" ]]
+  [[ "${WORKER_HOST}" == "cerebrus2" ]]
+  [[ "${MASTER_ADDR}" == "10.10.84.28" ]]
+  [[ "${HEAD_NCCL_IB_HCA}" == '=rocep1s0f1:1:0,roceP2p1s0f1:1:0' ]]
+  [[ "${WORKER_NCCL_IB_HCA}" == '=rocep1s0f0:1:0,roceP2p1s0f0:1:0' ]]
+  [[ "${NCCL_SOCKET_IFNAME}" == '=enP7s7' ]]
   [[ "${MASTER_PORT}" == "29631" ]]
   [[ "${SERVED_MODEL_ALIASES}" == "deepseek-v4-flash" ]]
   [[ "${MAX_NUM_SEQS}" == "32" ]]
   [[ "${MAX_CUDAGRAPH_CAPTURE_SIZE}" == "192" ]]
 )
 MIA_ENV_FILE="${throughput_basename}" \
+  "${integration_root}/bin/validate-static.sh" >/dev/null
+
+DSPARK_PROFILE_NAME="${official_basename}" \
+  "${repo_root}/scripts/configure-dspark-profile.sh" \
+    --profile agent --model official >/dev/null
+(
+  set -a
+  # shellcheck disable=SC1090
+  source "${official_path}"
+  set +a
+  [[ "${DSPARK_MODEL_REPO}" == "deepseek-ai/DeepSeek-V4-Flash-DSpark" ]]
+  [[ "${DSPARK_MODEL_REVISION}" == "62af8fffb2f7030cac4de2f0169f5b8d1101b646" ]]
+  [[ "${MIA_MODEL_LOCK}" == "MODEL.lock.json" ]]
+)
+MIA_ENV_FILE="${official_basename}" \
   "${integration_root}/bin/validate-static.sh" >/dev/null
 
 set +e
@@ -66,4 +101,19 @@ set -e
 [[ "${invalid_status}" == "2" ]]
 grep -Fq "Profile kind must be throughput or agent" <<<"${invalid_output}"
 
-echo "Profile-renderer test passed: throughput/C32 and agent/C8 defaults are isolated and statically valid."
+# A pre-ring local profile must fail before the installer can render or place a
+# supervisor that would later crash in common.sh.
+awk '
+  !/^HEAD_NCCL_IB_HCA=/ && !/^WORKER_NCCL_IB_HCA=/ { print }
+' "${throughput_path}" >"${invalid_path}"
+set +e
+stale_output="$(
+  MIA_ENV_FILE="${invalid_basename}" \
+    "${repo_root}/scripts/install-dspark-supervisor.sh" verify 2>&1
+)"
+stale_status=$?
+set -e
+[[ "${stale_status}" == "2" ]]
+grep -Fq 'predates rank-specific ring networking' <<<"${stale_output}"
+
+echo "Profile-renderer test passed: scheduler defaults and rank-specific TP2/control networking are statically valid."

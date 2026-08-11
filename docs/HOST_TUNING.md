@@ -1,6 +1,6 @@
 # Host preparation and tuning
 
-The useful host changes on this pair were deliberately small: make
+The useful host changes on these three nodes were deliberately small: make
 administration reproducible, boot headless, keep the CPU governor in
 performance mode, preserve NVIDIA's stock GPU behavior, and refuse to start
 until every RoCE rail is ready. Generic tuning recipes were not applied
@@ -40,7 +40,8 @@ context.
 
 ## Audited baseline
 
-Both Sparks reported the following after the 2026-07-29 reboot:
+The original pair reported the following after the 2026-07-29 reboot, and the
+same host policy was verified on `cerebrus3` after its 2026-08-10 update:
 
 | Area | Audited value | Project decision |
 | --- | --- | --- |
@@ -94,6 +95,23 @@ systemctl is-active display-manager.service
 pgrep -a 'Xorg|Xwayland|gnome-shell'
 ```
 
+### Cerebrus3 rack-display diagnosis
+
+The rack HDMI display was black before headless mode was enabled. At that
+time GDM/Xorg was healthy on display `:0`, but `xrandr` reported `HDMI-0`
+disconnected, no USB-C display connector, no EDID, and only a 640×480 fallback
+screen. After the firmware reboot, NVIDIA's display query reported zero
+connected display devices and sysfs exposed no DRM connector. This is a
+physical hot-plug/EDID result, not a rendering or X-server performance issue.
+
+Wake the rack panel with its physical button, select its HDMI input, reseat or
+replace the HDMI cable, and confirm that an EDID appears before restoring the
+GUI. A deliberately headless Spark will remain black even after the connector
+is detected until `scripts/configure-headless.sh restore-gui` is run.
+NVIDIA also documents a display deep-sleep case that requires the monitor's
+physical wake button in the
+[DGX Spark known issues](https://docs.nvidia.com/dgx/dgx-spark/known-issues.html).
+
 ## GPU clocks and power
 
 Do not force clocks on this deployment. The live audit observed approximately
@@ -132,19 +150,26 @@ journalctl -k -b --no-pager | grep -Ei 'thrott|power|mlx|connectx'
 ## Firmware and reboot discipline
 
 Before the audited reboot, NVIDIA updates had staged SoC/GPU and USB-C
-power-delivery fixes on this pair. Apply firmware through the supported DGX OS
-update path, finish any model download first, and reboot both hosts before
-drawing performance conclusions. After reboot:
+power-delivery fixes on the original pair. Apply firmware through the supported
+DGX OS update path, finish any model download first, and reboot every affected
+ring node before drawing performance conclusions. After reboot:
 
 1. record the DGX OTA version without publishing the device serial number;
 2. check the kernel journal for firmware and power warnings;
-3. run the four-rail readiness check on both hosts;
+3. run TP2-edge readiness on C1/C2 and ring readiness on all three hosts;
 4. verify the actual NCCL library loaded by the container;
 5. wait for `/health`, not merely an active systemd state; and
 6. repeat a fixed benchmark before changing another variable.
 
 Do not publish `/etc/dgx-release` verbatim because it contains the unit serial
 number.
+
+At the 2026-08-10 cutoff, C1 and C2 reported no available firmware updates.
+C3 still offered NVIDIA's high-urgency USB-C power-delivery controller update
+from `0x507` to `0x516`. It was intentionally not applied during the active
+ring/cabling work because it requires a reboot. Stage it through `fwupdmgr`,
+reboot C3 under an attended maintenance window, then require `fwupdmgr
+get-updates` to report no update before calling C3 firmware-current.
 
 ## CPU behavior
 

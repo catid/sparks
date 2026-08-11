@@ -9,13 +9,15 @@ model failures are not collapsed into one “server is up” result.
 From the repository root, check shell syntax and deterministic tests:
 
 ```bash
-find bin scripts dashboard dspark_mia/bin dspark_mia/tests openclaw tests \
+find bin scripts dashboard dspark_mia/bin dspark_mia/tests \
+  dspark_mia3/bin dspark_mia3/tests bench openclaw tests \
   -type f -name '*.sh' -print0 |
   xargs -0 -r -n1 bash -n
 
 shellcheck \
-  bin/*.sh scripts/*.sh dspark_mia/bin/*.sh \
-  dspark_mia/tests/*.sh openclaw/*.sh tests/*.sh
+  bin/*.sh scripts/*.sh dspark_mia/bin/*.sh dspark_mia3/bin/*.sh \
+  dspark_mia/tests/*.sh dspark_mia3/tests/*.sh bench/*.sh \
+  openclaw/*.sh tests/*.sh
 
 MIA_ENV_FILE=mia-agent.local.env \
   ./dspark_mia/bin/validate-static.sh
@@ -35,13 +37,17 @@ MIA_ENV_FILE=mia-agent.local.env \
   MIA_ENV_FILE=mia-throughput.env ./tests/test-start-timeout.sh)
 (cd dspark_mia && \
   MIA_ENV_FILE=mia-throughput.env ./tests/test-supervisor.sh)
+./tests/test-cx7-ring-layout.sh
+./tests/test-cx7-installer-cleanup.sh
+./dspark_mia3/tests/run.sh
+./bench/tests/test_ring_nccl_static.sh
 ```
 
 `validate-static.sh` renders both rank configurations without pulling or
 starting a container. It verifies the upstream commit/tree, image digest,
 read-only checkpoint mount, project isolation, rank placement, TP2/PP1,
-DSpark k5, thinking mode, scheduler/graph relationship, ports, and four-rail
-environment.
+DSpark k5, thinking mode, scheduler/graph relationship, ports, rank-specific
+direct-edge HCAs, and management-plane control interfaces.
 
 Run the Python unit suites in an environment with their test dependencies.
 Install the benchmark's audited direct dependency with
@@ -71,7 +77,8 @@ git add -- path/to/reviewed-file another/reviewed-file
 
 Review the staged filename list and diff as well. The safety checker is a
 backstop, not permission to commit credentials, private SSH material, raw
-agent trajectories, runtime state, or active service environment files.
+agent trajectories, runtime state, or credential-bearing site environment
+files. The explicitly allowlisted DSpark profiles contain no credentials.
 
 ## 2. Artifact and fabric readiness
 
@@ -86,8 +93,8 @@ The sync changes only the worker's pinned integration tree. Preflight itself
 is non-downloading and does not start or stop services. It checks:
 
 - identical selected-profile hashes and clean upstream commits on both hosts;
-- all four 200 Gb/s links, MTU 9000, expected fabric addresses, active RDMA,
-  and peer reachability;
+- both production-edge logical links, MTU 9000, exact C1/C2 addresses, active
+  RDMA, and peer reachability;
 - free API and rendezvous ports;
 - absence of another vLLM GPU workload;
 - the exact local image digest on both nodes; and
@@ -100,10 +107,25 @@ to run it.
 The fabric readiness check can be run separately and safely:
 
 ```bash
-CX7_LOCAL_SUFFIX=10 ./bin/wait-cx7-ready.sh --check-once
-ssh spark2 \
-  'cd /path/to/sparks && CX7_LOCAL_SUFFIX=11 ./bin/wait-cx7-ready.sh --check-once'
+CX7_NODE_ROLE=cerebrus1 ./bin/wait-cx7-ready.sh --check-once --scope tp2
+ssh cerebrus2 \
+  'cd /path/to/sparks && CX7_NODE_ROLE=cerebrus2 ./bin/wait-cx7-ready.sh --check-once --scope tp2'
+
+# Independently validate both neighbor edges on every ring node:
+CX7_NODE_ROLE=cerebrus1 ./bin/wait-cx7-ready.sh --check-once --scope ring
+ssh cerebrus2 \
+  'cd /path/to/sparks && CX7_NODE_ROLE=cerebrus2 ./bin/wait-cx7-ready.sh --check-once --scope ring'
+ssh cerebrus3 \
+  'cd /path/to/sparks && CX7_NODE_ROLE=cerebrus3 ./bin/wait-cx7-ready.sh --check-once --scope ring --c3-port-map c3-p0-to-c1'
 ```
+
+Ring readiness proves the exact IP, carrier, speed, MTU, RDMA state, and peer
+ping matrix; it does not prove a three-rank collective. C3 is reserved for an
+independent model workload in the selected deployment, so no three-rank
+collective is required. The retained `bench/run_verify_ring_nccl230.sh`
+experiment requires intentionally stopping production, physically selecting
+NVIDIA's crossed C3 cable orientation, and switching C3 to `c3-p0-to-c2`; it
+is not part of routine validation.
 
 ## 3. Live functional checks
 
@@ -164,7 +186,7 @@ This request does not execute the proposed command. Check reasoning/content,
 finish reason, usage, and any tool-call arguments before treating it as a
 functional pass.
 
-## 4. Proving all four RDMA rails
+## 4. Proving the production RDMA edge
 
 Ordinary Ethernet byte graphs are insufficient because RoCE data uses RDMA
 hardware counters. Capture counters on both hosts before and after a
@@ -173,33 +195,34 @@ substantial serving workload:
 ```bash
 state_dir="${XDG_STATE_HOME:-${HOME}/.local/state}/sparks/rail-proof"
 mkdir -p "${state_dir}"
-python3 bench/rdma_counters.py --save "${state_dir}/spark1-before.json"
-ssh spark2 \
+python3 bench/rdma_counters.py --save "${state_dir}/cerebrus1-before.json"
+ssh cerebrus2 \
   'cd /path/to/sparks && python3 bench/rdma_counters.py' \
-  >"${state_dir}/spark2-before.json"
+  >"${state_dir}/cerebrus2-before.json"
 ```
 
 Run a fixed, repeatable inference wave, then take matching `after` snapshots.
 Capture and compare each host:
 
 ```bash
-python3 bench/rdma_counters.py --save "${state_dir}/spark1-after.json"
-ssh spark2 \
+python3 bench/rdma_counters.py --save "${state_dir}/cerebrus1-after.json"
+ssh cerebrus2 \
   'cd /path/to/sparks && python3 bench/rdma_counters.py' \
-  >"${state_dir}/spark2-after.json"
+  >"${state_dir}/cerebrus2-after.json"
 
 python3 bench/rdma_counters.py \
-  --before "${state_dir}/spark1-before.json" \
-  --after "${state_dir}/spark1-after.json"
+  --before "${state_dir}/cerebrus1-before.json" \
+  --after "${state_dir}/cerebrus1-after.json"
 python3 bench/rdma_counters.py \
-  --before "${state_dir}/spark2-before.json" \
-  --after "${state_dir}/spark2-after.json"
+  --before "${state_dir}/cerebrus2-before.json" \
+  --after "${state_dir}/cerebrus2-after.json"
 ```
 
-All four named RDMA devices should have substantial RX and TX deltas, the
-directional totals should be plausible across peers, and the dashboard's
-per-rail error/discard totals should not increase. The helper above records
-bytes; the dashboard provides both hardware-source byte rates and interface
+For production TP2, only C1 P1 (`*f1`) and C2 P0 (`*f0`) should have
+substantial RX and TX deltas. The other ring ports may remain idle. Directional
+totals should be plausible across peers, and error/discard totals should not
+increase. The helper above records bytes; the dashboard provides both
+hardware-source byte rates and interface
 error totals for ongoing observation.
 
 `bench/run_verify_multirail_nccl230.sh` is retained as a historical
@@ -335,7 +358,7 @@ running container's limits.
 
 During cold capture and the full matrix, monitor:
 
-- Spark 1 and Spark 2 GPU, CPU-cluster, SoC, NVMe, and ConnectX-7 temperatures;
+- C1 and C2 GPU, CPU-cluster, SoC, NVMe, and ConnectX-7 temperatures;
 - GPU power/utilization/clock;
 - free unified memory, swap, and vLLM RSS;
 - service restarts, OOM state, and kernel/NVRM errors; and

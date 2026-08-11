@@ -1,14 +1,21 @@
 # vLLM and DSpark tuning
 
-The current baseline is the official DeepSeek V4 Flash DSpark NVFP4
-checkpoint served by the pinned vLLM image across two DGX Sparks. It uses
-native DSpark speculative decoding, tensor parallelism across the two
-machines, thinking mode, and all four logical ConnectX-7 RoCE rails.
+The active service selects the pinned
+`apetersson/DeepSeek-V4-Flash-0731-Abliterated-FP8` revision, native DSpark
+speculative decoding, TP2 across C1 and C2, thinking mode, and
+`nvfp4_ds_mla` KV cache. Production NCCL uses the two logical RoCE links on
+the direct C1-P1/C2-P0 edge. The original
+`deepseek-ai/DeepSeek-V4-Flash-DSpark` checkpoint and former four-link fabric
+remain important historical benchmark references, but they are not the
+current model or topology.
 
-## C32 throughput baseline
+## Historical C32 throughput baseline
 
-The retained throughput profile is intentionally conservative at startup while still
-admitting 32-request waves:
+The retained C32 profile is intentionally conservative at startup while still
+admitting 32-request waves. The measurements in this section used the original
+official NVFP4 checkpoint on the former four-link C1-C2 fabric; they have not
+been repeated as a matched matrix with the active abliterated FP8 checkpoint
+on the ring's two-link production edge:
 
 | Setting | Value |
 | --- | ---: |
@@ -35,7 +42,10 @@ file.
 
 The credential-free
 [`mia-agent.env.example`](../dspark_mia/mia-agent.env.example) specializes the
-same runtime for C1-C8 agent traffic:
+same scheduler/runtime family for C1-C8 agent traffic. The following cold-start
+and throughput results also came from the original official checkpoint and
+former four-link fabric, while the selected scheduler values remain the active
+agent configuration:
 
 | Setting | Agent value |
 | --- | ---: |
@@ -84,17 +94,17 @@ The earlier DFlash side-drafter implementation also did not support the
 pipeline-parallel protocol in the tested vLLM runtime. It was therefore not a
 viable PP2 speculative configuration.
 
-The deployed speculative path is not the older ModelOpt DFlash side model. It
-uses the draft capability packaged with the official
-`DeepSeek-V4-Flash-DSpark` NVFP4 checkpoint and vLLM's native
-`"method":"dspark"` proposer. The selected k5 configuration was much faster
-than the tested DFlash side-drafter profiles and had materially higher draft
-acceptance. In the fixed 1,024-in/1,024-out matrix, native DSpark ranged from
-71.95 aggregate output tok/s at concurrency 1 to 381.77 at concurrency 32;
-the best earlier DFlash profile ranged from 26.26 to 161.52. Native DSpark
-accepted 76.18% of proposed draft tokens versus 17.45% for that DFlash run.
-This is a checkpoint/runtime/speculator comparison, not an isolated algorithm
-A/B. Recorded comparisons and limitations are in
+The deployed speculative path is not the older ModelOpt DFlash side model. The
+active abliterated FP8 checkpoint retains the DeepSeek V4 native DSpark draft
+capability, and vLLM uses its `"method":"dspark"` proposer at k5. The speed and
+acceptance figures below are historical results for the original official
+NVFP4 checkpoint on the former four-link fabric, not measurements of the
+current abliterated/two-link deployment. In that fixed 1,024-in/1,024-out
+matrix, native DSpark ranged from 71.95 aggregate output tok/s at concurrency
+1 to 381.77 at concurrency 32; the best earlier DFlash profile ranged from
+26.26 to 161.52. Native DSpark accepted 76.18% of proposed draft tokens versus
+17.45% for that DFlash run. This is a checkpoint/runtime/speculator comparison,
+not an isolated algorithm A/B. Recorded comparisons and limitations are in
 [`DEEPSEEK_V4_2SPARK_REPORT.md`](../results/DEEPSEEK_V4_2SPARK_REPORT.md).
 
 For the earlier DFlash stack, keeping target and draft eager was the best
@@ -111,34 +121,38 @@ The important scheduler flags are:
 
 ```text
 --max-model-len 1048576
---max-num-seqs 32
+--max-num-seqs 8
 --max-num-batched-tokens 8192
---max-cudagraph-capture-size 192
+--max-cudagraph-capture-size 48
 --gpu-memory-utilization 0.78
 --enable-prefix-caching
 --async-scheduling
 --enable-chunked-prefill
 ```
 
-At k5, the pinned runtime reserves `max_num_seqs * (k - 1)` draft slots. For
-32 sequences that is 128 slots, leaving 8,064 scheduled tokens from the 8,192
-budget. Chunked prefill admits a 32-by-approximately-1,024-token wave in
+Those are the active C8 agent values. The retained throughput profile changes
+`max-num-seqs` to 32 and `max-cudagraph-capture-size` to 192. At k5, the
+pinned runtime reserves `max_num_seqs * (k - 1)` draft slots: 32 for C8, or
+128 for C32. The latter leaves 8,064 scheduled tokens from the 8,192 budget.
+Chunked prefill admits a 32-by-approximately-1,024-token throughput wave in
 bounded pieces rather than requiring all prompt activations at once.
 
-The graph ceiling is `max_num_seqs * (k + 1)`, or `32 * 6 = 192`. Static
-validation checks this relationship. The tested image captured the complete
-target and DSpark graph sets through concurrency 32.
+The graph ceiling is `max_num_seqs * (k + 1)`: `8 * 6 = 48` for the active
+agent profile and `32 * 6 = 192` for the throughput profile. Static validation
+checks this relationship. The historical official-checkpoint test captured
+the complete target and DSpark graph sets through concurrency 32.
 
 `GPU_MEMORY_UTILIZATION=0.78` is a live-proven ceiling, not spare budget to
-consume casually. The baseline captured graphs successfully, but late capture
-produced nonfatal allocation retries and the lowest observed free system
-memory was under 9 GiB on one node. Raising the fraction risks failing cold
-startup even if a hot process appears comfortable.
+consume casually. The historical official-checkpoint baseline captured graphs
+successfully, but late capture produced nonfatal allocation retries and the
+lowest observed free system memory was under 9 GiB on one node. Raising the
+fraction risks failing cold startup even if a hot process appears comfortable.
 
-The C32 cold-start log reported a 1,464,202-token KV pool and 2.59 GiB of
-captured graphs. One later `cache_config_info` sample disagreed at 886,775
-tokens, so the coordinated cold-start log remains the capacity authority. The
-active C8 cold start reported 1,417,464 tokens and 1.27 GiB of graphs. Its
+The historical official-checkpoint C32 cold-start log reported a
+1,464,202-token KV pool and 2.59 GiB of captured graphs. One later
+`cache_config_info` sample disagreed at 886,775 tokens, so the coordinated
+cold-start log remains the capacity authority for that run. The corresponding
+historical C8 cold start reported 1,417,464 tokens and 1.27 GiB of graphs. Its
 later live metric reported 858,469 tokens (`0.8187` maximum concurrency),
 leaving only 72,037 tokens above two configured 393,216-token OpenClaw working
 contexts. The reason for that cold-log/runtime-metric disagreement is not yet
@@ -153,7 +167,7 @@ thirty-two maximum-context sessions do not.
 
 ## Model-specific execution
 
-The selected model path uses:
+The active model path uses:
 
 ```text
 --kv-cache-dtype nvfp4_ds_mla
@@ -189,19 +203,23 @@ rendered prompt inside the one-million-token context. For quality evaluation,
 allow the model to stop naturally; forcing `min_tokens=max_tokens` and
 `ignore_eos=true` is only for fixed-length throughput comparisons.
 
-Throughput is not a quantization-quality result. This repository does not yet
-contain a controlled FP8-versus-NVFP4 agent-capability evaluation of the same
-checkpoint, prompts, sampling, and grader. The recorded NVFP4 agent trial is
-useful evidence about one difficult workflow, but it cannot quantify how much
-quality the quantization changes.
+Throughput is not a quantization-quality result. The active repository is
+labelled FP8 while the reference checkpoint is native NVFP4, so they also
+differ in model release and ablation—not just storage format. This repository
+does not yet contain a controlled FP8-versus-NVFP4 agent-capability evaluation
+of otherwise identical weights, prompts, sampling, and grader. The recorded
+NVFP4 agent trial is useful evidence about one difficult workflow, but it
+cannot quantify how much quality the quantization changes.
 
-## NCCL and the four-rail fabric
+## NCCL on the production ring edge
 
-Two physical ConnectX-7 cables expose four logical RDMA paths on each Spark.
-The serving profile names all four HCAs:
+The three-node physical ring is documented in [NETWORKING.md](NETWORKING.md).
+Production TP2 uses only the direct C1-P1 to C2-P0 edge, whose facing HCA
+names differ by rank:
 
 ```text
-=rocep1s0f0:1:0,roceP2p1s0f0:1:0,rocep1s0f1:1:1,roceP2p1s0f1:1:1
+HEAD_NCCL_IB_HCA='=rocep1s0f1:1:0,roceP2p1s0f1:1:0'
+WORKER_NCCL_IB_HCA='=rocep1s0f0:1:0,roceP2p1s0f0:1:0'
 ```
 
 The relevant transport policy is:
@@ -212,9 +230,9 @@ NCCL_IB_DISABLE=0
 NCCL_NETDEVS_POLICY=ALL
 NCCL_CROSS_NIC=0
 NCCL_IB_MERGE_NICS=0
-NCCL_SOCKET_IFNAME="=enp1s0f0np0"
-TP_SOCKET_IFNAME=enp1s0f0np0
-GLOO_SOCKET_IFNAME=enp1s0f0np0
+NCCL_SOCKET_IFNAME="=enP7s7"
+TP_SOCKET_IFNAME=enP7s7
+GLOO_SOCKET_IFNAME=enP7s7
 NCCL_DMABUF_ENABLE=1
 NCCL_NET_GDR_C2C=1
 NCCL_IB_QPS_PER_CONNECTION=1
@@ -224,23 +242,28 @@ NCCL_NVLS_ENABLE=0
 ```
 
 There is deliberately no scalar `NCCL_IB_GID_INDEX`. The local Compose
-override removes an inherited value, the launch wrapper unsets it, and static
-validation checks that it did not leak back in.
+override removes an inherited value, the launch wrapper unsets it, injects the
+appropriate HCA expression per rank, and static validation checks both
+renderings.
 
-The 2026 baseline proved the path from NCCL initialization and hardware
-counters, not from Linux netdev counters alone:
+The historical pre-ring 2026 baseline proved its former four-logical-link path
+from NCCL initialization and hardware counters, not from Linux netdev counters
+alone:
 
 - NCCL 2.30.7 reported `ndevs=4` and `nmdevs=4`;
 - it created queue pairs on all four named RDMA devices on both ranks;
 - every rail transferred substantial, near-balanced traffic during the fixed
   1,024-token matrix;
-- Spark 2 mirrored the directional traffic; and
+- C2 mirrored the directional traffic; and
 - no RDMA/PHY error or discard counter increased.
 
 RoCE traffic bypasses normal Linux netdev byte accounting. Use
 `/sys/class/infiniband/*/ports/1/counters/port_{rcv,xmit}_data`, the supplied
 counter helper, or the dashboard. One busy Ethernet interface in a generic
-network graph does not show that NCCL is using only one rail.
+network graph does not show which RDMA path NCCL selected. After the ring
+migration, require positive production deltas on C1 P1 and C2 P0; the other
+ring ports may remain idle. Historical four-path throughput is not a current
+baseline and must be remeasured.
 
 The service actually maps NCCL 2.30.7 from the container's Python
 distribution. `torch.cuda.nccl.version()` returns 2.28.9 because it reports
@@ -266,7 +289,7 @@ The Compose overlay requests `nofile` soft/hard limits of 500,000. This avoids
 the low soft limit observed on the original worker container during
 high-concurrency, long-lived API use. The change applies only when Compose
 recreates the two containers. Do not restart one rank to pick it up; let the
-Spark 1 supervisor perform a coordinated cold reload, then verify both ranks
+C1 supervisor perform a coordinated cold reload, then verify both ranks
 as described in [CONTAINERS.md](CONTAINERS.md#runtime-isolation).
 
 ## Change discipline

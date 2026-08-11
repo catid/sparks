@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "-s" ]]; then
+  printf '%s\n' "${CX7_INSTALLER_TEST_HOSTNAME:-cerebrus1}"
+else
+  printf '%s\n' "${CX7_INSTALLER_TEST_HOSTNAME:-cerebrus1}"
+fi

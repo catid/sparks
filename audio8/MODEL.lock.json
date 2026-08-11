@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "repo_id": "Audio8/Audio8-TTS-Preview-0.6b",
+  "revision": "f9612f13a0ab40facf3d050fc908b9e6db05c2be",
+  "local_directory": "Audio8-TTS-Preview-0.6b--f9612f13",
+  "served_model_name": "audio8/tts-0.6b",
+  "precision": "bfloat16",
+  "synthetic_output": true,
+  "reference_conditioning": "operator_fixed_optional"
+}

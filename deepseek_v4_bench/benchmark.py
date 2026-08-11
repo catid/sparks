@@ -26,7 +26,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-import aiohttp
+try:
+    import aiohttp
+except ModuleNotFoundError:  # Dry-run validation intentionally has no network deps.
+    aiohttp = None  # type: ignore[assignment]
 
 
 DEFAULT_CONCURRENCY = (1, 2, 4, 8, 16, 32)
@@ -1188,6 +1191,10 @@ def write_run_outputs(
 
 
 async def run(args: argparse.Namespace) -> int:
+    if aiohttp is None:
+        raise RuntimeError(
+            "aiohttp is required for live benchmarks; install requirements.txt"
+        )
     endpoint = normalize_endpoint(args.endpoint)
     output_dir = args.output_dir.resolve()
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -1437,9 +1444,13 @@ def dry_run(args: argparse.Namespace) -> int:
                 "network_calls": 0,
                 "files_written": 0,
                 "concurrency": list(args.concurrency),
+                "repeats": args.repeats,
                 "prompt_variants_to_calibrate": prompt_count,
                 "target_prompt_tokens": args.prompt_tokens,
                 "output_tokens": args.output_tokens,
+                "warmup_output_tokens": (
+                    0 if args.no_warmup else args.warmup_output_tokens
+                ),
                 "reasoning_effort": payload["reasoning_effort"],
                 "temperature": payload["temperature"],
                 "top_p": payload["top_p"],

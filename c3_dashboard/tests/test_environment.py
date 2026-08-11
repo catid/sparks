@@ -1,0 +1,73 @@
+import importlib.util
+import pathlib
+import tempfile
+import unittest
+
+
+DASHBOARD_DIR = pathlib.Path(__file__).parents[1]
+VALIDATOR_PATH = DASHBOARD_DIR / "scripts" / "validate-environment.py"
+SPEC = importlib.util.spec_from_file_location("c3_environment_validator", VALIDATOR_PATH)
+validator = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader
+SPEC.loader.exec_module(validator)
+
+
+class EnvironmentValidationTests(unittest.TestCase):
+    def rendered_example(self) -> dict[str, str]:
+        text = (DASHBOARD_DIR / "dashboard.env.example").read_text().replace(
+            "@HOME@", "/home/dashboard"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "dashboard.env"
+            path.write_text(text)
+            return validator.parse_environment(path)
+
+    def test_rendered_example_satisfies_complete_runtime_contract(self) -> None:
+        validator.validate(self.rendered_example())
+
+    def test_rejects_runtime_restart_loop_and_exposure_settings(self) -> None:
+        cases = {
+            "remote bind": ("C3_DASHBOARD_HOST", "0.0.0.0"),
+            "remote opt-in": ("C3_DASHBOARD_ALLOW_REMOTE", "1"),
+            "wrong interval": ("C3_DASHBOARD_INTERVAL", "2"),
+            "retry too high": ("C3_KIOSK_RETRY_SECONDS", "301"),
+            "wait too high": ("C3_KIOSK_OUTPUT_WAIT_SECONDS", "301"),
+            "bad output": ("C3_KIOSK_OUTPUT", "TV-0;bad"),
+            "credential URL": (
+                "C3_KIOSK_URL",
+                "http://user:pass@127.0.0.1:9763/",
+            ),
+            "unexpanded key": ("C3_DASHBOARD_SSH_KEY", "@HOME@/.ssh/key"),
+            "remote metrics": (
+                "C3_DASHBOARD_VLLM_METRICS_URL",
+                "http://example.com:8889/metrics",
+            ),
+        }
+        for label, (name, value) in cases.items():
+            values = self.rendered_example()
+            values[name] = value
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                validator.validate(values)
+
+        values = self.rendered_example()
+        values["PATH"] = "/tmp/untrusted"
+        with self.assertRaises(ValueError):
+            validator.validate(values)
+
+    def test_display_and_vt_are_owned_by_the_unit(self) -> None:
+        for forbidden in ("C3_KIOSK_DISPLAY", "C3_KIOSK_VT"):
+            values = self.rendered_example()
+            values[forbidden] = ":9" if forbidden.endswith("DISPLAY") else "vt9"
+            with self.subTest(forbidden=forbidden), self.assertRaises(ValueError):
+                validator.validate(values)
+
+    def test_parser_rejects_duplicate_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "duplicate.env"
+            path.write_text("C3_DASHBOARD_PORT=9763\nC3_DASHBOARD_PORT=8888\n")
+            with self.assertRaises(ValueError):
+                validator.parse_environment(path)
+
+
+if __name__ == "__main__":
+    unittest.main()

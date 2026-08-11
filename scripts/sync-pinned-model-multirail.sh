@@ -29,10 +29,10 @@ set +a
 source_dir="${MODEL_SOURCE:-${DSPARK_MODEL_HOST_PATH}}"
 destination="${MODEL_DESTINATION:-${DSPARK_MODEL_HOST_PATH}}"
 ssh_key="${CLUSTER_SSH_KEY}"
-remote_user="${SPARK2_USER:-${USER:-$(id -un)}}"
+remote_user="${CEREBRUS2_USER:-${SPARK2_USER:-${USER:-$(id -un)}}}"
 state_root="${XDG_STATE_HOME:-${HOME}/.local/state}"
 log_dir="${MODEL_SYNC_LOG_DIR:-${state_root}/sparks/model-sync}"
-read -r -a rails <<<"${MODEL_SYNC_RAILS:-192.168.100.11 192.168.101.11 192.168.102.11 192.168.103.11}"
+read -r -a rails <<<"${MODEL_SYNC_RAILS:-192.168.0.2 192.168.1.2}"
 
 safe_path() {
   local LC_ALL=C
@@ -59,12 +59,12 @@ if ! safe_path "${source_dir}" ||
 fi
 if [[ ! "${remote_user}" =~ ^[a-z_][a-z0-9_-]*[$]?$ ||
       ! "${WORKER_HOST}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-  echo "Unsafe Spark 2 user or hostname." >&2
+  echo "Unsafe cerebrus2 user or hostname." >&2
   exit 2
 fi
 
-if ((${#rails[@]} != 4)); then
-  echo "MODEL_SYNC_RAILS must contain exactly four space-separated addresses." >&2
+if ((${#rails[@]} != 2)); then
+  echo "MODEL_SYNC_RAILS must contain exactly the two cerebrus2 P0 addresses." >&2
   exit 2
 fi
 for rail_address in "${rails[@]}"; do
@@ -78,11 +78,11 @@ case "${action}" in
   describe)
   cat <<EOF
 source=${source_dir}
-destination=${remote_user}@spark2:${destination}
+destination=${remote_user}@${WORKER_HOST}:${destination}
 rails=${rails[*]}
 
-Run '$0 --sync' after verifying all four SSH host keys and completing the
-Spark-1 model download.
+Run '$0 --sync' after verifying both direct-edge SSH host keys and completing
+the cerebrus1 model download.
 EOF
     exit 0
     ;;
@@ -91,11 +91,11 @@ EOF
     cat <<'EOF'
 Usage: sync-pinned-model-multirail.sh [describe|--sync]
 
-From Spark 1, --sync validates the pinned local checkpoint, synchronizes the
-pinned integration/profile to Spark 2, confirms all four rail addresses end
-on the same worker, copies 48 shards in parallel, and validates Spark 2.
+From cerebrus1, --sync validates the pinned local checkpoint, synchronizes the
+pinned integration/profile to cerebrus2, confirms both direct-edge addresses
+end on the same worker, copies 48 shards in parallel, and validates cerebrus2.
 
-MODEL_SYNC_RAILS may override the four space-separated worker rail addresses.
+MODEL_SYNC_RAILS may override the two space-separated worker edge addresses.
 EOF
     exit 0
     ;;
@@ -105,10 +105,13 @@ EOF
     ;;
 esac
 
-[[ "$(hostname -s)" == "spark1" ]] || {
-  echo "Run the striped copy coordinator on spark1." >&2
-  exit 2
-}
+case "$(hostname -s)" in
+  cerebrus1|spark1) ;;
+  *)
+    echo "Run the striped copy coordinator on cerebrus1 (spark1 is a transitional alias)." >&2
+    exit 2
+    ;;
+esac
 [[ -d "${source_dir}" && -f "${ssh_key}" ]] || {
   echo "Missing source model or cluster SSH identity." >&2
   exit 2
@@ -157,7 +160,7 @@ ssh "${ssh_options[@]}" "${remote_head}" \
   "mkdir -p -- ${destination_quoted}"
 
 # Copy metadata and tokenizer files once. Safetensor shards are distributed
-# round-robin over all four logical RoCE links.
+# round-robin over the two logical links on the direct TP2 edge.
 rsync -a --whole-file --partial \
   --exclude='*.safetensors' \
   -e "${rsync_ssh}" \
@@ -217,4 +220,4 @@ printf -v remote_validator_quoted '%q' "${WORKER_INSTALL_DIR}/bin/validate-model
 ssh "${ssh_options[@]}" "${remote_head}" \
   "env MIA_ENV_FILE=${remote_profile_quoted} ${remote_validator_quoted}"
 
-echo "Pinned model copied and validated over four rails: bytes=${local_bytes}"
+echo "Pinned model copied and validated over two direct-edge links: bytes=${local_bytes}"

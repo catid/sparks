@@ -21,10 +21,7 @@ if [[ ! "${wait_attempts}" =~ ^[1-9][0-9]*$ ||
   exit 2
 fi
 
-if [[ "$(/usr/bin/hostname -s)" != "spark1" ]]; then
-  echo "Run this worker-first launcher from spark1." >&2
-  exit 2
-fi
+require_mia_head_host
 
 "${helper_dir}/validate-static.sh"
 "${helper_dir}/sync-worker.sh"
@@ -53,7 +50,7 @@ worker_started=1
 ssh "${MIA_SSH_OPTIONS[@]}" "${WORKER_HOST}" \
   "env ${remote_profile_env} '${WORKER_INSTALL_DIR}/bin/node-compose.sh' 1 up -d --no-build --pull never"
 
-echo "Starting pinned head rank 0 on spark1..."
+echo "Starting pinned head rank 0 on cerebrus1..."
 head_started=1
 "${helper_dir}/node-compose.sh" 0 up -d --no-build --pull never
 
@@ -65,7 +62,7 @@ for _ in $(seq 1 "${wait_attempts}"); do
   fi
   if curl -fsS --max-time 5 "${api_url}" >/dev/null 2>&1; then
     trap - ERR
-    echo "Pinned Mia DSpark API is ready: http://spark1.lan:${VLLM_PORT}/v1"
+    echo "Pinned Mia DSpark API is ready: http://cerebrus1:${VLLM_PORT}/v1"
     if [[ -n "${INVOCATION_ID:-}" ]]; then
       echo "Launch is owned by dgx-spark-dspark-mia.service."
     else

@@ -16,7 +16,7 @@ readiness_helper="${MIA_ROOT}/../bin/wait-cx7-ready.sh"
 remote_repo_root="$(dirname -- "${WORKER_INSTALL_DIR}")"
 remote_readiness_helper="${remote_repo_root}/bin/wait-cx7-ready.sh"
 [[ -f "${readiness_helper}" && ! -L "${readiness_helper}" ]] || {
-  echo "Missing regular four-rail readiness helper: ${readiness_helper}" >&2
+  echo "Missing regular ring/TP2 readiness helper: ${readiness_helper}" >&2
   exit 1
 }
 
@@ -69,7 +69,7 @@ remote_readiness_sha="$(
     "sha256sum '$(printf '%q' "${remote_readiness_helper}")' | awk '{print \$1}'"
 )"
 [[ "${remote_readiness_sha}" == "${local_readiness_sha}" ]] || {
-  echo "Worker four-rail readiness helper does not match Spark 1." >&2
+  echo "Worker ring/TP2 readiness helper does not match cerebrus1." >&2
   exit 1
 }
 

@@ -14,10 +14,7 @@ need_command sudo
 need_command timeout
 require_ssh_identity
 
-if [[ "$(/usr/bin/hostname -s)" != "spark1" ]]; then
-  echo "Run the two-node health probe from spark1." >&2
-  exit 2
-fi
+require_mia_head_host
 
 api_timeout="${MIA_HEALTH_API_TIMEOUT_SECONDS:-5}"
 ssh_timeout="${MIA_HEALTH_SSH_TIMEOUT_SECONDS:-5}"

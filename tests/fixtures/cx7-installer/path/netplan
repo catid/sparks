@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "generate" && "${2:-}" == "--root-dir" && -n "${3:-}" ]]; then
+  validation_root="$3"
+  mkdir -p "${validation_root}/run/netplan/root-owned"
+  printf 'generated\n' >"${validation_root}/run/netplan/root-owned/state"
+  chmod 000 "${validation_root}/run/netplan/root-owned"
+  exit 0
+fi
+
+case "${1:-}" in
+  generate) exit 0 ;;
+  apply)
+    if [[ "${CX7_INSTALLER_FAIL_APPLY_ONCE:-0}" == 1 ]]; then
+      marker="${CX7_INSTALLER_TEST_TARGET}.apply-failed"
+      if [[ ! -e "${marker}" ]]; then
+        : >"${marker}"
+        exit 73
+      fi
+    fi
+    exit 0
+    ;;
+  *) exit 2 ;;
+esac

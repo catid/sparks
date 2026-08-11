@@ -11,6 +11,7 @@ output="$(
 )"
 grep -Fq "profile_file=${test_profile_basename} project=mia-dspark-throughput" <<<"${output}"
 grep -Fq 'API=8889 master=29631' <<<"${output}"
+grep -Fq 'direct-edge' <<<"${output}"
 grep -Fq 'max_num_seqs=32 max_batched_tokens=8192 capture=192 gpu_util=0.78' <<<"${output}"
 
 set +e

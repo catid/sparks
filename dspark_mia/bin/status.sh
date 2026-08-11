@@ -10,8 +10,8 @@ need_command ssh
 require_ssh_identity
 remote_profile_env="$(remote_profile_assignment)"
 
-echo "== spark1 / rank 0 =="
+echo "== cerebrus1 / rank 0 =="
 "${MIA_ROOT}/bin/node-compose.sh" 0 ps -a
-echo "== spark2 / rank 1 =="
+echo "== cerebrus2 / rank 1 =="
 ssh "${MIA_SSH_OPTIONS[@]}" "${WORKER_HOST}" \
   "env ${remote_profile_env} '${WORKER_INSTALL_DIR}/bin/node-compose.sh' 1 ps -a"

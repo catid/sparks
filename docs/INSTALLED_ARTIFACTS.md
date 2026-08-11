@@ -1,6 +1,6 @@
 # Installed-artifact inventory
 
-This file maps the audited two-host installation back to repository sources.
+This file maps the two-rank installation and three-node ring back to repository sources.
 It distinguishes the active DSpark deployment from retired experiments and
 from private runtime state that must never be committed.
 
@@ -17,29 +17,37 @@ Those values are installation details, not public defaults.
 
 | Host | Active project responsibility |
 | --- | --- |
-| Spark 1 | DSpark supervisor, TP rank 0/API, four-rail readiness, dashboard, optional Nginx |
-| Spark 2 | TP rank 1 container controlled from Spark 1; no autonomous model supervisor |
+| Cerebrus 1 | DSpark supervisor, TP rank 0/API, TP2-edge readiness, dashboard, optional Nginx |
+| Cerebrus 2 | TP rank 1 container controlled from C1; no autonomous model supervisor |
+| Cerebrus 3 | physical ring member, independent rack telemetry/kiosk and Audio8 TTS; no rank in the active DSpark service |
 
-On Spark 1, `dgx-spark-dspark-mia.service` and
+On C1, `dgx-spark-dspark-mia.service` and
 `dgx-spark-laguna-dashboard.service` were enabled and active. The rail gate is
 a static oneshot and normally appears inactive after a successful check.
 
-Spark 2's active rank was a Compose container, not an enabled systemd rank
-unit. This is intentional: Spark 1 must replace the complete TP generation
+C2's active rank was a Compose container, not an enabled systemd rank
+unit. This is intentional: C1 must replace the complete TP generation
 when either rank fails.
 
-The static `dgx-spark-cx7-ready.service` is installed and audited on Spark 2
-for the older systemd rank path. The current Mia lifecycle does not start that
-unit remotely; its preflight/start flow invokes the same
-`bin/wait-cx7-ready.sh` check over SSH before launching Spark 2's Compose rank.
+The current `dgx-spark-cx7-ready.service` exists only as C1's non-resident TP2
+startup dependency and is rendered from the `.service.in` template. A static
+unit with the same name remains installed and audited on C2 from the retired
+rank-service architecture. Mia never starts that C2 unit; preflight/start
+instead invokes `bin/wait-cx7-ready.sh --scope tp2` over SSH before launching
+C2's Compose rank. Do not mistake the legacy C2 copy for a current
+per-rank service dependency.
 
 ## systemd units
 
 | Installed unit | Host(s) | Repository source | Audited role/state |
 | --- | --- | --- | --- |
-| `dgx-spark-dspark-mia.service` | Spark 1 | audited concrete unit in `systemd/dgx-spark-dspark-mia.service`; portable template in `systemd/dgx-spark-dspark-mia.service.in` | active/enabled; current orchestrator |
-| `dgx-spark-cx7-ready.service` | both | audited unit in `systemd/dgx-spark-cx7-ready.service`; portable Spark-1 template in `systemd/dgx-spark-cx7-ready.service.in` | static readiness gate; current Mia startup checks Spark 2 remotely |
+| `dgx-spark-dspark-mia.service` | C1 | audited concrete unit in `systemd/dgx-spark-dspark-mia.service`; portable template in `systemd/dgx-spark-dspark-mia.service.in` | active/enabled; current orchestrator |
+| `dgx-spark-cx7-ready.service` | C1 | portable template in `systemd/dgx-spark-cx7-ready.service.in` | current static TP2 readiness dependency; normally inactive after each successful start check |
+| `dgx-spark-cx7-ready.service` | C2 | legacy installed artifact; the current checked-in concrete unit is C1-specific | static/inactive; retained from the retired rank-service path and unused by Mia |
 | `dgx-spark-laguna-dashboard.service` | Spark 1 | `systemd/dgx-spark-laguna-dashboard.service` | active/enabled |
+| `dgx-spark-c3-dashboard.service` | C3 | `c3_dashboard/systemd/dgx-spark-c3-dashboard.service.in` | independent three-host collector; intended active/enabled |
+| `dgx-spark-c3-kiosk.service` | C3 | `c3_dashboard/systemd/dgx-spark-c3-kiosk.service.in` | rootless-X rack display; intended active/enabled |
+| `cerebrus3-audio8.service` | C3 | `systemd/cerebrus3-audio8.service.in` | isolated Audio8 API; intended active/enabled, with no playback loop |
 | `dgx-spark-deepseek-v4-rank0.service` | Spark 1 | `systemd/dgx-spark-deepseek-v4-rank0.service` | disabled/inactive legacy deployment |
 | `dgx-spark-deepseek-v4-rank1.service` | Spark 2 | `systemd/dgx-spark-deepseek-v4-rank1.service` | static/inactive legacy deployment |
 | `dgx-spark-laguna-vllm-agent.service` | both | `systemd/dgx-spark-laguna-vllm-agent.service` | disabled legacy Laguna replica |
@@ -63,14 +71,16 @@ because their names share a prefix.
 
 | Installed path | Host(s) | Public source/template | Notes |
 | --- | --- | --- | --- |
-| `/etc/netplan/40-cx7.yaml` | both | corresponding `netplan/spark*-40-cx7.yaml` | exact direct-rail configuration |
+| `/etc/netplan/40-cx7.yaml` | all three | corresponding `netplan/cerebrus*-40-cx7.yaml` | exact ring-edge configuration |
 | `/etc/default/dgx-spark-laguna-dashboard` | Spark 1 | derive from `dashboard/dashboard.env.example` | mode 0600; live LAN/auth values stay private |
+| `/etc/default/dgx-spark-c3-dashboard` | C3 | derive from `c3_dashboard/dashboard.env.example` | mode 0600; node/key paths stay host-local |
+| `/etc/default/cerebrus3-audio8` | C3 | optional local file | mode 0600; may name the private approved-reference directory |
 | `/etc/nginx/sites-available/dgx-spark-dashboard` | Spark 1 | `dashboard/nginx-spark1-dashboard.conf` | enabled by symlink in `sites-enabled` |
-| `/etc/nginx/ssl/spark1.lan.crt` | Spark 1 | generated by `bin/install-dashboard-web.sh` | local/self-signed certificate |
-| `/etc/nginx/ssl/spark1.lan.key` | Spark 1 | generated locally | private; never commit or copy into docs |
+| `/etc/nginx/ssl/cerebrus1.lan.crt` | C1 | generated by `bin/install-dashboard-web.sh` | default local/self-signed certificate; follows `DASHBOARD_WEB_HOST` |
+| `/etc/nginx/ssl/cerebrus1.lan.key` | C1 | generated locally | default private key; never commit or copy into docs |
 | `/etc/dgx-spark-deepseek-v4.env` | both | `systemd/dgx-spark-deepseek-v4.env.example` | legacy rank-service profile, not active DSpark profile |
 | `/etc/dgx-spark-laguna-vllm-agent.conf` | both | `systemd/dgx-spark-laguna-vllm-agent.conf.example` | legacy replica override |
-| `/etc/X11/xorg.conf` | both | NVIDIA's `nvidia-conf-xconfig.service` | vendor-generated, retained for GUI rollback |
+| `/etc/X11/xorg.conf` | all three | NVIDIA's `nvidia-conf-xconfig.service` | vendor-generated, retained for GUI rollback |
 
 The active DSpark profile is selected from `dspark_mia/` and synchronized to
 the matching checkout path on Spark 2. It contains topology and runtime
@@ -89,10 +99,12 @@ The active units execute version-controlled paths directly:
 
 | Function | Source |
 | --- | --- |
-| four-rail readiness | `bin/wait-cx7-ready.sh` |
+| ring/TP2-edge readiness | `bin/wait-cx7-ready.sh` |
 | DSpark lifecycle and supervisor | `dspark_mia/bin/` |
 | Compose behavior | upstream submodule plus `dspark_mia/compose.mia.override.yml` |
 | dashboard | `dashboard/run-dashboard.sh`, `dashboard/server.py`, `dashboard/static/` |
+| C3 rack telemetry and kiosk | `c3_dashboard/server.py`, `c3_dashboard/kiosk.py`, `c3_dashboard/scripts/` |
+| C3 Audio8 API | `audio8/`, `scripts/install-audio8.sh` |
 | optional remote dashboard probe | `dashboard/remote-probe.sh`, installed by `scripts/install-dashboard-probe.sh` |
 | benchmarks | `bench/`, `deepseek_v4_bench/`, `deepseek_v4_agent_eval/` |
 
@@ -131,12 +143,18 @@ removes it.
 
 ## Docker and model artifacts
 
-Both hosts must have:
+All three ring nodes used by the documented maintenance tooling must have:
 
 - the exact arm64 container digest recorded in `dspark_mia/UPSTREAM.lock`;
-- a complete local model matching `dspark_mia/MODEL.lock.json`;
 - `/dev/infiniband` available to containers; and
 - the rootful NVIDIA Docker runtime.
+
+C1 and C2 must also have a complete local model matching the selected TP2
+profile's lock (the active agent service uses
+`dspark_mia/MODEL.abliterated-fp8.lock.json`). The audited C3 also has that
+checkpoint staged for the retained PP3 compatibility harness, but the ring
+NCCL verifier itself needs only the pinned image and production TP2 never reads
+C3's model copy.
 
 The active low-concurrency Compose identity is:
 
@@ -195,6 +213,8 @@ These locations intentionally have no tracked public mirror:
 | Docker authentication | `${HOME}/.docker/` or root Docker config | credentials |
 | Hugging Face auth/cache | `${HOME}/.cache/huggingface/` and CLI config | tokens, large artifacts |
 | model weights | `MODEL_DIR` | large licensed/pinned artifact |
+| Audio8 checkpoint | `${HOME}/models/Audio8-TTS-Preview-0.6b--f9612f13/` | large pinned artifact |
+| approved TTS reference and transcript | operator-chosen directory outside Git | permissioned media and private conditioning data |
 | dashboard live env | `/etc/default/dgx-spark-laguna-dashboard` | LAN topology and optional auth |
 | dashboard TLS key | `/etc/nginx/ssl/*.key` | private key |
 | OpenClaw home/state | `${HOME}/.openclaw/` | credentials, identity, sessions, history |
@@ -213,9 +233,9 @@ and retain only explicitly accepted long-term authority.
 Use read-only comparisons before changing a live host:
 
 ```bash
-# Choose the correct rank file on each host.
-sudo cmp --silent netplan/spark1-40-cx7.yaml /etc/netplan/40-cx7.yaml \
-  && echo "Spark 1 Netplan matches"
+# Choose the correct canonical role file on each host.
+sudo cmp --silent netplan/cerebrus1-40-cx7.yaml /etc/netplan/40-cx7.yaml \
+  && echo "Cerebrus 1 Netplan matches"
 
 systemctl cat dgx-spark-dspark-mia.service
 systemctl show dgx-spark-dspark-mia.service \
@@ -228,7 +248,7 @@ sudo docker ps \
 MIA_ENV_FILE=mia-agent.env dspark_mia/bin/probe.sh
 ```
 
-On Spark 2, compare against `netplan/spark2-40-cx7.yaml`. For unit templates,
+On C2/C3, compare against the corresponding canonical file. For unit templates,
 use the installer to render into a temporary directory and
 `systemd-analyze verify` it; do not compare a parameterized `.in` file
 byte-for-byte with its installed rendering.

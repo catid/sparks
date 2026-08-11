@@ -1,164 +1,152 @@
-# Two-Spark architecture
+# Three-Spark fabric, two-rank inference
 
-This repository turns two NVIDIA DGX Sparks into one DeepSeek V4 Flash
-inference server. It does **not** run two independent replicas: vLLM uses
-tensor parallelism across the machines, so both ranks are required for every
-request.
+The hardware is a three-node CX-7 ring, but the active DeepSeek V4 Flash
+service is a two-rank tensor-parallel deployment:
 
-The configuration described here was audited on 2026-07-29. In commands and
-examples:
+- `cerebrus1` is rank 0, the API host, and the sole lifecycle orchestrator.
+- `cerebrus2` is headless rank 1 and has no model HTTP endpoint.
+- `cerebrus3` completes the physical ring but is not a rank in this service.
 
-- `spark1` is rank 0, the API host, and the only lifecycle orchestrator.
-- `spark2` is rank 1 and has no model HTTP endpoint.
-- `SPARK_USER` means the unprivileged account that owns the checkout.
-- `REPO_ROOT` means that account's checkout of this repository.
-- `spark1.lan` is an example management-LAN name. Replace it with local DNS;
-  do not put a private management address in the public repository.
+The exact `spark1`, `spark2`, and `spark3` names are transitional aliases. New
+configuration and operational commands use the canonical `cerebrus1` through
+`cerebrus3` names.
 
-## Request and control paths
+## Data and control paths
 
 ```text
-                              management LAN
- client ───── HTTP ───────> spark1:8889
-                                │
-                                │ vLLM rank 0
-                                │ TP collectives
-                    four logical RoCE/RDMA rails
-                                │
-                                │ vLLM rank 1 (headless)
-                                ▼
-                              spark2
+                              management LAN / enP7s7
+ client ───── HTTP ───────> cerebrus1:8889
+                                  │
+              SSH control ────────┼────────────> cerebrus2
+              rendezvous/Gloo ────┘
 
- spark1 systemd supervisor ── SSH/Docker control ──> spark2
- dashboard collector       ── read-only SSH ───────> spark2
-
- optional third-host dashboard ── read-only SSH ───> spark1 + spark2
-                               └─ HTTP metrics ────> spark1:8889
+                         production TP2 data
+                  cerebrus1 P1 ═══════ cerebrus2 P0
+                      │                         │
+                      │ complete physical ring │
+                      │                         │
+                  cerebrus1 P0             cerebrus2 P1
+                      ╲                         ╱
+                       ╲════ cerebrus3 ═══════╱
 ```
 
-The management LAN carries browser/API traffic, SSH control, and package
-downloads. The direct ConnectX-7 networks carry vLLM rendezvous traffic and
-NCCL collectives. They have no default gateway and should not be used as a
-general-purpose LAN.
+The management LAN carries API traffic, SSH, vLLM rendezvous, Gloo, package
+downloads, and NCCL socket bootstrap. The six CX-7 subnets carry RoCE data and
+have no default gateway. There is no CX-7 subnet shared by all three nodes.
 
-| Plane | Spark 1 | Spark 2 | Purpose |
+| Plane or edge | Endpoint A | Endpoint B | Purpose |
 | --- | --- | --- | --- |
-| Management | site-assigned address/name | site-assigned address/name | SSH, API clients, dashboard, administration |
-| RoCE rail 0 | `192.168.100.10/24` | `192.168.100.11/24` | rendezvous plus NCCL |
-| RoCE rail 1 | `192.168.101.10/24` | `192.168.101.11/24` | NCCL |
-| RoCE rail 2 | `192.168.102.10/24` | `192.168.102.11/24` | NCCL |
-| RoCE rail 3 | `192.168.103.10/24` | `192.168.103.11/24` | NCCL |
+| Management | C1 `10.10.84.28` | C2 `10.10.84.12` | API, SSH, rendezvous, Gloo, socket bootstrap |
+| C1-C2 | C1 P1 `.0.1/.1.1` | C2 P0 `.0.2/.1.2` | active TP2 RoCE data |
+| C1-C3 | C1 P0 `.2.1/.3.1` | C3 P1 `.2.2/.3.2` | ring-only transport |
+| C2-C3 | C2 P1 `.4.1/.5.1` | C3 P0 `.4.2/.5.2` | ring-only transport |
 
-The two physical ConnectX-7 cables expose four Linux netdev/RDMA pairs on each
-host. See [NETWORKING.md](NETWORKING.md) for their exact case-sensitive names
-and for proof that application traffic uses all four.
+The C3 rows are the selected post-swap, all-cross target required for a
+three-rank NCCL collective. At the 2026-08-10 audit cutoff, C3's cable ends
+were still in the straight P0↔C1-P0 / P1↔C2-P1 arrangement and used the
+compatibility Netplan map. Production TP2 is unaffected because its C1-C2 edge
+is already crossed. [NETWORKING.md](NETWORKING.md) records both explicit maps
+and the physical cutover procedure.
+
+All fabric addresses above are `192.168.X.Y/24`. See
+[NETWORKING.md](NETWORKING.md) for the case-sensitive netdev/RDMA names,
+Netplan sources, readiness scopes, and rollback procedure.
 
 ## Active inference deployment
 
-The active OpenClaw-oriented deployment uses the isolated
-`mia-dspark-agent` Compose project:
+The active OpenClaw-oriented profile uses the isolated `mia-dspark-agent`
+Compose project:
 
 | Property | Value |
 | --- | --- |
-| Model | `deepseek-ai/DeepSeek-V4-Flash-DSpark` at the revision in `MODEL.lock.json` |
-| Quantization | NVFP4 checkpoint and `nvfp4_ds_mla` KV cache |
-| Parallelism | TP=2, PP=1, one process per Spark |
+| Model | revision selected by `dspark_mia/MODEL.abliterated-fp8.lock.json` |
+| Quantization | FP8 checkpoint and `nvfp4_ds_mla` KV cache |
+| Parallelism | TP=2, PP=1, one process on C1 and C2 |
 | Speculation | native DSpark, probabilistic, five speculative tokens |
 | Context ceiling | 1,048,576 tokens |
 | Scheduler | up to 8 sequences, 8,192 batched tokens |
-| Served IDs | historical `deepseek-v4-flash-dspark-mia-throughput` plus canonical `deepseek-v4-flash` |
-| API | rank 0 only, port `8889` |
-| Rendezvous | `192.168.100.10:29632` |
+| Served IDs | historical ID plus canonical `deepseek-v4-flash` alias |
+| API | C1 only, port `8889` |
+| Rendezvous | C1 management address `10.10.84.28:29632` |
+| RoCE HCAs | C1 P1 pair and C2 P0 pair only |
 | Container network | host network |
 | Container restart | deliberately `no` |
 
-The local Compose overlay enables thinking, DeepSeek V4 reasoning/tool
-parsers, chunked prefill, prefix caching, asynchronous scheduling, FlashInfer
-B12X MoE, and GB10-native kernel targets. The complete launch surface is in
-`dspark_mia/compose.mia.override.yml`; do not maintain a second handwritten
-copy of those flags.
+The two ranks have different facing HCA names. The lifecycle wrapper injects
+C1's P1 selector for rank 0 and C2's P0 selector for rank 1. Socket bootstrap,
+TP control, and Gloo stay on `enP7s7`.
 
-Each host keeps a complete, revision-pinned model tree on local NVMe. The
-checkpoint is mounted read-only into its local rank, and inference runs with
-Hugging Face and Transformers offline modes enabled. A launch never downloads
-or silently changes the model or container.
+C3 cannot be added as tensor-parallel rank 2 for this model. The pinned
+DeepSeek V4 overlay requires 64 attention heads (and its 256 routed experts)
+to divide evenly by TP size; neither divides by three. The target-only PP3
+trial formed its distributed world and loaded weights, but failed engine
+initialization because the compressed state-cache stride was not divisible by
+16. Native DSpark/DFlash also lacks the required pipeline-parallel protocol.
+A three-node NCCL ring test therefore remains a separate transport experiment,
+not a production vLLM topology change.
+
+Each rank host keeps the complete revision-pinned model tree on local NVMe.
+The checkpoint is mounted read-only, and inference runs with Hugging Face and
+Transformers offline modes enabled. A launch never downloads or silently
+changes the model or container.
 
 ## Lifecycle ownership
 
-`dgx-spark-dspark-mia.service` runs only on Spark 1. Its long-running
-supervisor:
+`dgx-spark-dspark-mia.service` runs only on C1. Its long-running supervisor:
 
-1. waits for the four direct rails;
-2. checks the exact model, image, ports, and selected profile on both hosts;
-3. starts Spark 2's headless container before Spark 1's rank-0 container;
-4. verifies both container identities, host boot IDs, OOM state, `/health`,
-   and every required served-model ID, including the canonical alias;
+1. checks the direct C1-C2 edge with readiness `--scope tp2`;
+2. validates the selected profile, exact model, image, and ports on both rank
+   hosts;
+3. starts C2's headless container before C1's rank-0 container;
+4. verifies both container identities, boot IDs, OOM state, `/health`, and
+   required model IDs;
 5. adopts an already healthy generation without restarting it; and
-6. replaces **both** ranks when either rank disappears, changes identity,
+6. replaces both ranks if either rank disappears, changes identity,
    independently restarts, or fails health checks.
 
-One TP rank cannot safely rejoin an already running NCCL generation. That is
-why Compose has `restart: "no"` and why Spark 2 has no enabled autonomous model
-service. Recovery is coordinated from Spark 1, with bounded timeouts and
-exponential retry backoff.
+C3 health is deliberately absent from that list. A C3 outage degrades the
+complete ring but must not stop TP2 production.
+
+One rank cannot safely rejoin an existing NCCL generation. Compose therefore
+uses `restart: "no"`, C2 has no autonomous model service, and recovery is
+coordinated from C1 with bounded timeouts and exponential backoff.
 
 The older port-8000 rank services, Laguna replica service, and router units
-remain in the repository as tested history and rollback material. They are
-disabled in the audited deployment and must not be enabled alongside the
-DSpark supervisor. `Conflicts=` declarations provide an additional guard, but
-operators should still verify the active units before a launch.
+remain as historical/rollback material. They are disabled and must not run
+alongside the DSpark supervisor.
 
 ## Dashboard
 
-The dashboard is independent of the model service, so temperatures and
-network state remain visible during a several-minute cold model load.
+The dashboard is structurally a two-rank inference dashboard. It monitors C1
+and C2; C3 is ring-fabric-only unless the dashboard is separately generalized.
+Rank-0 Prometheus values are cluster-wide and counted once. RoCE byte rates
+come from RDMA hardware counters rather than Linux netdev byte counters.
 
-- The collector normally listens on loopback port `8090`.
-- Nginx on Spark 1 can publish it as `http://spark1.lan/` and
-  `https://spark1.lan/`.
-- Rank-0 Prometheus values are cluster-wide and must be counted once.
-- Rank 1 is monitored as a worker through process and hardware telemetry; it
-  does not have a synthetic HTTP endpoint.
-- RoCE byte rates come from RDMA hardware counters, not only Linux netdev
-  counters.
-
-The dashboard has no role in model recovery. See `dashboard/README.md` for its
-topology and authentication settings. It may instead run on a third Linux host
-and SSH-probe both Sparks; that optional placement is described in
-[`REMOTE_DASHBOARD.md`](REMOTE_DASHBOARD.md) and does not alter inference
-ownership.
+The dashboard has no role in model recovery. See `dashboard/README.md` for
+authentication and deployment settings.
 
 ## Ports
 
 | Port | Bind/owner | Function |
 | --- | --- | --- |
-| `22/tcp` | management interfaces, both hosts | SSH administration and rank control |
-| `80/tcp` | Spark 1/Nginx | optional dashboard HTTP |
-| `443/tcp` | Spark 1/Nginx | optional dashboard HTTPS |
-| `8090/tcp` | Spark 1/dashboard | collector; prefer loopback |
-| `8889/tcp` | Spark 1/vLLM | OpenAI-compatible model API |
-| `29632/tcp` | direct rail 0 | current C8-agent TP rendezvous |
+| `22/tcp` | management interfaces | SSH administration and rank control |
+| `80/tcp`, `443/tcp` | C1/Nginx | optional dashboard front end |
+| `8090/tcp` | C1/dashboard | collector; prefer loopback |
+| `8889/tcp` | C1/vLLM | OpenAI-compatible model API |
+| `29632/tcp` | C1 management interface | current C8-agent TP rendezvous |
 
 The C32 throughput profile uses rendezvous port `29631`; the pinned seq6
-profile uses API port `8888` and rendezvous port `29630`.
-Only one large model profile can safely occupy the unified memory at a time.
+profile uses API port `8888` and rendezvous port `29630`. Only one large model
+profile can safely occupy unified memory at a time.
 
 ## Security boundaries
 
-The model API does not authenticate clients. The audited host firewall was
-inactive, and the active API bound to `0.0.0.0`. Treat the management LAN as a
-security boundary or add an authenticated reverse proxy and explicit firewall
-rules before exposing the service beyond it.
+The model API does not authenticate clients and binds to `0.0.0.0`. Treat the
+management LAN as a security boundary or add an authenticated reverse proxy
+and explicit firewall rules before broader exposure.
 
-The public repository intentionally does not contain:
-
-- API tokens, shell credential exports, or Docker registry credentials;
-- SSH private keys, `authorized_keys`, or unreviewed `known_hosts`;
-- the dashboard's live environment or TLS private key;
-- OpenClaw state, identity, sessions, or gateway credentials;
-- model weights, caches, container writable layers, runtime state, or logs.
-
-Docker is rootful on the audited pair, and its socket is root-equivalent.
-Lifecycle wrappers therefore use non-interactive `sudo docker` explicitly
-rather than depending on a stale rootless Docker context. Restrict permanent
-sudo as described in [HOST_TUNING.md](HOST_TUNING.md).
+The public repository intentionally excludes credentials, SSH private keys,
+unreviewed host keys, active dashboard secrets, OpenClaw state, model weights,
+container state, and raw logs. Docker is rootful and its socket is
+root-equivalent; lifecycle wrappers use non-interactive `sudo docker` and the
+service account must remain tightly controlled.

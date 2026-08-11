@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$(basename -- "$0")" in
+  hostname)
+    [[ "${1:-}" == -s ]]
+    printf 'cerebrus1\n'
+    ;;
+  ip)
+    printf '1: lo    inet 127.0.0.1/8 scope host lo\n'
+    printf '2: enP7s7    inet 10.10.84.28/24 scope global enP7s7\n'
+    ;;
+  getent)
+    [[ "${1:-}" == ahostsv4 ]]
+    case "${2:-}" in
+      10.10.84.28|cerebrus1|cerebrus1.lan|spark1|spark1.lan)
+        printf '10.10.84.28 STREAM cerebrus1\n'
+        ;;
+      10.10.84.12|cerebrus2|cerebrus2.lan|spark2|spark2.lan)
+        printf '10.10.84.12 STREAM cerebrus2\n'
+        ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  ssh)
+    if [[ "${1:-}" == -G ]]; then
+      case "${2:-}" in
+        cerebrus1|cerebrus1.lan|spark1|spark1.lan)
+          printf 'hostname 10.10.84.28\n'
+          ;;
+        *) printf 'hostname 10.10.84.12\n' ;;
+      esac
+      exit 0
+    fi
+    printf 'ssh %s\n' "$*" >>"${TEST_CLUSTER_KEY_LOG:?}"
+    ;;
+  scp)
+    printf 'scp %s\n' "$*" >>"${TEST_CLUSTER_KEY_LOG:?}"
+    ;;
+  *)
+    echo "Unexpected fake command: $(basename -- "$0")" >&2
+    exit 64
+    ;;
+esac

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+# The launcher's startx audit looks for the standard wrapper's ` -auth ` token.
+
+set -euo pipefail
+
+command_name="${0##*/}"
+log_file="${C3_TEST_COMMAND_LOG:?}"
+
+log() {
+  {
+    printf '%s' "${command_name}"
+    printf ' %q' "$@"
+    printf '\n'
+  } >>"${log_file}"
+}
+
+case "${command_name}" in
+  xrandr)
+    log "$@"
+    if [[ " ${*} " == *" --query "* ]]; then
+      printf 'Screen 0: minimum 8 x 8, current 1424 x 280, maximum 32767 x 32767\n'
+      if [[ "${C3_TEST_XRANDR_STATE:-connected}" != "disconnected" ]]; then
+        printf 'TV-0 connected primary 1424x280+0+0 (normal) 430mm x 90mm\n'
+        printf '   1424x280      60.00*+\n'
+        if [[ "${C3_TEST_XRANDR_STATE:-connected}" == "multiple" ]]; then
+          printf 'DP-1 connected 1920x1080+1424+0 (normal) 600mm x 340mm\n'
+          printf '   1920x1080     60.00*+\n'
+        fi
+      else
+        printf 'TV-0 disconnected (normal)\n'
+      fi
+      exit 0
+    fi
+    [[ "${C3_TEST_XRANDR_STATE:-connected}" != "disconnected" ]]
+    ;;
+  Xorg|mcookie|python3|xauth|xset|sleep)
+    log "$@"
+    ;;
+  startx)
+    log "$@"
+    printf 'STARTX_ENV HOME=%s XDG_RUNTIME_DIR=%s\n' \
+      "${HOME:-}" "${XDG_RUNTIME_DIR:-}" >>"${log_file}"
+    ;;
+  xinit|dbus-run-session)
+    log "$@"
+    ;;
+  *)
+    echo "Unexpected fake command: ${command_name}" >&2
+    exit 99
+    ;;
+esac

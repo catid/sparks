@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Block a distributed model service until every logical RoCE rail between the
-# two DGX Sparks is usable. The two physical ConnectX-7 cables expose four
-# logical netdev/RDMA links.
+# Validate the fixed three-node DGX Spark ring. Each physical CX-7 port exposes
+# two logical Ethernet/RDMA links. Production TP2 intentionally checks only
+# the direct cerebrus1-P1 <-> cerebrus2-P0 edge, so cerebrus3 cannot block it.
 
 readonly -a cx7_interfaces=(
   enp1s0f0np0
@@ -11,27 +11,52 @@ readonly -a cx7_interfaces=(
   enp1s0f1np1
   enP2p1s0f1np1
 )
-readonly -a cx7_subnets=(100 101 102 103)
 
 expected_mtu="${CX7_EXPECTED_MTU:-9000}"
+expected_speed="${CX7_EXPECTED_SPEED_MBPS:-200000}"
 poll_seconds="${CX7_POLL_SECONDS:-2}"
 ping_timeout="${CX7_PING_TIMEOUT_SECONDS:-1}"
 timeout_seconds="${CX7_TIMEOUT_SECONDS:-0}"
-local_suffix="${CX7_LOCAL_SUFFIX:-}"
-action="${1:---wait}"
+requested_role="${CX7_NODE_ROLE:-$(/usr/bin/hostname -s)}"
+scope="${CX7_SCOPE:-ring}"
+c3_port_map="${CX7_C3_PORT_MAP:-c3-p0-to-c1}"
+action="--wait"
+action_seen=0
 
 usage() {
   cat <<'EOF'
-Usage: wait-cx7-ready.sh [--wait|--check-once|--describe]
+Usage: wait-cx7-ready.sh [--wait|--check-once|--describe] [--scope ring|tp2] \
+  [--c3-port-map c3-p0-to-c1|c3-p0-to-c2]
+
+Scopes:
+  ring  Validate both local physical ports: four logical links to two peers.
+  tp2   Validate only cerebrus1-P1 <-> cerebrus2-P0: two logical links.
 
 Environment:
-  CX7_LOCAL_SUFFIX          10 for Spark 1 or 11 for Spark 2. By default the
-                            script derives this from the spark1/spark2 hostname.
-  CX7_EXPECTED_MTU          Required MTU on every rail (default: 9000).
+  CX7_NODE_ROLE             cerebrus1, cerebrus2, or cerebrus3. Exact spark1,
+                            spark2, and spark3 aliases remain transitional.
+                            The short hostname is used by default.
+  CX7_SCOPE                 ring (default) or tp2; overridden by --scope.
+  CX7_C3_PORT_MAP           c3-p0-to-c1 (current canonical default) or
+                            c3-p0-to-c2 (NVIDIA crossed C3 cable layout).
+                            Overridden by --c3-port-map. It changes only C3's
+                            interface/address matrix and may be passed on all
+                            nodes by a cluster-wide launcher.
+  CX7_EXPECTED_MTU          Required MTU on every selected link (default: 9000).
+  CX7_EXPECTED_SPEED_MBPS   Minimum negotiated link speed (default: 200000).
   CX7_POLL_SECONDS          Delay between checks (default: 2).
-  CX7_PING_TIMEOUT_SECONDS  Per-rail peer ping timeout (default: 1).
+  CX7_PING_TIMEOUT_SECONDS  Per-link peer ping timeout (default: 1).
   CX7_TIMEOUT_SECONDS       Overall wait timeout; 0 waits forever (default: 0).
 EOF
+}
+
+canonical_role() {
+  case "$1" in
+    cerebrus1|spark1) printf 'cerebrus1\n' ;;
+    cerebrus2|spark2) printf 'cerebrus2\n' ;;
+    cerebrus3|spark3) printf 'cerebrus3\n' ;;
+    *) return 1 ;;
+  esac
 }
 
 require_uint() {
@@ -43,56 +68,141 @@ require_uint() {
   fi
 }
 
-case "${action}" in
-  --wait | --check-once | --describe) ;;
-  -h | --help)
-    usage
-    exit 0
-    ;;
+while (($#)); do
+  case "$1" in
+    --wait|--check-once|--describe)
+      if ((action_seen)); then
+        echo "Choose only one readiness action." >&2
+        exit 2
+      fi
+      action="$1"
+      action_seen=1
+      ;;
+    --scope)
+      shift
+      if (($# == 0)); then
+        echo "--scope requires ring or tp2." >&2
+        exit 2
+      fi
+      scope="$1"
+      ;;
+    --scope=*) scope="${1#*=}" ;;
+    --c3-port-map)
+      shift
+      if (($# == 0)); then
+        echo "--c3-port-map requires c3-p0-to-c1 or c3-p0-to-c2." >&2
+        exit 2
+      fi
+      c3_port_map="$1"
+      ;;
+    --c3-port-map=*) c3_port_map="${1#*=}" ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+case "${scope}" in
+  ring|tp2) ;;
   *)
-    usage >&2
+    echo "CX7 scope must be ring or tp2 (got ${scope})." >&2
+    exit 2
+    ;;
+esac
+case "${c3_port_map}" in
+  c3-p0-to-c1|c3-p0-to-c2) ;;
+  *)
+    echo "CX7 C3 port map must be c3-p0-to-c1 or c3-p0-to-c2 (got ${c3_port_map})." >&2
     exit 2
     ;;
 esac
 
 require_uint CX7_EXPECTED_MTU "${expected_mtu}"
+require_uint CX7_EXPECTED_SPEED_MBPS "${expected_speed}"
 require_uint CX7_POLL_SECONDS "${poll_seconds}"
 require_uint CX7_PING_TIMEOUT_SECONDS "${ping_timeout}"
 require_uint CX7_TIMEOUT_SECONDS "${timeout_seconds}"
-if ((expected_mtu < 576 || poll_seconds < 1 || ping_timeout < 1)); then
-  echo "MTU must be at least 576, and poll/ping intervals must be positive." >&2
+if ((expected_mtu < 576 || expected_speed < 1 || poll_seconds < 1 || ping_timeout < 1)); then
+  echo "MTU must be at least 576, and speed/poll/ping values must be positive." >&2
   exit 2
 fi
 
-if [[ -z "${local_suffix}" ]]; then
-  case "$(/usr/bin/hostname -s)" in
-    spark1) local_suffix=10 ;;
-    spark2) local_suffix=11 ;;
-    *)
-      echo "Cannot infer Spark role; set CX7_LOCAL_SUFFIX to 10 or 11." >&2
-      exit 2
-      ;;
-  esac
+if ! node_role="$(canonical_role "${requested_role}")"; then
+  echo "Cannot infer a ring role from ${requested_role}; set CX7_NODE_ROLE to cerebrus1, cerebrus2, or cerebrus3." >&2
+  exit 2
+fi
+if [[ "${scope}" == "tp2" && "${node_role}" == "cerebrus3" ]]; then
+  echo "The production tp2 scope exists only on cerebrus1 and cerebrus2." >&2
+  exit 2
 fi
 
-case "${local_suffix}" in
-  10) peer_suffix=11 ;;
-  11) peer_suffix=10 ;;
-  *)
-    echo "CX7_LOCAL_SUFFIX must be 10 (Spark 1) or 11 (Spark 2)." >&2
-    exit 2
+declare -a local_cidrs=()
+declare -a peer_ips=()
+declare -a peer_nodes=()
+declare -a edge_names=()
+
+case "${node_role}" in
+  cerebrus1)
+    # P0 <-> the selected cerebrus3 port; P1 <-> cerebrus2 P0.
+    local_cidrs=(192.168.2.1/24 192.168.3.1/24 192.168.0.1/24 192.168.1.1/24)
+    peer_ips=(192.168.2.2 192.168.3.2 192.168.0.2 192.168.1.2)
+    peer_nodes=(cerebrus3 cerebrus3 cerebrus2 cerebrus2)
+    edge_names=(cerebrus1-cerebrus3 cerebrus1-cerebrus3 cerebrus1-cerebrus2 cerebrus1-cerebrus2)
+    ;;
+  cerebrus2)
+    # P0 <-> cerebrus1 P1; P1 <-> the selected cerebrus3 port.
+    local_cidrs=(192.168.0.2/24 192.168.1.2/24 192.168.4.1/24 192.168.5.1/24)
+    peer_ips=(192.168.0.1 192.168.1.1 192.168.4.2 192.168.5.2)
+    peer_nodes=(cerebrus1 cerebrus1 cerebrus3 cerebrus3)
+    edge_names=(cerebrus1-cerebrus2 cerebrus1-cerebrus2 cerebrus2-cerebrus3 cerebrus2-cerebrus3)
+    ;;
+  cerebrus3)
+    case "${c3_port_map}" in
+      c3-p0-to-c1)
+        # Current canonical wiring: C3 P0 <-> C1 P0; C3 P1 <-> C2 P1.
+        local_cidrs=(192.168.2.2/24 192.168.3.2/24 192.168.4.2/24 192.168.5.2/24)
+        peer_ips=(192.168.2.1 192.168.3.1 192.168.4.1 192.168.5.1)
+        peer_nodes=(cerebrus1 cerebrus1 cerebrus2 cerebrus2)
+        edge_names=(cerebrus1-cerebrus3 cerebrus1-cerebrus3 cerebrus2-cerebrus3 cerebrus2-cerebrus3)
+        ;;
+      c3-p0-to-c2)
+        # NVIDIA crossed wiring: C3 P0 <-> C2 P1; C3 P1 <-> C1 P0.
+        local_cidrs=(192.168.4.2/24 192.168.5.2/24 192.168.2.2/24 192.168.3.2/24)
+        peer_ips=(192.168.4.1 192.168.5.1 192.168.2.1 192.168.3.1)
+        peer_nodes=(cerebrus2 cerebrus2 cerebrus1 cerebrus1)
+        edge_names=(cerebrus2-cerebrus3 cerebrus2-cerebrus3 cerebrus1-cerebrus3 cerebrus1-cerebrus3)
+        ;;
+    esac
     ;;
 esac
 
+declare -a selected_indices=()
+for index in "${!cx7_interfaces[@]}"; do
+  if [[ "${scope}" == "ring" ||
+        "${edge_names[index]}" == "cerebrus1-cerebrus2" ]]; then
+    selected_indices+=("${index}")
+  fi
+done
+readonly selected_count="${#selected_indices[@]}"
+
 describe_layout() {
   local index
-  printf 'local_suffix=%s peer_suffix=%s expected_mtu=%s\n' \
-    "${local_suffix}" "${peer_suffix}" "${expected_mtu}"
-  for index in "${!cx7_interfaces[@]}"; do
-    printf '%s local=192.168.%s.%s/24 peer=192.168.%s.%s\n' \
-      "${cx7_interfaces[index]}" \
-      "${cx7_subnets[index]}" "${local_suffix}" \
-      "${cx7_subnets[index]}" "${peer_suffix}"
+  printf 'node_role=%s scope=%s logical_links=%s expected_mtu=%s' \
+    "${node_role}" "${scope}" "${selected_count}" "${expected_mtu}"
+  if [[ "${node_role}" == "cerebrus3" ]]; then
+    printf ' c3_port_map=%s' "${c3_port_map}"
+  fi
+  printf '\n'
+  for index in "${selected_indices[@]}"; do
+    printf '%s edge=%s peer_node=%s local=%s peer=%s\n' \
+      "${cx7_interfaces[index]}" "${edge_names[index]}" \
+      "${peer_nodes[index]}" "${local_cidrs[index]}" "${peer_ips[index]}"
   done
 }
 
@@ -107,9 +217,9 @@ add_error() {
   check_errors+=("$1")
 }
 
-check_all_rails() {
+check_selected_links() {
   local rdma_links=""
-  local index interface subnet local_cidr peer_ip carrier mtu
+  local index interface local_cidr peer_ip carrier mtu speed
   check_errors=()
 
   if ! rdma_links="$(/usr/bin/rdma link show 2>&1)"; then
@@ -117,11 +227,10 @@ check_all_rails() {
     rdma_links=""
   fi
 
-  for index in "${!cx7_interfaces[@]}"; do
+  for index in "${selected_indices[@]}"; do
     interface="${cx7_interfaces[index]}"
-    subnet="${cx7_subnets[index]}"
-    local_cidr="192.168.${subnet}.${local_suffix}/24"
-    peer_ip="192.168.${subnet}.${peer_suffix}"
+    local_cidr="${local_cidrs[index]}"
+    peer_ip="${peer_ips[index]}"
 
     if [[ ! -d "/sys/class/net/${interface}" ]]; then
       add_error "${interface}: netdev missing"
@@ -144,6 +253,14 @@ check_all_rails() {
       add_error "${interface}: mtu=${mtu}, expected ${expected_mtu}"
     fi
 
+    if ! speed="$(<"/sys/class/net/${interface}/speed")"; then
+      add_error "${interface}: cannot read negotiated speed"
+      continue
+    fi
+    if [[ ! "${speed}" =~ ^[0-9]+$ ]] || ((10#${speed} < expected_speed)); then
+      add_error "${interface}: speed=${speed} Mb/s, expected at least ${expected_speed} Mb/s"
+    fi
+
     if ! /usr/bin/ip -4 -o address show dev "${interface}" scope global |
       /usr/bin/awk -v expected="${local_cidr}" \
         '$4 == expected { found = 1 } END { exit(found ? 0 : 1) }'; then
@@ -162,7 +279,7 @@ check_all_rails() {
 
     if ! /usr/bin/ping -q -n -I "${interface}" -c 1 \
       -W "${ping_timeout}" "${peer_ip}" >/dev/null 2>&1; then
-      add_error "${interface}: peer ${peer_ip} unreachable"
+      add_error "${interface}: peer ${peer_ip} (${peer_nodes[index]}) unreachable"
     fi
   done
 
@@ -177,11 +294,13 @@ print_errors() {
 }
 
 if [[ "${action}" == "--check-once" ]]; then
-  if check_all_rails; then
-    echo "All four CX-7/RoCE rails are ready."
+  if check_selected_links; then
+    printf '%d required CX-7/RoCE logical links are ready (%s scope).\n' \
+      "${selected_count}" "${scope}"
     exit 0
   fi
-  echo "CX-7/RoCE readiness check failed:" >&2
+  printf 'CX-7/RoCE readiness check failed for %s (%s scope):\n' \
+    "${node_role}" "${scope}" >&2
   print_errors
   exit 1
 fi
@@ -189,17 +308,17 @@ fi
 start_seconds="${SECONDS}"
 attempt=0
 last_report=""
-while ! check_all_rails; do
+while ! check_selected_links; do
   ((attempt += 1))
   printf -v report '%s; ' "${check_errors[@]}"
   if [[ "${report}" != "${last_report}" ]] || ((attempt % 30 == 1)); then
-    printf 'Waiting for four CX-7/RoCE rails (attempt %d): %s\n' \
-      "${attempt}" "${report%; }" >&2
+    printf 'Waiting for %d CX-7/RoCE logical links (%s, attempt %d): %s\n' \
+      "${selected_count}" "${scope}" "${attempt}" "${report%; }" >&2
     last_report="${report}"
   fi
 
   if ((timeout_seconds > 0 && SECONDS - start_seconds >= timeout_seconds)); then
-    printf 'Timed out after %d seconds waiting for CX-7/RoCE rails.\n' \
+    printf 'Timed out after %d seconds waiting for CX-7/RoCE links.\n' \
       "${timeout_seconds}" >&2
     exit 1
   fi
@@ -207,4 +326,5 @@ while ! check_all_rails; do
 done
 
 elapsed=$((SECONDS - start_seconds))
-printf 'All four CX-7/RoCE rails are ready after %d seconds.\n' "${elapsed}"
+printf '%d required CX-7/RoCE logical links are ready after %d seconds (%s scope).\n' \
+  "${selected_count}" "${elapsed}" "${scope}"

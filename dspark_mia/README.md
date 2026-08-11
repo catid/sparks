@@ -1,6 +1,8 @@
 # Pinned Mia DSpark integration
 
-This is an isolated two-Spark integration of the MiaAI-Lab recipe. The
+This is an isolated two-rank integration of the MiaAI-Lab recipe on
+`cerebrus1` and `cerebrus2`. The hosts are part of a three-Spark physical
+ring, but `cerebrus3` is not a vLLM rank. The
 upstream checkout is detached at commit
 `0220360b752349c9b3129d64799246a4ec106640` and remains unmodified. All local
 changes live beside it in this directory.
@@ -18,7 +20,7 @@ changes live beside it in this directory.
 | Context / slots | 1,048,576 / 6; 8,192 max batched tokens |
 | KV / memory | `nvfp4_ds_mla`, GPU memory utilization 0.80 |
 | Chat template | `thinking=true` |
-| API / rendezvous | `0.0.0.0:8888` / `192.168.100.10:29630` |
+| API / rendezvous | `0.0.0.0:8888` / `10.10.84.28:29630` |
 | Compose project | `mia-dspark-pinned` |
 | SSH identity | `$HOME/.ssh/id_ed25519_dgx_cluster` by default, with `IdentitiesOnly=yes` |
 
@@ -39,23 +41,23 @@ render an ignored profile with local paths, then keep the same selector on
 every provisioning and lifecycle command:
 
 ```bash
-../scripts/configure-dspark-profile.sh
+../scripts/configure-dspark-profile.sh --model active
 MIA_ENV_FILE=mia-throughput.local.env ./bin/validate-static.sh
 
-../scripts/configure-dspark-profile.sh --profile agent
+../scripts/configure-dspark-profile.sh --profile agent --model active
 MIA_ENV_FILE=mia-agent.local.env ./bin/validate-static.sh
 ```
 
 ## Throughput benchmark profile
 
 `mia-throughput.env` keeps the same 1M context ceiling, thinking mode, DSpark
-k5, pinned artifacts, and four rails while isolating all lifecycle identity:
+k5, pinned artifacts, and the direct TP2 edge while isolating lifecycle identity:
 
 | Setting | Throughput value |
 | --- | --- |
 | Compose project | `mia-dspark-throughput` |
 | Served model name | `deepseek-v4-flash-dspark-mia-throughput` |
-| API / rendezvous | `0.0.0.0:8889` / `192.168.100.10:29631` |
+| API / rendezvous | `0.0.0.0:8889` / `10.10.84.28:29631` |
 | Host tmp | `$HOME/.cache/dspark-mia-throughput-tmp` |
 | Context / slots | 1,048,576 / 32 |
 | Max batched tokens | 8,192 |
@@ -76,7 +78,7 @@ give capture more headroom.
 `mia-agent.env.example` is the OpenClaw-oriented alternative to the C32
 throughput profile. It retains the default pinned model/image, TP2/PP1
 placement, native DSpark k5 proposer, one-million-token per-request ceiling,
-thinking mode, four-rail transport, API port, and public model ID. The tracked
+thinking mode, direct-edge transport, API port, and public model ID. The tracked
 installed `mia-agent.env` currently selects the separately pinned abliterated
 FP8 lock while retaining those client-facing IDs. Its isolated
 Compose/rendezvous/tmp identity and reduced scheduler are:
@@ -85,7 +87,7 @@ Compose/rendezvous/tmp identity and reduced scheduler are:
 | --- | --- |
 | Compose project | `mia-dspark-agent` |
 | Served model names | historical ID plus canonical `deepseek-v4-flash` alias |
-| API / rendezvous | `0.0.0.0:8889` / `192.168.100.10:29632` |
+| API / rendezvous | `0.0.0.0:8889` / `10.10.84.28:29632` |
 | Host tmp | `$HOME/.cache/dspark-mia-agent-tmp` |
 | Context / slots | 1,048,576 / 8 |
 | Max batched tokens | 8,192 |
@@ -105,7 +107,7 @@ and must be measured. See
 Render a separate ignored profile so selection and rollback stay explicit:
 
 ```bash
-../scripts/configure-dspark-profile.sh --profile agent
+../scripts/configure-dspark-profile.sh --profile agent --model active
 MIA_ENV_FILE=mia-agent.local.env ./bin/validate-static.sh
 ```
 
@@ -113,23 +115,35 @@ Switching the boot supervisor to this profile requires a coordinated
 `restart`; `start` may adopt a healthy existing generation and therefore does
 not apply new scheduler limits to already-running containers.
 
-## Four-rail transport
+## Rank-specific direct-edge transport
 
-The local override uses the already proven topology:
+The ranks face one another on different physical port numbers:
 
 ```text
-=rocep1s0f0:1:0,roceP2p1s0f0:1:0,rocep1s0f1:1:1,roceP2p1s0f1:1:1
+HEAD_NCCL_IB_HCA='=rocep1s0f1:1:0,roceP2p1s0f1:1:0'
+WORKER_NCCL_IB_HCA='=rocep1s0f0:1:0,roceP2p1s0f0:1:0'
 NCCL_NETDEVS_POLICY=ALL
 NCCL_CROSS_NIC=0
 NCCL_IB_MERGE_NICS=0
+NCCL_SOCKET_IFNAME='=enP7s7'
+TP_SOCKET_IFNAME=enP7s7
+GLOO_SOCKET_IFNAME=enP7s7
 ```
 
 There is deliberately no `NCCL_IB_GID_INDEX`. The compose override removes the
-upstream scalar, the wrapper unsets any inherited value, and static validation
-checks the rendered environment. Before launch, preflight reuses
-`../bin/wait-cx7-ready.sh --check-once` on both Sparks to require carrier,
-MTU 9000, the expected 192.168.100-103 addresses, active RDMA links, and
-peer reachability on all four rails.
+upstream scalar, the wrapper unsets any inherited value, injects the facing
+HCA expression separately for each rank, and static validation checks both
+rendered environments. Before launch, preflight uses readiness `--scope tp2`
+on C1 and C2 to require carrier, MTU 9000, exact `192.168.0/1` addresses,
+active RDMA, and peer reachability on both logical links. It deliberately does
+not depend on C3.
+
+Do not change this service to TP3. The model has 64 attention heads and 256
+routed experts; neither is divisible by three. Target-only PP3 reached weight
+load but failed the DeepSeek V4 compressed state-cache stride requirement
+during engine initialization. Native DSpark/DFlash separately lacks the
+pipeline-parallel protocol. Three-node ring experiments therefore belong in a
+separate launcher/profile and are not a working serving topology.
 
 ## Validation
 
@@ -148,14 +162,14 @@ Generated local profiles are the fresh-clone path. The tracked `mia.env`,
 deployment and contain its original absolute paths.
 
 The timeout test uses fixture helpers and fake `ssh`/`curl`; it never contacts
-Docker or Spark 2. It proves that a failed API wait tears down both isolated
+Docker or C2. It proves that a failed API wait tears down both isolated
 ranks rather than leaving the headless worker behind.
 
 An explicitly selected profile must be a regular `.env` file directly inside
 this integration root. `common.sh` canonicalizes and exports the choice. The
 worker receives the exact matching basename for remote validation, compose,
 status, and rollback; it never silently falls back to `mia.env`. Sync also
-compares the selected profile's SHA-256 on Spark 1 and Spark 2.
+compares the selected profile's SHA-256 on C1 and C2.
 
 All Docker and Compose operations run as `sudo -n docker`. Rank, headless, and
 fabric-IP values are supplied through an explicit root-side `env` invocation;
@@ -163,8 +177,8 @@ the wrappers do not depend on sudo preserving the caller's ambient variables.
 If passwordless Docker authority is unavailable, validation/preflight fails
 instead of falling back to a user socket.
 
-The full readiness check is also non-mutating. It additionally checks both
-hosts' four rails, free ports, absence of an active vLLM workload, exact local
+The full preflight is also non-mutating. It additionally checks the direct TP2
+edge, free ports, absence of an active vLLM workload, exact local
 image availability, and complete pinned model trees:
 
 ```bash
@@ -200,13 +214,13 @@ MIA_ENV_FILE=mia-throughput.env ./bin/start.sh
 MIA_ENV_FILE=mia-throughput.env ./bin/status.sh
 ```
 
-The launcher syncs this pinned tree to the same path on Spark 2, revalidates
+The launcher syncs this pinned tree to the same path on C2, revalidates
 both copies, and starts rank 1 headless before rank 0. The legacy `mia.env`
 profile waits on `http://127.0.0.1:8888/v1/models`; the C8 agent and C32
 throughput profiles both wait on port 8889. Compose has `pull_policy: never`,
 `restart: "no"`, and a unique project name. The lack of per-container restart
 is intentional: one TP rank cannot safely restart and rejoin the other rank's
-existing NCCL collective. The optional Spark 1 supervisor below always
+existing NCCL collective. The optional C1 supervisor below always
 recycles the complete two-rank generation.
 
 The local overlay also requests a `500000/500000` soft/hard `nofile` limit.
@@ -217,7 +231,7 @@ limit, so recheck after every coordinated pair recreation.
 ## Optional boot persistence
 
 The Compose projects remain non-restarting and scoped. For either selected
-profile, Spark 1 can own boot orchestration through
+profile, C1 can own boot orchestration through
 `systemd/dgx-spark-dspark-mia.service`. The long-running supervisor adopts an
 already healthy generation without interrupting it, or launches rank 1 first
 and rank 0 second if recovery is needed.
@@ -235,8 +249,8 @@ SSH failures use consecutive-failure thresholds to tolerate short stalls; an
 SSH-only outage is given a longer grace period while the model API is still
 healthy. Probes, Docker cleanup, and cold starts all have hard wall-clock
 limits, so a wedged Docker daemon cannot wedge the supervisor indefinitely.
-Failed cold starts retry forever with bounded exponential backoff. Spark 2
-must not run an autonomous copy of this unit; Spark 1 is the sole orchestrator
+Failed cold starts retry forever with bounded exponential backoff. C2 must not
+run an autonomous copy of this unit; C1 is the sole orchestrator
 and Compose continues to use `restart: "no"`.
 
 Install and enable the unit only after disabling the retired rank-0 service;
@@ -331,6 +345,6 @@ modify the retired port-8000 units.
 - `mia-agent.env.example`: portable input for `--profile agent`
 - `mia-throughput.env`: isolated seq32 / conservative 8,192-token benchmark profile
 - `mia-throughput.env.example`: portable input to the profile renderer
-- `compose.mia.override.yml`: local four-rail/thinking/image/model override
+- `compose.mia.override.yml`: rank-specific direct-edge/thinking/image/model override
 - `bin/`: validation, readiness, lifecycle wrappers, health probe, and supervisor
 - `tests/`: profile/lock propagation, rollback, and deterministic supervisor tests

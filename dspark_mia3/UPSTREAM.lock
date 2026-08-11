@@ -1,0 +1,6 @@
+repository=https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark.git
+commit=0220360b752349c9b3129d64799246a4ec106640
+tree=3869c6a7720746199122f7530b4692f696619f82
+image=ghcr.io/anemll/dspark-vllm-gx10@sha256:a83948492cf13df455170fb42885f5ef4db54fefe0feff0f841ecbff464ac9d8
+model_repo=apetersson/DeepSeek-V4-Flash-0731-Abliterated-FP8
+model_revision=7d02640c72a2c8127f116d3d1933ddfec5e4c0fa

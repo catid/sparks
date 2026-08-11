@@ -35,9 +35,9 @@ failed=0
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf -- "${tmp_dir}"' EXIT
 
-high_confidence_secret_re='(sk-(proj|ant|or-v1)-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{24,}|xapp-[A-Za-z0-9-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|hf_[A-Za-z0-9]{20,}|csk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----)'
+high_confidence_secret_re='(sk-(proj|ant|or-v1)-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{24,}|xapp-[A-Za-z0-9-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|hf_[A-Za-z0-9]{20,}|csk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----|(^|[[:space:]])ssh-(ed25519|rsa)[[:space:]]+[A-Za-z0-9+/]{32,}={0,3}([[:space:]]|$))'
 provider_assignment_re='(OPENAI|ANTHROPIC|GOOGLE|GEMINI|SLACK|HF|HUGGING_FACE|OPENROUTER|EXA|KAGGLE|DROID|CEREBRAS|AWS)_[A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD)[[:space:]]*=[[:space:]]*["'\'']?[A-Za-z0-9/+_.:-]{16,}'
-management_ipv4_re='(^|[^0-9])10\.([0-9]{1,3}\.){2}[0-9]{1,3}([^0-9]|$)'
+management_ipv4_re='10\.([0-9]{1,3}\.){2}[0-9]{1,3}'
 
 for path in "${files[@]}"; do
   if [[ "${path}" == results/* ]]; then
@@ -45,6 +45,7 @@ for path in "${files[@]}"; do
       results/AGENT_EVAL.md|\
       results/BASELINE.md|\
       results/DEEPSEEK_V4_2SPARK_REPORT.md|\
+      results/DEEPSEEK_V4_3SPARK_REPORT.md|\
       results/DEEPSEEK_V4_C8_AGENT_PROFILE.md|\
       results/DEEPSEEK_V4_AGENT_EVAL_MAX.md|\
       results/DEEPSEEK_V4_DSPARK_AGENT_EVAL_MAX.md|\
@@ -80,15 +81,19 @@ for path in "${files[@]}"; do
       failed=1
       continue
       ;;
-    *.pem|*.p12|*.pfx|*.key|*/id_rsa*|*/id_ed25519*|*known_hosts*)
-      echo "public-safety: forbidden key/certificate path: ${path}" >&2
+    *.pem|*.p12|*.pfx|*.key|*.pub|*.wav|*.mp3|*.flac|*.ogg|\
+    */id_rsa*|*/id_ed25519*|\
+    *authorized_keys*|*known_hosts*)
+      echo "public-safety: forbidden private/key/media path: ${path}" >&2
       failed=1
       continue
       ;;
     *.env)
       if [[ "${path}" != "dspark_mia/mia.env" &&
             "${path}" != "dspark_mia/mia-agent.env" &&
-            "${path}" != "dspark_mia/mia-throughput.env" ]]; then
+            "${path}" != "dspark_mia/mia-throughput.env" &&
+            "${path}" != "dspark_mia3/mia3.env" &&
+            "${path}" != dspark_mia3/profiles/*.env ]]; then
         echo "public-safety: unapproved .env file: ${path}" >&2
         failed=1
         continue
@@ -122,10 +127,21 @@ for path in "${files[@]}"; do
     echo "public-safety: possible credential in ${path}" >&2
     failed=1
   fi
-  if LC_ALL=C grep -I -E -q "${management_ipv4_re}" "${materialized}"; then
-    echo "public-safety: literal 10/8 management address in ${path}" >&2
-    failed=1
-  fi
+  mapfile -t management_addresses < <(
+    LC_ALL=C grep -I -E -o "${management_ipv4_re}" "${materialized}" |
+      sort -u || true
+  )
+  for address in "${management_addresses[@]}"; do
+    case "${address}" in
+      10.10.84.12|10.10.84.28|10.10.84.121)
+        # Public, non-routable reference topology documented by this repo.
+        ;;
+      *)
+        echo "public-safety: unapproved literal 10/8 address ${address} in ${path}" >&2
+        failed=1
+        ;;
+    esac
+  done
 done
 
 if (( failed != 0 )); then
