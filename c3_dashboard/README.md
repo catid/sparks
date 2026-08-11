@@ -19,7 +19,9 @@ dgx-spark-c3-kiosk.service      -> rootless Xorg on VT 7
 There is no display manager, desktop session, or window manager in this path.
 The kiosk runs as the selected unprivileged account. `PAMName=login` lets
 systemd-logind grant that active VT session the DRM and input device handles
-needed by rootless Xorg.
+needed by rootless Xorg. A privileged `chvt 7` pre-start step makes that VT
+active before Xorg requests the DRM lease; without it, logind returns a paused
+DRM descriptor on a headless boot whose foreground console is still VT 1.
 
 ## Verified C3 runtime
 
@@ -126,7 +128,10 @@ The WebKit client is restricted to the configured loopback origin, denies web
 permissions, hides the pointer, disables screen blanking when supported, and
 retries initial page-load failures every five seconds. Its home, caches, and
 transient D-Bus session live under a systemd-owned runtime directory rather
-than the operator's home.
+than the operator's home. WebKit's nested bubblewrap/FUSE sandbox is disabled
+because it cannot mount inside the already hardened systemd namespace; the
+unit retains its systemd restrictions and the kiosk cannot navigate away from
+the exact loopback dashboard origin.
 
 ## Operations
 

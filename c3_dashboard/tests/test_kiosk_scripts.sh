@@ -144,4 +144,9 @@ preflight_line="$(
 [[ -n "${preserved_validation_line}" ]]
 [[ "${preflight_line}" -lt "${enable_line}" ]]
 
+kiosk_unit="${dashboard_dir}/systemd/dgx-spark-c3-kiosk.service.in"
+grep -Fq 'ExecStartPre=+/usr/bin/chvt 7' "${kiosk_unit}"
+grep -Fq 'Environment=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1' \
+  "${kiosk_unit}"
+
 echo "C3 kiosk launcher mock tests passed."

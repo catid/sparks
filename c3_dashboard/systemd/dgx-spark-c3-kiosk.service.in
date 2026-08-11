@@ -29,8 +29,13 @@ WorkingDirectory=@PROJECT_DIR@
 EnvironmentFile=/etc/default/dgx-spark-c3-dashboard
 Environment=PATH=/usr/bin:/bin
 Environment=RUNTIME_DIRECTORY=/run/dgx-spark-c3-kiosk
+# WebKit's bubblewrap/FUSE sandbox cannot nest inside this unit's mount
+# namespace. The unit already confines the process, and the kiosk permits only
+# its exact loopback dashboard origin.
+Environment=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 RuntimeDirectory=dgx-spark-c3-kiosk
 RuntimeDirectoryMode=0700
+ExecStartPre=+/usr/bin/chvt 7
 ExecStart=@PROJECT_DIR@/c3_dashboard/scripts/launch-kiosk.sh
 Restart=always
 RestartSec=15s
