@@ -40,5 +40,8 @@ grep -Fq "MIA_ENV_FILE=${test_profile_path}" "${test_log}"
 grep -Fq '\ 1\ up\ -d\ --no-build\ --pull\ never' "${test_log}"
 grep -Fq '\ 1\ down\ --timeout\ 30' "${test_log}"
 grep -Fqx 'ranks-running' "${test_log}"
+grep -Fqx 'resolve-runtime' "${test_log}"
+grep -Fq 'MASTER_ADDR=192.0.2.10' "${test_log}"
+grep -Fq 'VLLM_HOST_IP=192.0.2.11' "${test_log}"
 
 echo "Timeout rollback test passed: throughput profile reached and tore down both isolated ranks."

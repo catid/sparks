@@ -21,9 +21,9 @@ Environment overrides:
   MIA3_MODEL_HOST_PATH      default: active model under ~/models
   MIA3_HF_CACHE             default: ~/.cache/huggingface
   MIA3_TMP_HOST             default: ~/.cache/dspark-mia3-tmp
-  CEREBRUS1_MGMT_IP         default: 10.10.84.28
-  CEREBRUS2_MGMT_IP         default: 10.10.84.12
-  CEREBRUS3_MGMT_IP         default: 10.10.84.121
+
+Management addresses are not profile inputs. Runtime helpers resolve the
+canonical cerberus1-3 names and validate the selected IPv4 route on enP7s7.
 EOF
 }
 
@@ -51,22 +51,10 @@ cluster_key="${MIA3_CLUSTER_SSH_KEY:-${HOME}/.ssh/id_ed25519_dgx_cluster}"
 model_path="${MIA3_MODEL_HOST_PATH:-${HOME}/models/DeepSeek-V4-Flash-0731-Abliterated-FP8--7d02640c}"
 hf_cache="${MIA3_HF_CACHE:-${HOME}/.cache/huggingface}"
 tmp_host="${MIA3_TMP_HOST:-${HOME}/.cache/dspark-mia3-tmp}"
-c1_ip="${CEREBRUS1_MGMT_IP:-10.10.84.28}"
-c2_ip="${CEREBRUS2_MGMT_IP:-10.10.84.12}"
-c3_ip="${CEREBRUS3_MGMT_IP:-10.10.84.121}"
 output="${repo_root}/dspark_mia3/${output_basename}"
 
 safe_path() {
   [[ "$1" =~ ^/[A-Za-z0-9._/@+-]+$ ]]
-}
-valid_ipv4() {
-  local value="$1" octet
-  local -a octets=()
-  [[ "${value}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-  IFS=. read -r -a octets <<<"${value}"
-  for octet in "${octets[@]}"; do
-    ((10#${octet} <= 255)) || return 1
-  done
 }
 for path in \
   "${repo_root}" "${remote_repo_root}" "${cluster_key}" "${model_path}" \
@@ -76,17 +64,6 @@ for path in \
     exit 2
   }
 done
-for address in "${c1_ip}" "${c2_ip}" "${c3_ip}"; do
-  valid_ipv4 "${address}" || {
-    echo "Invalid management IPv4 address: ${address}" >&2
-    exit 2
-  }
-done
-[[ "${c1_ip}" != "${c2_ip}" && "${c1_ip}" != "${c3_ip}" &&
-   "${c2_ip}" != "${c3_ip}" ]] || {
-  echo "Management addresses must be distinct." >&2
-  exit 2
-}
 [[ ! -L "${output}" ]] || { echo "Refusing symlink output: ${output}" >&2; exit 2; }
 if [[ -e "${output}" && "${force}" != 1 ]]; then
   echo "Profile already exists: ${output} (use --force to replace it)" >&2
@@ -111,9 +88,6 @@ sed \
   -e "s|/home/catid/models/DeepSeek-V4-Flash-0731-Abliterated-FP8--7d02640c|${model_path_escaped}|g" \
   -e "s|/home/catid/.cache/huggingface|${hf_cache_escaped}|g" \
   -e "s|/home/catid/.cache/dspark-mia3-tmp|${tmp_host_escaped}|g" \
-  -e "s|10\.10\.84\.28|${c1_ip}|g" \
-  -e "s|10\.10\.84\.12|${c2_ip}|g" \
-  -e "s|10\.10\.84\.121|${c3_ip}|g" \
   "${template}" >"${temporary}"
 bash -n "${temporary}"
 chmod 0600 "${temporary}"

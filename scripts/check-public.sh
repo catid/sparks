@@ -132,15 +132,8 @@ for path in "${files[@]}"; do
       sort -u || true
   )
   for address in "${management_addresses[@]}"; do
-    case "${address}" in
-      10.10.84.12|10.10.84.28|10.10.84.121)
-        # Public, non-routable reference topology documented by this repo.
-        ;;
-      *)
-        echo "public-safety: unapproved literal 10/8 address ${address} in ${path}" >&2
-        failed=1
-        ;;
-    esac
+    echo "public-safety: unapproved literal 10/8 address ${address} in ${path}" >&2
+    failed=1
   done
 done
 

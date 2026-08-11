@@ -11,17 +11,17 @@ The authoritative upstream procedure is NVIDIA's
 [Connect Three Sparks playbook](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/connect-three-sparks).
 
 Production inference is deliberately different from a three-node NCCL ring
-test: Mia remains TP2/PP1 on `cerebrus1` and `cerebrus2`, using only their
-direct edge. `cerebrus3` is not a vLLM rank and an outage there must not block
+test: Mia remains TP2/PP1 on `cerberus1` and `cerberus2`, using only their
+direct edge. `cerberus3` is not a vLLM rank and an outage there must not block
 the model supervisor.
 
 ## Current canonical physical and IP topology
 
 | Physical edge | End A | End B | Logical subnets |
 | --- | --- | --- | --- |
-| C1-C2 | `cerebrus1` P1 | `cerebrus2` P0 | `192.168.0.0/24`, `192.168.1.0/24` |
-| C1-C3 | `cerebrus1` P0 | `cerebrus3` P0 | `192.168.2.0/24`, `192.168.3.0/24` |
-| C2-C3 | `cerebrus2` P1 | `cerebrus3` P1 | `192.168.4.0/24`, `192.168.5.0/24` |
+| C1-C2 | `cerberus1` P1 | `cerberus2` P0 | `192.168.0.0/24`, `192.168.1.0/24` |
+| C1-C3 | `cerberus1` P0 | `cerberus3` P0 | `192.168.2.0/24`, `192.168.3.0/24` |
+| C2-C3 | `cerberus2` P1 | `cerberus3` P1 | `192.168.4.0/24`, `192.168.5.0/24` |
 
 The exact local assignments are:
 
@@ -44,15 +44,15 @@ Do not infer 400 Gb/s of application bandwidth per cable by adding the two
 logical link rates. Effective bandwidth depends on the collective, message
 size, direction, and the hardware's shared physical path.
 
-## Cerberus node 3 (`cerebrus3`) port-map variants
+## Cerberus node 3 (`cerberus3`) port-map variants
 
 Only the two cable ends at C3 differ between these profiles. C1 and C2 keep
 their existing cables, ports, addresses, and Netplan files.
 
 | Explicit map | C3 P0 faces | C3 P1 faces | C3 Netplan source |
 | --- | --- | --- | --- |
-| `c3-p0-to-c1` | C1 P0 (`192.168.2/3`) | C2 P1 (`192.168.4/5`) | `cerebrus3-40-cx7.yaml` |
-| `c3-p0-to-c2` | C2 P1 (`192.168.4/5`) | C1 P0 (`192.168.2/3`) | `cerebrus3-40-cx7-p0-to-c2.yaml` |
+| `c3-p0-to-c1` | C1 P0 (`192.168.2/3`) | C2 P1 (`192.168.4/5`) | `cerberus3-40-cx7.yaml` |
+| `c3-p0-to-c2` | C2 P1 (`192.168.4/5`) | C1 P0 (`192.168.2/3`) | `cerberus3-40-cx7-p0-to-c2.yaml` |
 
 `c3-p0-to-c1` remains the canonical/default dry-run map; adding the crossed
 variant does not alter it. The installer refuses every C3 `--apply` unless one
@@ -71,14 +71,33 @@ collective verifier.
 ## Management plane
 
 `enP7s7` remains the management plane. It carries SSH, API traffic, vLLM
-rendezvous, Gloo, and NCCL socket bootstrap. The tracked deployment currently
-uses:
+rendezvous, Gloo, and NCCL socket bootstrap. Its addresses are DHCP-owned;
+repository configuration uses the canonical local-DNS names and never pins a
+management lease:
 
-| Node | Canonical management name | Management address |
+| Node | Canonical short name | Canonical management DNS name |
 | --- | --- | --- |
-| C1 | `cerebrus1` | `10.10.84.28` |
-| C2 | `cerebrus2` | `10.10.84.12` |
-| C3 | `cerebrus3` | `10.10.84.121` |
+| C1 | `cerberus1` | `cerberus1.lan` |
+| C2 | `cerberus2` | `cerberus2.lan` |
+| C3 | `cerberus3` | `cerberus3.lan` |
+
+Each node also publishes `cerberusN.local` through Avahi on `enP7s7` only.
+This canonical mDNS fallback follows DHCP and cannot accidentally select one
+of the fixed ConnectX ring addresses:
+
+```bash
+scripts/install-cerberus-mdns.sh verify
+scripts/install-cerberus-mdns.sh apply
+avahi-resolve-host-name -4 cerberus1.local
+```
+
+Firewalla can retain the pre-rename DHCP client/local-domain record until the
+lease re-registers. During that transition a legacy `cerebrusN.lan` or
+`sparkN.lan` record may resolve while `cerberusN.lan` does not. Renew the
+management DHCP lease or correct the Firewalla local-domain entry, then verify
+the canonical result with `getent ahostsv4 cerberusN.lan`. Do not work around
+this by committing the current DHCP address to `/etc/hosts`, SSH config, or an
+environment file.
 
 There is no CX-7 subnet shared by all three nodes. Do not use a ring address
 for three-node bootstrap or control. The Netplan files contain no management
@@ -88,30 +107,29 @@ address, gateway, DNS, static route, or forwarding rule.
 
 Netplan sources are:
 
-- `netplan/cerebrus1-40-cx7.yaml`
-- `netplan/cerebrus2-40-cx7.yaml`
-- `netplan/cerebrus3-40-cx7.yaml`
-- `netplan/cerebrus3-40-cx7-p0-to-c2.yaml` (opt-in crossed C3 map)
+- `netplan/cerberus1-40-cx7.yaml`
+- `netplan/cerberus2-40-cx7.yaml`
+- `netplan/cerberus3-40-cx7.yaml`
+- `netplan/cerberus3-40-cx7-p0-to-c2.yaml` (opt-in crossed C3 map)
 
-`netplan/spark1-40-cx7.yaml` and `netplan/spark2-40-cx7.yaml` contain the same
-assignments under transitional filenames. The installer also accepts the
-exact `spark1`, `spark2`, and `spark3` role aliases during migration; no other
-hostname is accepted.
+The installer accepts legacy `cerebrus1-3` and `spark1-3` role inputs during
+migration, but always selects a canonical `cerberus1-3` source and reports the
+canonical role. No duplicate legacy-named Netplan files are retained.
 
 Validate on each node before changing the host:
 
 ```bash
-scripts/install-cx7-netplan.sh cerebrus1
-ssh cerebrus2 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus2'
-ssh cerebrus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus3 --c3-port-map c3-p0-to-c1'
+scripts/install-cx7-netplan.sh cerberus1
+ssh cerberus2 'cd ~/sparks && scripts/install-cx7-netplan.sh cerberus2'
+ssh cerberus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerberus3 --c3-port-map c3-p0-to-c1'
 ```
 
 Apply over the management connection, retaining console access:
 
 ```bash
-scripts/install-cx7-netplan.sh cerebrus1 --apply
-ssh cerebrus2 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus2 --apply'
-ssh cerebrus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus3 --c3-port-map c3-p0-to-c1 --apply'
+scripts/install-cx7-netplan.sh cerberus1 --apply
+ssh cerberus2 'cd ~/sparks && scripts/install-cx7-netplan.sh cerberus2 --apply'
+ssh cerberus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerberus3 --c3-port-map c3-p0-to-c1 --apply'
 ```
 
 To move to NVIDIA's crossed orientation, stop ring workloads, swap only the
@@ -119,8 +137,8 @@ two QSFP cable ends at C3, then validate and apply over C3's independent
 management connection:
 
 ```bash
-ssh cerebrus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus3 --c3-port-map c3-p0-to-c2'
-ssh cerebrus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus3 --c3-port-map c3-p0-to-c2 --apply'
+ssh cerberus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerberus3 --c3-port-map c3-p0-to-c2'
+ssh cerberus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerberus3 --c3-port-map c3-p0-to-c2 --apply'
 ```
 
 The installer validates in an isolated Netplan root, verifies all four CX-7
@@ -147,17 +165,17 @@ replace management Netplan files during ring rollback.
 Inspect the expected matrix without touching the network:
 
 ```bash
-CX7_NODE_ROLE=cerebrus1 bin/wait-cx7-ready.sh --describe --scope ring
-CX7_NODE_ROLE=cerebrus1 bin/wait-cx7-ready.sh --describe --scope tp2
-CX7_NODE_ROLE=cerebrus3 bin/wait-cx7-ready.sh --describe --scope ring --c3-port-map c3-p0-to-c2
+CX7_NODE_ROLE=cerberus1 bin/wait-cx7-ready.sh --describe --scope ring
+CX7_NODE_ROLE=cerberus1 bin/wait-cx7-ready.sh --describe --scope tp2
+CX7_NODE_ROLE=cerberus3 bin/wait-cx7-ready.sh --describe --scope ring --c3-port-map c3-p0-to-c2
 ```
 
 Validate the complete ring from each node:
 
 ```bash
-CX7_NODE_ROLE=cerebrus1 bin/wait-cx7-ready.sh --check-once --scope ring
-ssh cerebrus2 'CX7_NODE_ROLE=cerebrus2 ~/sparks/bin/wait-cx7-ready.sh --check-once --scope ring'
-ssh cerebrus3 'CX7_NODE_ROLE=cerebrus3 ~/sparks/bin/wait-cx7-ready.sh --check-once --scope ring --c3-port-map c3-p0-to-c1'
+CX7_NODE_ROLE=cerberus1 bin/wait-cx7-ready.sh --check-once --scope ring
+ssh cerberus2 'CX7_NODE_ROLE=cerberus2 ~/sparks/bin/wait-cx7-ready.sh --check-once --scope ring'
+ssh cerberus3 'CX7_NODE_ROLE=cerberus3 ~/sparks/bin/wait-cx7-ready.sh --check-once --scope ring --c3-port-map c3-p0-to-c1'
 ```
 
 After selecting the crossed C3 map, replace the last argument with
@@ -178,10 +196,10 @@ making production depend on C3.
 The two ranks have different facing HCA names:
 
 ```bash
-# cerebrus1 / rank 0 / physical P1
+# cerberus1 / rank 0 / physical P1
 HEAD_NCCL_IB_HCA='=rocep1s0f1:1:0,roceP2p1s0f1:1:0'
 
-# cerebrus2 / rank 1 / physical P0
+# cerberus2 / rank 1 / physical P0
 WORKER_NCCL_IB_HCA='=rocep1s0f0:1:0,roceP2p1s0f0:1:0'
 
 NCCL_CROSS_NIC=0

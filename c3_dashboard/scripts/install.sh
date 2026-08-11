@@ -74,8 +74,8 @@ fail() {
 
 if [[ "${action}" != "verify" ]]; then
   case "$(hostname -s)" in
-    cerebrus3|spark3) ;;
-    *) fail "installation is allowed only on cerebrus3 (legacy spark3)" ;;
+    cerberus3|spark3) ;;
+    *) fail "installation is allowed only on cerberus3 (legacy spark3)" ;;
   esac
 fi
 

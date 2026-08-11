@@ -22,9 +22,20 @@ PATH="${fixture_path}:${PATH}" \
 TMPDIR="${test_root}/tmp" \
 CX7_SYS_CLASS_NET_ROOT="${test_root}/sys-class-net" \
 CX7_INSTALLER_TEST_LOG="${test_log}" \
-  "${repo_root}/scripts/install-cx7-netplan.sh" cerebrus1 >/dev/null
+  "${repo_root}/scripts/install-cx7-netplan.sh" cerberus1 >/dev/null
 
 current_c3_output="$(
+  PATH="${fixture_path}:${PATH}" \
+  TMPDIR="${test_root}/tmp" \
+  CX7_SYS_CLASS_NET_ROOT="${test_root}/sys-class-net" \
+  CX7_INSTALLER_TEST_LOG="${test_log}" \
+    "${repo_root}/scripts/install-cx7-netplan.sh" cerberus3 \
+      --c3-port-map c3-p0-to-c1
+)"
+/usr/bin/grep -Fq 'netplan/cerberus3-40-cx7.yaml' <<<"${current_c3_output}"
+/usr/bin/grep -Fq '(c3-p0-to-c1)' <<<"${current_c3_output}"
+
+legacy_c3_output="$(
   PATH="${fixture_path}:${PATH}" \
   TMPDIR="${test_root}/tmp" \
   CX7_SYS_CLASS_NET_ROOT="${test_root}/sys-class-net" \
@@ -32,27 +43,27 @@ current_c3_output="$(
     "${repo_root}/scripts/install-cx7-netplan.sh" cerebrus3 \
       --c3-port-map c3-p0-to-c1
 )"
-/usr/bin/grep -Fq 'netplan/cerebrus3-40-cx7.yaml' <<<"${current_c3_output}"
-/usr/bin/grep -Fq '(c3-p0-to-c1)' <<<"${current_c3_output}"
+/usr/bin/grep -Fq 'Validated ' <<<"${legacy_c3_output}"
+/usr/bin/grep -Fq ' for cerberus3 (c3-p0-to-c1).' <<<"${legacy_c3_output}"
 
 crossed_c3_output="$(
   PATH="${fixture_path}:${PATH}" \
   TMPDIR="${test_root}/tmp" \
   CX7_SYS_CLASS_NET_ROOT="${test_root}/sys-class-net" \
   CX7_INSTALLER_TEST_LOG="${test_log}" \
-    "${repo_root}/scripts/install-cx7-netplan.sh" cerebrus3 \
+    "${repo_root}/scripts/install-cx7-netplan.sh" cerberus3 \
       --c3-port-map=c3-p0-to-c2
 )"
-/usr/bin/grep -Fq 'netplan/cerebrus3-40-cx7-p0-to-c2.yaml' <<<"${crossed_c3_output}"
+/usr/bin/grep -Fq 'netplan/cerberus3-40-cx7-p0-to-c2.yaml' <<<"${crossed_c3_output}"
 /usr/bin/grep -Fq '(c3-p0-to-c2)' <<<"${crossed_c3_output}"
 
 set +e
 implicit_apply_output="$(
-  "${repo_root}/scripts/install-cx7-netplan.sh" cerebrus3 --apply 2>&1
+  "${repo_root}/scripts/install-cx7-netplan.sh" cerberus3 --apply 2>&1
 )"
 implicit_apply_status=$?
 wrong_role_output="$(
-  "${repo_root}/scripts/install-cx7-netplan.sh" cerebrus1 \
+  "${repo_root}/scripts/install-cx7-netplan.sh" cerberus1 \
     --c3-port-map c3-p0-to-c2 2>&1
 )"
 wrong_role_status=$?
@@ -60,7 +71,7 @@ set -e
 [[ "${implicit_apply_status}" == 2 ]]
 /usr/bin/grep -Fq 'without an explicit --c3-port-map' <<<"${implicit_apply_output}"
 [[ "${wrong_role_status}" == 2 ]]
-/usr/bin/grep -Fq 'valid only for cerebrus3' <<<"${wrong_role_output}"
+/usr/bin/grep -Fq 'valid only for cerberus3' <<<"${wrong_role_output}"
 
 validation_root="$(
   /usr/bin/awk '
@@ -84,7 +95,7 @@ apply_output="$(
   CX7_INSTALLER_TEST_LOG="${test_log}" \
   CX7_INSTALLER_TEST_TARGET="${apply_target}" \
   CX7_INSTALLER_FAIL_APPLY_ONCE=1 \
-    "${repo_root}/scripts/install-cx7-netplan.sh" cerebrus1 --apply 2>&1
+    "${repo_root}/scripts/install-cx7-netplan.sh" cerberus1 --apply 2>&1
 )"
 apply_status=$?
 set -e
@@ -102,7 +113,7 @@ new_target_output="$(
   CX7_INSTALLER_TEST_LOG="${test_log}" \
   CX7_INSTALLER_TEST_TARGET="${apply_target}" \
   CX7_INSTALLER_FAIL_APPLY_ONCE=1 \
-    "${repo_root}/scripts/install-cx7-netplan.sh" cerebrus1 --apply 2>&1
+    "${repo_root}/scripts/install-cx7-netplan.sh" cerberus1 --apply 2>&1
 )"
 new_target_status=$?
 set -e

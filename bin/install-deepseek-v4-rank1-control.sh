@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Prepare the dedicated, forced-command Spark 1 -> Spark 2 control key without
+# Prepare the dedicated, forced-command Cerberus 1 -> Cerberus 2 control key without
 # replacing any existing SSH key or sudoers rule. This script does not inspect
 # or change model-service state.
 
@@ -9,8 +9,8 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly root_dir
 readonly action="${1:-}"
 readonly control_user="catid"
-readonly rank0_hostname="spark1"
-readonly rank1_hostname="spark2"
+readonly rank0_hostname="cerberus1"
+readonly rank1_hostname="cerberus2"
 readonly rank0_source="192.168.100.10"
 readonly dedicated_key="/home/catid/.ssh/id_ed25519_deepseek_v4_rank1_control"
 readonly installed_wrapper="/usr/local/libexec/dgx-spark-deepseek-v4-rank1-control"
@@ -26,11 +26,11 @@ Usage:
   install-deepseek-v4-rank1-control.sh rank1-policy PUBLIC_KEY_FILE
 
 rank0-key:
-  Run locally as catid on Spark 1. Creates the dedicated Ed25519 key only when
+  Run locally as catid on cerberus1. Creates the dedicated Ed25519 key only when
   it is absent; never replaces an existing key.
 
 rank1-policy:
-  Run locally on Spark 2. Installs the root-owned forced-command wrapper and
+  Run locally on cerberus2. Installs the root-owned forced-command wrapper and
   exact sudoers policy, then appends a source-restricted authorized_keys entry.
   Existing authorized_keys and sudoers entries are preserved.
 
@@ -50,11 +50,19 @@ require_host() {
   local expected="$1"
   local actual
   actual="$(/usr/bin/hostname -s)"
-  if [[ "${actual}" != "${expected}" ]]; then
-    printf 'This action must run on %s (current host: %s).\n' \
-      "${expected}" "${actual}" >&2
-    exit 2
+
+  # The exact-match branch supports isolated transformed-copy tests. Live
+  # canonical roles also accept the two pre-migration hostname spellings.
+  if [[ "${actual}" == "${expected}" ]]; then
+    return
   fi
+  case "${expected}:${actual}" in
+    cerberus1:cerebrus1 | cerberus1:spark1 | \
+      cerberus2:cerebrus2 | cerberus2:spark2) return ;;
+  esac
+  printf 'This action must run on %s (current host: %s).\n' \
+    "${expected}" "${actual}" >&2
+  exit 2
 }
 
 validate_public_key() {
@@ -126,7 +134,7 @@ case "${action}" in
     else
       umask 077
       /usr/bin/ssh-keygen -q -t ed25519 -N '' \
-        -C "deepseek-v4-rank1-control@spark1" \
+        -C "deepseek-v4-rank1-control@cerberus1" \
         -f "${dedicated_key}"
       echo "Created the dedicated rank-1 control keypair."
     fi
@@ -151,7 +159,7 @@ case "${action}" in
     fi
 
     /usr/bin/ssh-keygen -lf "${dedicated_key}.pub"
-    printf 'Public key for Spark 2: %s.pub\n' "${dedicated_key}"
+    printf 'Public key for cerberus2: %s.pub\n' "${dedicated_key}"
     echo "No existing SSH key, authorized_keys entry, or service was changed."
     ;;
 
@@ -197,7 +205,7 @@ case "${action}" in
       printf 'from="%s",restrict,command="%s" %s %s %s' \
         "${rank0_source}" "${installed_wrapper}" \
         "${validated_key_type}" "${validated_key_blob}" \
-        "deepseek-v4-rank1-control@spark1"
+        "deepseek-v4-rank1-control@cerberus1"
     )"
 
     run_root /usr/bin/install -d -o root -g root -m 0755 \

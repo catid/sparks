@@ -12,7 +12,7 @@ Usage: install-dspark-supervisor.sh [verify|install|enable|start|restart]
 
 verify   Render and statically verify both units without changing the host.
 install  Render and install the CX-7 readiness and DSpark supervisor units.
-enable   Install and enable the cerebrus1 supervisor for future boots.
+enable   Install and enable the cerberus1 supervisor for future boots.
 start    Install/enable and start only if inactive. An active TP2 is adopted;
          a newly selected profile then applies at its next restart.
 restart  Install/enable and intentionally recycle both ranks. This causes a
@@ -22,7 +22,7 @@ Select a profile with MIA_ENV_FILE=<basename>. The file must be a regular,
 non-symlink *.env directly inside dspark_mia/. If unset, the installer prefers
 mia-throughput.local.env when it exists and otherwise uses mia-throughput.env.
 
-Run this only on host cerebrus1. Cerberus node 1 owns both ranks; cerebrus2
+Run this only on host cerberus1. Cerberus node 1 owns both ranks; cerberus2
 must not enable an independent model service. The exact spark1 hostname
 remains a transitional alias.
 EOF
@@ -42,9 +42,9 @@ esac
 
 if [[ "${action}" != "verify" ]]; then
   case "$(hostname -s)" in
-    cerebrus1|spark1) ;;
+    cerberus1|spark1) ;;
     *)
-      echo "The DSpark supervisor must be installed from cerebrus1 (spark1 is accepted during migration)." >&2
+      echo "The DSpark supervisor must be installed from cerberus1 (spark1 is accepted during migration)." >&2
       exit 2
       ;;
   esac
@@ -164,5 +164,5 @@ if [[ "${action}" == "restart" ]]; then
   sudo systemctl restart dgx-spark-dspark-mia.service
 fi
 
-echo "Installed the cerebrus1 TP2-edge readiness gate and DSpark supervisor."
+echo "Installed the cerberus1 TP2-edge readiness gate and DSpark supervisor."
 echo "Selected profile: ${profile_basename}"

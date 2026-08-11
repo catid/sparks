@@ -35,17 +35,17 @@ assert_nginx_package() {
   fi
 }
 
-run_host_package_install cerebrus1 "${test_root}/cerebrus1-packages.out"
+run_host_package_install cerberus1 "${test_root}/cerberus1-packages.out"
 assert_nginx_package yes
 grep -Fq 'Cerberus node 1 dashboard dependency installed: nginx' \
-  "${test_root}/cerebrus1-packages.out"
+  "${test_root}/cerberus1-packages.out"
 
 run_host_package_install spark1 "${test_root}/spark1-packages.out"
 assert_nginx_package yes
 
-run_host_package_install cerebrus2 "${test_root}/cerebrus2-packages.out"
+run_host_package_install cerberus2 "${test_root}/cerberus2-packages.out"
 assert_nginx_package no
-grep -Fq 'belongs on cerebrus1' "${test_root}/cerebrus2-packages.out"
+grep -Fq 'belongs on cerberus1' "${test_root}/cerberus2-packages.out"
 
 run_dashboard_install() {
   local hostname="$1"
@@ -58,20 +58,20 @@ run_dashboard_install() {
 }
 
 : >"${sudo_log}"
-cerebrus_output="$(
-  run_dashboard_install cerebrus1 --web --allow-unauthenticated-web
+cerberus_output="$(
+  run_dashboard_install cerberus1 --web --allow-unauthenticated-web
 )"
-grep -Fq 'Web endpoint: https://cerebrus1.lan' <<<"${cerebrus_output}"
-grep -Fq 'https://cerebrus1.lan' <<<"${cerebrus_output}"
+grep -Fq 'Web endpoint: https://cerberus1.lan' <<<"${cerberus_output}"
+grep -Fq 'https://cerberus1.lan' <<<"${cerberus_output}"
 
 run_dashboard_install spark1 >/dev/null
 
 set +e
-rejected_output="$(run_dashboard_install cerebrus2 2>&1)"
+rejected_output="$(run_dashboard_install cerberus2 2>&1)"
 rejected_status=$?
 set -e
 [[ "${rejected_status}" == "2" ]]
-grep -Fq 'Install the cluster dashboard on cerebrus1 (legacy spark1).' \
+grep -Fq 'Install the cluster dashboard on cerberus1 (legacy spark1).' \
   <<<"${rejected_output}"
 
 echo "Cerberus node 1 installer compatibility tests passed."

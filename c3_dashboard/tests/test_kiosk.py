@@ -26,7 +26,7 @@ class DashboardOriginTests(unittest.TestCase):
     def test_rejects_remote_tls_credentials_and_bad_ports(self) -> None:
         rejected = (
             "https://127.0.0.1:9763/",
-            "http://cerebrus1:9763/",
+            "http://cerberus1:9763/",
             "http://user:password@127.0.0.1:9763/",
             "http://127.0.0.1:0/",
             "http://127.0.0.1:99999/",

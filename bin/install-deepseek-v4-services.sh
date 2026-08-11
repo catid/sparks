@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Install one side of the persistent DeepSeek V4 TP2 service. This deliberately
-# performs only local administrative operations: run `rank1` on Spark 2 first,
-# then `rank0` on Spark 1. It never starts, stops, or restarts a service.
+# performs only local administrative operations: run `rank1` on cerberus2
+# first, then `rank0` on cerberus1. It never starts, stops, or restarts a
+# service.
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly root_dir
@@ -22,7 +23,7 @@ usage() {
   cat <<'EOF'
 Usage: install-deepseek-v4-services.sh {rank0|rank1}
 
-Run `rank1` locally on Spark 2 first, then run `rank0` locally on Spark 1.
+Run `rank1` locally on cerberus2 first, then run `rank0` locally on cerberus1.
 The installer copies the appropriate new unit, enables rank 0 for the next
 boot, disables conflicting legacy units for future boots, and leaves every
 currently running service untouched. Rank 1 is installed but not enabled.
@@ -35,7 +36,7 @@ EOF
 
 case "${role}" in
   rank0)
-    expected_hostname=spark1
+    expected_role=cerberus1
     rank_unit="${rank0_unit}"
     legacy_units=(
       dgx-spark-laguna-vllm-agent.service
@@ -44,7 +45,7 @@ case "${role}" in
     )
     ;;
   rank1)
-    expected_hostname=spark2
+    expected_role=cerberus2
     rank_unit="${rank1_unit}"
     legacy_units=(dgx-spark-laguna-vllm-agent.service)
     ;;
@@ -64,9 +65,14 @@ if (($# != 1)); then
 fi
 
 actual_hostname="$(/usr/bin/hostname -s)"
-if [[ "${actual_hostname}" != "${expected_hostname}" ]]; then
+case "${actual_hostname}" in
+  cerberus1 | cerebrus1 | spark1) actual_role=cerberus1 ;;
+  cerberus2 | cerebrus2 | spark2) actual_role=cerberus2 ;;
+  *) actual_role="" ;;
+esac
+if [[ "${actual_role}" != "${expected_role}" ]]; then
   printf 'Role %s must be installed on %s (current host: %s).\n' \
-    "${role}" "${expected_hostname}" "${actual_hostname}" >&2
+    "${role}" "${expected_role}" "${actual_hostname}" >&2
   exit 2
 fi
 
@@ -223,7 +229,7 @@ EOF
     exit 1
   fi
   if [[ "${rank1_status}" != *"load=loaded"* ]]; then
-    echo "Install the rank-1 unit on Spark 2 before installing rank 0." >&2
+    echo "Install the rank-1 unit on cerberus2 before installing rank 0." >&2
     printf '%s\n' "${rank1_status}" >&2
     exit 1
   fi
@@ -266,7 +272,7 @@ printf 'Installed %s on %s without changing live service state.\n' \
   "${rank_unit}" "${actual_hostname}"
 printf 'Environment SHA-256: %s\n' "${env_hash%% *}"
 if [[ "${role}" == "rank1" ]]; then
-  echo "Next: install rank0 on Spark 1, then compare the environment hashes."
+  echo "Next: install rank0 on cerberus1, then compare the environment hashes."
 else
-  echo "Compare this environment hash with Spark 2 before rebooting."
+  echo "Compare this environment hash with cerberus2 before rebooting."
 fi

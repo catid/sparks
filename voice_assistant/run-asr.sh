@@ -3,7 +3,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 lock="${root}/voice_assistant/MODEL.lock.json"
-image="${QWEN_ASR_IMAGE:-cerebrus/qwen3-asr:1.7b-bcd2b5b7}"
+image="${QWEN_ASR_IMAGE:-cerberus/qwen3-asr:1.7b-bcd2b5b7}"
 port="${QWEN_ASR_PORT:-8020}"
 runtime_uid="$(id -u)"
 runtime_gid="$(id -g)"
@@ -64,7 +64,7 @@ pin_file="${model_dir}/.pinned-revision"
 }
 
 exec docker run --rm \
-  --name cerebrus3-qwen-asr \
+  --name cerberus3-qwen-asr \
   --user "${runtime_uid}:${runtime_gid}" \
   --gpus all \
   --network host \
@@ -87,7 +87,7 @@ exec docker run --rm \
   --env QWEN_ASR_HOST=127.0.0.1 \
   --env "QWEN_ASR_PORT=${port}" \
   --env "QWEN_ASR_LANGUAGE=${QWEN_ASR_LANGUAGE:-en}" \
-  --env "QWEN_ASR_VOCABULARY_PROMPT=${QWEN_ASR_VOCABULARY_PROMPT:-Vocabulary: Cerberus, Cerberus One, Cerberus Two, Cerberus Three, cerebrus1, cerebrus2, cerebrus3.}" \
+  --env "QWEN_ASR_VOCABULARY_PROMPT=${QWEN_ASR_VOCABULARY_PROMPT:-Vocabulary: Cerberus, Cerberus One, Cerberus Two, Cerberus Three, cerberus1, cerberus2, cerberus3.}" \
   --env "QWEN_ASR_MAX_AUDIO_SECONDS=${QWEN_ASR_MAX_AUDIO_SECONDS:-35}" \
   --env "QWEN_ASR_MAX_NEW_TOKENS=${QWEN_ASR_MAX_NEW_TOKENS:-256}" \
   --volume "${model_dir}:/models/qwen-asr:ro" \

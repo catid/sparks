@@ -71,7 +71,8 @@ for ((attempt=1; attempt<=wait_attempts; attempt++)); do
     done < <(served_model_ids)
     if ((missing == 0)); then
       trap - ERR
-      echo "Three-node API ready: http://${HEAD_MGMT_IP}:${VLLM_PORT}/v1"
+      api_host="$(rank_runtime_management_name 0)"
+      echo "Three-node API ready: http://${api_host}:${VLLM_PORT}/v1"
       echo "partition=${MIA3_PARTITION_PROFILE} DFlash=${ENABLE_DSPARK}"
       exit 0
     fi

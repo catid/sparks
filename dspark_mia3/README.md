@@ -1,7 +1,7 @@
 # Three-Spark DS4F PP3 trial
 
 This directory is a self-contained, reversible experiment for one GB10 GPU on
-each of `cerebrus1`, `cerebrus2`, and `cerebrus3`. It does not modify the live
+each of `cerberus1`, `cerberus2`, and `cerberus3`. It does not modify the live
 two-node service, its Compose project, its ports, its temporary files, or its
 boot supervisor. The isolated identity is:
 
@@ -9,8 +9,8 @@ boot supervisor. The isolated identity is:
 | --- | --- |
 | Placement | TP1 / PP3 / native `mp`, ranks 0-2 on three hosts |
 | Project | `mia-dspark-pp3-trial` |
-| API | `http://10.10.84.28:8893/v1` |
-| Rendezvous | `10.10.84.28:29633` on the management LAN |
+| API | `http://cerberus1.local:8893/v1` |
+| Rendezvous | runtime-resolved `cerberus1` IPv4 on the management LAN, port `29633` |
 | Image | immutable Anemll DSpark image digest in `UPSTREAM.lock` |
 | Model | immutable abliterated FP8 checkpoint in `MODEL.lock.json` |
 | KV cache | `nvfp4_ds_mla` |
@@ -39,10 +39,10 @@ ring IP addresses; the cluster networking recipe owns that configuration.
 
 ## Render a portable local profile
 
-The tracked `mia3.env` preserves the audited account, checkout, model path,
-management addresses, and active abliterated-model revision. Do not edit it to
-adapt a fresh clone. From the repository root, render an ignored host-local
-profile instead:
+The tracked `mia3.env` preserves canonical `cerberus1-3` roles, the audited
+account, checkout, model path, and active abliterated-model revision. It never
+stores DHCP management addresses. Do not edit it to adapt a fresh clone. From
+the repository root, render an ignored host-local profile instead:
 
 ```bash
 cd "$HOME/sparks"
@@ -53,8 +53,8 @@ export MIA3_ENV_FILE=mia3.local.env
 The renderer defaults the remote checkout to the current checkout, the shared
 identity to `~/.ssh/id_ed25519_dgx_cluster`, and the model to the active pinned
 checkpoint under `~/models`. Override `MIA3_REMOTE_REPO_ROOT`,
-`MIA3_CLUSTER_SSH_KEY`, `MIA3_MODEL_HOST_PATH`, or the three documented
-management-IP variables before running it when the site differs. Use
+`MIA3_CLUSTER_SSH_KEY`, `MIA3_MODEL_HOST_PATH`, `MIA3_HF_CACHE`, or
+`MIA3_TMP_HOST` before running it when the site differs. Use
 `MIA3_PROFILE_NAME` for another safe `.env` basename and `--force` only when
 deliberately replacing that generated file.
 
@@ -70,30 +70,39 @@ as part of the trial identity.
 ## Required SSH aliases
 
 Every host should have the same mode-0600 private key and the same host aliases
-in `~/.ssh/config`. The lifecycle scripts address aliases, never mDNS:
+in `~/.ssh/config`. Canonical Avahi names are restricted to the management
+interface and avoid pinning a DHCP lease:
 
 ```sshconfig
-Host cerebrus1
-  HostName 10.10.84.28
+Host cerberus1
+  HostName cerberus1.local
   User catid
   IdentityFile ~/.ssh/id_ed25519_dgx_cluster
   IdentitiesOnly yes
   IdentityAgent none
 
-Host cerebrus2
-  HostName 10.10.84.12
+Host cerberus2
+  HostName cerberus2.local
   User catid
   IdentityFile ~/.ssh/id_ed25519_dgx_cluster
   IdentitiesOnly yes
   IdentityAgent none
 
-Host cerebrus3
-  HostName 10.10.84.121
+Host cerberus3
+  HostName cerberus3.local
   User catid
   IdentityFile ~/.ssh/id_ed25519_dgx_cluster
   IdentitiesOnly yes
   IdentityAgent none
 ```
+
+Runtime resolution tries canonical `cerberusN.local` first, then canonical
+`cerberusN.lan`. Only if both are absent does it try the explicit
+transitional `cerebrusN` and `sparkN` local-domain aliases. A result is accepted
+only when it is owned by local `enP7s7` for that rank or routes through
+`enP7s7` with a source address owned by that interface. Ambiguous DNS, stale
+local DNS, and routes through Wi-Fi or another interface fail closed. Numeric
+addresses are passed only into the Compose/vLLM process environment.
 
 Each public key must appear once in `authorized_keys` on all three hosts. Never
 commit the private key or credentials to this repository.
@@ -126,7 +135,7 @@ effect of its output norm and language-model head.
 
 ## Provisioning artifacts
 
-Run lifecycle commands from `cerebrus1`. Code sync is small and is performed
+Run lifecycle commands from `cerberus1`. Code sync is small and is performed
 automatically by `start.sh`; it replaces files only inside the dedicated
 remote `dspark_mia3` directories. Model sync is deliberately separate because
 it transfers roughly 166 GB and never deletes remote files:
@@ -134,13 +143,14 @@ it transfers roughly 166 GB and never deletes remote files:
 ```bash
 export MIA3_ENV_FILE=mia3.local.env
 ./bin/sync.sh
-./bin/sync-model.sh 2       # new cerebrus3 only
+./bin/sync-model.sh 2       # new cerberus3 only
 ./bin/preflight.sh          # read-only checks on all ranks
 ```
 
 Preflight requires, on every host: exact synchronized integration files, all
 four 200 Gb/s functions at MTU 9000 with IPv4 addresses, four active RoCE
-links, the management IP, the pinned local image, the complete exact model,
+links, authoritative management-name resolution on `enP7s7`, the pinned local
+image, the complete exact model,
 free trial ports, and no other active vLLM process. It never pulls an image,
 downloads a model, or stops production.
 
@@ -176,6 +186,12 @@ Use the same profile, partition, and DFlash selectors for every command in a
 generation. Compose uses
 `restart: "no"`; a rank cannot independently rejoin an existing collective.
 There is intentionally no systemd unit for this benchmark trial.
+
+`status.sh` always reports rank 0 locally before attempting either worker, and
+`stop.sh` starts rank-0 cleanup independently. Their `ps`/`down` Compose
+renders use documentation-only interpolation addresses, so broken peer DNS or
+SSH cannot hide or strand the local trial container. Every command that can
+launch a rank still requires the strict `enP7s7` hostname/address validation.
 
 ## Tests
 

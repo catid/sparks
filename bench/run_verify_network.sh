@@ -5,6 +5,11 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${root_dir}/bin/cluster-env.sh"
 
 rank="${DGX_NODE_RANK:-0}"
+cerberus2_host="${CERBERUS2_SSH_HOST:-${SPARK2_SSH_HOST:-cerberus2.local}}"
+[[ "${cerberus2_host}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+  echo "Unsafe Cerberus 2 SSH host: ${cerberus2_host}" >&2
+  exit 2
+}
 export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=INIT,NET
 
@@ -40,9 +45,9 @@ PY
 if [[ "${rank}" == "0" ]]; then
   ssh -i "${CLUSTER_SSH_KEY:-${HOME}/.ssh/id_ed25519_dgx_cluster}" \
     -o IdentityAgent=none \
-    -o IdentitiesOnly=yes spark2 \
+    -o IdentitiesOnly=yes "${cerberus2_host}" \
     "env DGX_NODE_RANK=1 USE_NCCL_230='${USE_NCCL_230:-0}' '${root_dir}/bench/run_verify_network.sh'" \
-    >"${root_dir}/logs/torch-nccl-spark2.log" 2>&1 &
+    >"${root_dir}/logs/torch-nccl-cerberus2.log" 2>&1 &
   remote_pid=$!
 fi
 
@@ -58,5 +63,5 @@ show_counters after
 
 if [[ "${rank}" == "0" ]]; then
   wait "${remote_pid}"
-  cat "${root_dir}/logs/torch-nccl-spark2.log"
+  cat "${root_dir}/logs/torch-nccl-cerberus2.log"
 fi

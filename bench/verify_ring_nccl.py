@@ -57,7 +57,7 @@ def main() -> None:
     warmups = required_int("RING_NCCL_WARMUPS", 1, 20)
     iterations = required_int("RING_NCCL_ITERATIONS", 1, 100)
     node = os.environ.get("RING_NCCL_NODE", "")
-    if node != f"cerebrus{rank + 1}":
+    if node != f"cerberus{rank + 1}":
         raise RuntimeError(f"rank {rank} has invalid node identity {node!r}")
 
     torch.cuda.set_device(0)

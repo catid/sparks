@@ -33,10 +33,16 @@ remote_path="$(
 )"
 [[ "${remote_path}" == "${root}/${test_profile_basename}" ]]
 
-for script in start.sh preflight.sh status.sh stop.sh; do
-  grep -Fq 'remote_profile_assignment' "${root}/bin/${script}"
+grep -Fq 'remote_profile_assignment' "${root}/bin/preflight.sh"
+for script in start.sh preflight.sh; do
+  grep -Fq 'remote_runtime_assignment' "${root}/bin/${script}"
 done
+for script in status.sh stop.sh; do
+  grep -Fq 'remote_nonlaunch_assignment' "${root}/bin/${script}"
+done
+grep -Fq 'load_tp2_runtime_addresses' "${root}/bin/start.sh"
+grep -Fq 'resolve_tp2_runtime_addresses' "${root}/bin/resolve-runtime.sh"
 grep -Fq 'remote_readiness_helper' "${root}/bin/sync-worker.sh"
 grep -Fq 'local_readiness_sha' "${root}/bin/sync-worker.sh"
 
-echo "Profile-selection test passed: seq32 values, containment, remote basename propagation, and rail-gate hashing are explicit."
+echo "Profile-selection test passed: seq32 values, containment, hostname runtime resolution, remote propagation, and rail-gate hashing are explicit."

@@ -168,7 +168,7 @@
     "mode": "merge",
     "providers": {
       "vllm": {
-        "baseUrl": "http://cerebrus1:8889/v1",
+        "baseUrl": "http://cerberus1.local:8889/v1",
         "apiKey": "vllm-local",
         "api": "openai-completions",
         "timeoutSeconds": 3600,

@@ -52,7 +52,7 @@ PATH="${fake_bin}:/usr/bin:/bin" \
 grep -Fxq 'QWEN_ASR_HOST=127.0.0.1' "${docker_log}"
 grep -Fxq 'QWEN_ASR_PORT=8020' "${docker_log}"
 grep -Fxq \
-  'QWEN_ASR_VOCABULARY_PROMPT=Vocabulary: Cerberus, Cerberus One, Cerberus Two, Cerberus Three, cerebrus1, cerebrus2, cerebrus3.' \
+  'QWEN_ASR_VOCABULARY_PROMPT=Vocabulary: Cerberus, Cerberus One, Cerberus Two, Cerberus Three, cerberus1, cerberus2, cerberus3.' \
   "${docker_log}"
 grep -Fxq 'TRANSFORMERS_OFFLINE=1' "${docker_log}"
 grep -Fxq 'HF_HUB_OFFLINE=1' "${docker_log}"

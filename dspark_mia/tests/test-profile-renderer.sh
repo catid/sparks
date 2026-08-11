@@ -7,14 +7,17 @@ agent_basename="mia-agent-render-test-${$}.env"
 throughput_basename="mia-throughput-render-test-${$}.env"
 invalid_basename="mia-invalid-render-test-${$}.env"
 official_basename="mia-official-render-test-${$}.env"
+deprecated_basename="mia-deprecated-render-test-${$}.env"
 agent_path="${integration_root}/${agent_basename}"
 throughput_path="${integration_root}/${throughput_basename}"
 invalid_path="${integration_root}/${invalid_basename}"
 official_path="${integration_root}/${official_basename}"
+deprecated_path="${integration_root}/${deprecated_basename}"
 
 cleanup() {
   rm -f -- \
-    "${agent_path}" "${throughput_path}" "${invalid_path}" "${official_path}"
+    "${agent_path}" "${throughput_path}" "${invalid_path}" \
+    "${official_path}" "${deprecated_path}"
 }
 trap cleanup EXIT
 
@@ -22,15 +25,17 @@ DSPARK_PROFILE_NAME="${agent_basename}" \
   "${repo_root}/scripts/configure-dspark-profile.sh" --profile agent >/dev/null
 
 (
+  unset MASTER_ADDR VLLM_HOST_IP WORKER_VLLM_HOST_IP
   set -a
   # shellcheck disable=SC1090
   source "${agent_path}"
   set +a
   [[ "${MIA_PROJECT_NAME}" == "mia-dspark-agent" ]]
-  [[ "${WORKER_HOST}" == "cerebrus2" ]]
-  [[ "${MASTER_ADDR}" == "10.10.84.28" ]]
-  [[ "${VLLM_HOST_IP}" == "10.10.84.28" ]]
-  [[ "${WORKER_VLLM_HOST_IP}" == "10.10.84.12" ]]
+  [[ "${HEAD_HOST}" == "cerberus1" ]]
+  [[ "${WORKER_HOST}" == "cerberus2" ]]
+  [[ -z "${MASTER_ADDR+x}" ]]
+  [[ -z "${VLLM_HOST_IP+x}" ]]
+  [[ -z "${WORKER_VLLM_HOST_IP+x}" ]]
   [[ "${HEAD_NCCL_IB_HCA}" == '=rocep1s0f1:1:0,roceP2p1s0f1:1:0' ]]
   [[ "${WORKER_NCCL_IB_HCA}" == '=rocep1s0f0:1:0,roceP2p1s0f0:1:0' ]]
   [[ "${NCCL_SOCKET_IFNAME}" == '=enP7s7' ]]
@@ -57,13 +62,17 @@ DSPARK_PROFILE_NAME="${throughput_basename}" \
     --profile=throughput >/dev/null
 
 (
+  unset MASTER_ADDR VLLM_HOST_IP WORKER_VLLM_HOST_IP
   set -a
   # shellcheck disable=SC1090
   source "${throughput_path}"
   set +a
   [[ "${MIA_PROJECT_NAME}" == "mia-dspark-throughput" ]]
-  [[ "${WORKER_HOST}" == "cerebrus2" ]]
-  [[ "${MASTER_ADDR}" == "10.10.84.28" ]]
+  [[ "${HEAD_HOST}" == "cerberus1" ]]
+  [[ "${WORKER_HOST}" == "cerberus2" ]]
+  [[ -z "${MASTER_ADDR+x}" ]]
+  [[ -z "${VLLM_HOST_IP+x}" ]]
+  [[ -z "${WORKER_VLLM_HOST_IP+x}" ]]
   [[ "${HEAD_NCCL_IB_HCA}" == '=rocep1s0f1:1:0,roceP2p1s0f1:1:0' ]]
   [[ "${WORKER_NCCL_IB_HCA}" == '=rocep1s0f0:1:0,roceP2p1s0f0:1:0' ]]
   [[ "${NCCL_SOCKET_IFNAME}" == '=enP7s7' ]]
@@ -89,6 +98,28 @@ DSPARK_PROFILE_NAME="${official_basename}" \
 )
 MIA_ENV_FILE="${official_basename}" \
   "${integration_root}/bin/validate-static.sh" >/dev/null
+
+for rendered in "${agent_path}" "${throughput_path}" "${official_path}"; do
+  grep -Fxq 'HEAD_HOST=cerberus1' "${rendered}"
+  grep -Fxq 'WORKER_HOST=cerberus2' "${rendered}"
+  if grep -Eq '^(MASTER_ADDR|VLLM_HOST_IP|WORKER_VLLM_HOST_IP)=' "${rendered}"; then
+    echo "Rendered profile persisted a runtime management address: ${rendered}" >&2
+    exit 1
+  fi
+done
+
+set +e
+deprecated_output="$(
+  CERBERUS1_MGMT_IP=192.0.2.99 \
+  DSPARK_PROFILE_NAME="${deprecated_basename}" \
+    "${repo_root}/scripts/configure-dspark-profile.sh" \
+      --profile agent 2>&1
+)"
+deprecated_status=$?
+set -e
+[[ "${deprecated_status}" == "2" ]]
+grep -Fq 'no longer accepted' <<<"${deprecated_output}"
+[[ ! -e "${deprecated_path}" ]]
 
 set +e
 invalid_output="$(

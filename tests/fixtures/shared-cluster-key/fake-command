@@ -4,20 +4,20 @@ set -euo pipefail
 case "$(basename -- "$0")" in
   hostname)
     [[ "${1:-}" == -s ]]
-    printf 'cerebrus1\n'
+    printf 'cerberus1\n'
     ;;
   ip)
     printf '1: lo    inet 127.0.0.1/8 scope host lo\n'
-    printf '2: enP7s7    inet 10.10.84.28/24 scope global enP7s7\n'
+  printf '2: enP7s7    inet 192.0.2.11/24 scope global enP7s7\n'
     ;;
   getent)
     [[ "${1:-}" == ahostsv4 ]]
     case "${2:-}" in
-      10.10.84.28|cerebrus1|cerebrus1.lan|spark1|spark1.lan)
-        printf '10.10.84.28 STREAM cerebrus1\n'
+      192.0.2.11|cerberus1|cerberus1.local|cerberus1.lan|cerebrus1|cerebrus1.lan|spark1|spark1.lan)
+        printf '192.0.2.11 STREAM cerberus1\n'
         ;;
-      10.10.84.12|cerebrus2|cerebrus2.lan|spark2|spark2.lan)
-        printf '10.10.84.12 STREAM cerebrus2\n'
+      192.0.2.12|cerberus2|cerberus2.local|cerberus2.lan|cerebrus2|cerebrus2.lan|spark2|spark2.lan)
+        printf '192.0.2.12 STREAM cerberus2\n'
         ;;
       *) exit 2 ;;
     esac
@@ -25,10 +25,10 @@ case "$(basename -- "$0")" in
   ssh)
     if [[ "${1:-}" == -G ]]; then
       case "${2:-}" in
-        cerebrus1|cerebrus1.lan|spark1|spark1.lan)
-          printf 'hostname 10.10.84.28\n'
+        cerberus1|cerberus1.local|cerberus1.lan|cerebrus1|cerebrus1.lan|spark1|spark1.lan)
+          printf 'hostname 192.0.2.11\n'
           ;;
-        *) printf 'hostname 10.10.84.12\n' ;;
+        *) printf 'hostname 192.0.2.12\n' ;;
       esac
       exit 0
     fi

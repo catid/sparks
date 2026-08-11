@@ -20,16 +20,19 @@ for relative in (
     ast.parse((root / relative).read_text(), filename=relative)
 PY
 
-# The verifier must honor the selected portable trial profile rather than
-# silently restoring the audited site's management address.
-grep -Fq 'readonly master_addr="${MASTER_ADDR}"' "${launcher}"
+# The verifier must resolve through the hostname-authoritative profile and
+# inject a numeric rendezvous value only at the container boundary.
+grep -Fq 'resolve_management_plane' "${launcher}"
+grep -Fq 'master_addr="$(rank_runtime_ipv4 0)"' "${launcher}"
+grep -Fxq 'readonly master_addr' "${launcher}"
+grep -Fq -- '--env "MASTER_ADDR=${master_addr}"' "${launcher}"
 grep -q 'readonly c3_port_map=c3-p0-to-c2' "${launcher}"
 grep -q 'expected_nccl_runtime=23007' "${launcher}"
 grep -q 'NCCL_IB_SUBNET_AWARE_ROUTING=1' "${launcher}"
 grep -q 'NCCL_NET_PLUGIN=none' "${launcher}"
 grep -q 'NCCL_IB_MERGE_NICS=0' "${launcher}"
 grep -q 'NCCL_SOCKET_IFNAME==enP7s7' "${launcher}"
-grep -q 'com.cerebrus.benchmark=ring-nccl-verify' "${launcher}"
+grep -q 'com.cerberus.benchmark=ring-nccl-verify' "${launcher}"
 grep -q 'snapshot --node' "${launcher}"
 grep -q -- '-before.json' "${launcher}"
 grep -q -- '-after.json' "${launcher}"
@@ -61,6 +64,11 @@ if grep -q -- '--env NCCL_CROSS_NIC' "${launcher}"; then
 fi
 if grep -q -- '--env NCCL_NETDEVS_POLICY' "${launcher}"; then
   echo "Ring verifier must leave NCCL_NETDEVS_POLICY at NCCL's AUTO default." >&2
+  exit 1
+fi
+if grep -Eq '10\.10\.84\.|HEAD_MGMT_IP|RANK[12]_MGMT_IP' \
+    "${launcher}" "${repo_root}/bench/README_RING_NCCL.md"; then
+  echo "Ring verifier must not store a DHCP management address." >&2
   exit 1
 fi
 if grep -Eq 'systemctl|docker compose|pkill|killall|dspark_mia/bin/(start|stop)' "${launcher}"; then

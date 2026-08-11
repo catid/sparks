@@ -4,8 +4,12 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 action="${1:-verify}"
 service_user="${SPARK_SERVICE_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
-image="${AUDIO8_IMAGE:-cerebrus/audio8-tts:0.6b-f9612f13}"
-unit_target="/etc/systemd/system/cerebrus3-audio8.service"
+image="${AUDIO8_IMAGE:-cerberus/audio8-tts:0.6b-f9612f13}"
+unit_target="/etc/systemd/system/cerberus3-audio8.service"
+legacy_unit="cerebrus3-audio8.service"
+legacy_unit_target="/etc/systemd/system/${legacy_unit}"
+private_config="/etc/default/cerberus3-audio8"
+legacy_private_config="/etc/default/cerebrus3-audio8"
 
 usage() {
   cat <<'EOF'
@@ -53,7 +57,7 @@ for input in \
   "${root}/audio8/Dockerfile" \
   "${root}/audio8/server.py" \
   "${root}/audio8/MODEL.lock.json" \
-  "${root}/systemd/cerebrus3-audio8.service.in"; do
+  "${root}/systemd/cerberus3-audio8.service.in"; do
   [[ -f "${input}" && ! -L "${input}" ]] || {
     echo "Missing regular Audio8 input: ${input}" >&2
     exit 2
@@ -80,8 +84,8 @@ if [[ "${action}" == verify ]]; then
   exit 0
 fi
 case "$(hostname -s)" in
-  cerebrus3|spark3) ;;
-  *) echo "Audio8 is assigned to cerebrus3; refusing this host." >&2; exit 2 ;;
+  cerberus3|spark3) ;;
+  *) echo "Audio8 is assigned to cerberus3; refusing this host." >&2; exit 2 ;;
 esac
 
 if [[ "${action}" == prepare ]]; then
@@ -144,7 +148,7 @@ docker image inspect "${image}" >/dev/null || {
 tmp_dir="$(mktemp -d)"
 cleanup() { rm -rf -- "${tmp_dir}"; }
 trap cleanup EXIT
-rendered="${tmp_dir}/cerebrus3-audio8.service"
+rendered="${tmp_dir}/cerberus3-audio8.service"
 sed_escape() { sed 's/[\&|]/\\&/g' <<<"$1"; }
 sed \
   -e "s|@PROJECT_DIR@|$(sed_escape "${root}")|g" \
@@ -152,14 +156,85 @@ sed \
   -e "s|@MODEL_DIR@|$(sed_escape "${model_dir}")|g" \
   -e "s|@USER@|$(sed_escape "${service_user}")|g" \
   -e "s|@GROUP@|$(sed_escape "${service_group}")|g" \
-  "${root}/systemd/cerebrus3-audio8.service.in" >"${rendered}"
+  "${root}/systemd/cerberus3-audio8.service.in" >"${rendered}"
 systemd-analyze verify "${rendered}" >/dev/null
+
+if systemctl cat "${legacy_unit}" >/dev/null 2>&1; then
+  sudo systemctl stop "${legacy_unit}"
+  sudo systemctl disable "${legacy_unit}"
+fi
+if systemctl is-active --quiet "${legacy_unit}"; then
+  echo "Legacy Audio8 unit remained active after stop." >&2
+  exit 1
+fi
+docker rm -f cerebrus3-audio8 >/dev/null 2>&1 || true
+if docker ps --format '{{.Names}}' | grep -Fxq cerebrus3-audio8; then
+  echo "Legacy Audio8 container remained active after stop." >&2
+  exit 1
+fi
+
+# Copy the private reference-voice override atomically without ever printing
+# or interpolating its contents. Existing canonical configuration always wins
+# on repeat runs.
+sudo python3 - "${legacy_private_config}" "${private_config}" <<'PY'
+import os
+import pathlib
+import shutil
+import stat
+import tempfile
+import sys
+
+source = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2])
+
+def checked(path):
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0 or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise SystemExit(f"unsafe private Audio8 configuration: {path}")
+    return info
+
+if destination.exists() or destination.is_symlink():
+    checked(destination)
+elif source.exists() or source.is_symlink():
+    checked(source)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.migration.", dir=destination.parent
+    )
+    temporary = pathlib.Path(temporary_name)
+    try:
+        source_descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            with os.fdopen(source_descriptor, "rb", closefd=False) as source_file:
+                with os.fdopen(descriptor, "wb", closefd=False) as destination_file:
+                    shutil.copyfileobj(source_file, destination_file, 1024 * 1024)
+                    destination_file.flush()
+                    os.fsync(descriptor)
+        finally:
+            os.close(source_descriptor)
+        os.fchmod(descriptor, 0o600)
+        os.fchown(descriptor, 0, 0)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, destination)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+PY
+
 sudo install -o root -g root -m 0644 "${rendered}" "${unit_target}"
+sudo rm -f -- "${legacy_unit_target}"
 sudo systemctl daemon-reload
+sudo systemctl reset-failed "${legacy_unit}" >/dev/null 2>&1 || true
 
 case "${action}" in
   install) ;;
-  enable) sudo systemctl enable cerebrus3-audio8.service ;;
-  start) sudo systemctl enable --now cerebrus3-audio8.service ;;
+  enable) sudo systemctl enable cerberus3-audio8.service ;;
+  start) sudo systemctl enable --now cerberus3-audio8.service ;;
 esac
 echo "Audio8 service ${action} completed."

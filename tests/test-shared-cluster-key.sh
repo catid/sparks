@@ -29,14 +29,14 @@ output="$(
   CLUSTER_SSH_KNOWN_HOSTS="${known_hosts}" \
   PATH="${fake_bin}:/usr/bin:/bin" \
     "${repo_root}/scripts/install-shared-cluster-key.sh" --install \
-      cerebrus1.lan cerebrus2
+      cerberus1.local cerberus2.local
 )"
 
-grep -Fq 'Retained existing cluster identity for local target cerebrus1.lan.' \
+grep -Fq 'Retained existing cluster identity for local target cerberus1.local.' \
   <<<"${output}"
 mapfile -t scp_calls < <(grep '^scp ' "${log}")
 [[ "${#scp_calls[@]}" == 1 ]]
-[[ "${scp_calls[0]}" == *'catid@cerebrus2:.ssh/'* ]]
+[[ "${scp_calls[0]}" == *'catid@cerberus2.local:.ssh/'* ]]
 [[ "${scp_calls[0]}" != *'cerebrus1'* ]]
 ssh-keygen -y -f "${key}" >/dev/null
 

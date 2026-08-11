@@ -7,6 +7,8 @@ format="${1:?usage: $0 <fp8|nvfp4> <baseline|dflash> [draft_tokens]}"
 mode="${2:?usage: $0 <fp8|nvfp4> <baseline|dflash> [draft_tokens]}"
 draft_tokens="${3:-15}"
 label="${format}-${mode}"
+cerberus2_host="${CERBERUS2_SSH_HOST:-${SPARK2_SSH_HOST:-cerberus2.local}}"
+ssh_key="${CLUSTER_SSH_KEY:-/home/catid/.ssh/id_ed25519_dgx_cluster}"
 if [[ "${mode}" == "dflash" ]]; then
   label="${label}-k${draft_tokens}"
 fi
@@ -36,9 +38,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 DFLASH_TOKENS="${draft_tokens}" "${launcher}" "${mode}" \
-  >"${root_dir}/logs/${label}-spark1.log" 2>&1 &
+  >"${root_dir}/logs/${label}-cerberus1.log" 2>&1 &
 server_pid=$!
-echo "launched ${label}, spark1 pid=${server_pid}"
+echo "launched ${label}, cerberus1 pid=${server_pid}"
 
 ready=0
 for _ in $(seq 1 720); do
@@ -51,7 +53,7 @@ for _ in $(seq 1 720); do
   fi
   if ! kill -0 "${server_pid}" 2>/dev/null; then
     echo "server exited before becoming ready" >&2
-    tail -200 "${root_dir}/logs/${label}-spark1.log" >&2
+    tail -200 "${root_dir}/logs/${label}-cerberus1.log" >&2
     exit 1
   fi
   sleep 5
@@ -62,11 +64,11 @@ if [[ "${ready}" != "1" ]]; then
 fi
 
 "${python_bin}" "${root_dir}/bench/rdma_counters.py" \
-  --save "${root_dir}/results/${label}-spark1-before.json" >/dev/null
-ssh -i /home/catid/.ssh/id_ed25519_dgx_cluster \
-  -o IdentitiesOnly=yes spark2 \
+  --save "${root_dir}/results/${label}-cerberus1-before.json" >/dev/null
+ssh -i "${ssh_key}" \
+  -o IdentitiesOnly=yes "${cerberus2_host}" \
   "'${python_bin}' '${root_dir}/bench/rdma_counters.py'" \
-  >"${root_dir}/results/${label}-spark2-before.json"
+  >"${root_dir}/results/${label}-cerberus2-before.json"
 
 "${python_bin}" "${root_dir}/bench/bench_serving.py" \
   --endpoints "${endpoints}" \
@@ -74,20 +76,20 @@ ssh -i /home/catid/.ssh/id_ed25519_dgx_cluster \
   --output "${root_dir}/results/${label}.json"
 
 "${python_bin}" "${root_dir}/bench/rdma_counters.py" \
-  --save "${root_dir}/results/${label}-spark1-after.json" >/dev/null
-ssh -i /home/catid/.ssh/id_ed25519_dgx_cluster \
-  -o IdentitiesOnly=yes spark2 \
+  --save "${root_dir}/results/${label}-cerberus1-after.json" >/dev/null
+ssh -i "${ssh_key}" \
+  -o IdentitiesOnly=yes "${cerberus2_host}" \
   "'${python_bin}' '${root_dir}/bench/rdma_counters.py'" \
-  >"${root_dir}/results/${label}-spark2-after.json"
+  >"${root_dir}/results/${label}-cerberus2-after.json"
 
 "${python_bin}" "${root_dir}/bench/rdma_counters.py" \
-  --before "${root_dir}/results/${label}-spark1-before.json" \
-  --after "${root_dir}/results/${label}-spark1-after.json" \
-  --save "${root_dir}/results/${label}-spark1-network-delta.json" >/dev/null
+  --before "${root_dir}/results/${label}-cerberus1-before.json" \
+  --after "${root_dir}/results/${label}-cerberus1-after.json" \
+  --save "${root_dir}/results/${label}-cerberus1-network-delta.json" >/dev/null
 "${python_bin}" "${root_dir}/bench/rdma_counters.py" \
-  --before "${root_dir}/results/${label}-spark2-before.json" \
-  --after "${root_dir}/results/${label}-spark2-after.json" \
-  --save "${root_dir}/results/${label}-spark2-network-delta.json" >/dev/null
+  --before "${root_dir}/results/${label}-cerberus2-before.json" \
+  --after "${root_dir}/results/${label}-cerberus2-after.json" \
+  --save "${root_dir}/results/${label}-cerberus2-network-delta.json" >/dev/null
 
 trap - EXIT INT TERM
 cleanup

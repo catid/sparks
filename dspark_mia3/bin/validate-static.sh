@@ -21,10 +21,9 @@ expected_revision="$(awk -F= '$1 == "model_revision" {sub(/^model_revision=/, ""
 [[ "${DSPARK_MODEL_REPO}" == "${expected_repo}" ]] || { echo "Model repo differs from UPSTREAM.lock." >&2; exit 1; }
 [[ "${DSPARK_MODEL_REVISION}" == "${expected_revision}" ]] || { echo "Model revision differs from UPSTREAM.lock." >&2; exit 1; }
 
-[[ "${HEAD_HOST}" == "cerebrus1" ]] || { echo "Rank 0 must be cerebrus1." >&2; exit 1; }
-[[ "${RANK1_HOST}" == "cerebrus2" ]] || { echo "Rank 1 must be cerebrus2." >&2; exit 1; }
-[[ "${RANK2_HOST}" == "cerebrus3" ]] || { echo "Rank 2 must be cerebrus3." >&2; exit 1; }
-[[ "${MASTER_ADDR}" == "${HEAD_MGMT_IP}" ]] || { echo "MASTER_ADDR must use rank 0 management IP." >&2; exit 1; }
+[[ "${HEAD_HOST}" == "cerberus1" ]] || { echo "Rank 0 must be cerberus1." >&2; exit 1; }
+[[ "${RANK1_HOST}" == "cerberus2" ]] || { echo "Rank 1 must be cerberus2." >&2; exit 1; }
+[[ "${RANK2_HOST}" == "cerberus3" ]] || { echo "Rank 2 must be cerberus3." >&2; exit 1; }
 [[ "${MIA_PROJECT_NAME}" == "mia-dspark-pp3-trial" ]] || { echo "Trial must keep its isolated Compose project." >&2; exit 1; }
 case "${VLLM_PORT}" in 8000|8888|8889) echo "Trial API port collides with an existing profile." >&2; exit 1;; esac
 case "${MASTER_PORT}" in 25000|29601|29630|29631|29632) echo "Trial rendezvous port collides with an existing profile." >&2; exit 1;; esac
@@ -39,6 +38,9 @@ case "${MASTER_PORT}" in 25000|29601|29630|29631|29632) echo "Trial rendezvous p
   exit 1
 }
 
+resolve_management_plane
+master_addr="$(rank_runtime_ipv4 0)"
+
 while IFS= read -r -d '' script; do
   bash -n "${script}"
 done < <(find "${MIA3_ROOT}/bin" "${MIA3_ROOT}/tests" -type f -name '*.sh' -print0 2>/dev/null)
@@ -48,19 +50,21 @@ cleanup() { rm -rf -- "${render_dir}"; }
 trap cleanup EXIT
 
 for rank in 0 1 2; do
-  "${MIA3_ROOT}/bin/node-compose.sh" "${rank}" config --format json >"${render_dir}/rank${rank}.json"
+  MIA3_RENDER_LAUNCH_CONFIG=1 \
+    "${MIA3_ROOT}/bin/node-compose.sh" "${rank}" config --format json \
+      >"${render_dir}/rank${rank}.json"
 done
 
 for rank in 0 1 2; do
   rendered="${render_dir}/rank${rank}.json"
-  expected_ip="$(rank_mgmt_ip "${rank}")"
+  expected_ip="$(rank_runtime_ipv4 "${rank}")"
   expected_headless="$(rank_headless "${rank}")"
   jq -e --arg project "${MIA_PROJECT_NAME}" --arg image "${DSPARK_VLLM_IMAGE}" \
     --arg model_source "${DSPARK_MODEL_HOST_PATH}" --arg model_target "${DSPARK_MODEL}" \
     --arg rank "${rank}" --arg ip "${expected_ip}" --arg headless "${expected_headless}" \
     --arg partition "${VLLM_PP_LAYER_PARTITION}" --arg dspark "${ENABLE_DSPARK}" \
     --arg tp "${TP_SIZE}" --arg pp "${PP_SIZE}" --arg nnodes "${NNODES}" \
-    --arg master_addr "${MASTER_ADDR}" --arg master_port "${MASTER_PORT}" \
+    --arg master_addr "${master_addr}" --arg master_port "${MASTER_PORT}" \
     --arg api_port "${VLLM_PORT}" '
       .name == $project and
       .services["vllm-dspark"].image == $image and
@@ -109,4 +113,4 @@ if command -v rg >/dev/null 2>&1 && rg -n \
 fi
 
 echo "Static validation passed: TP1/PP3, profile=${MIA3_PARTITION_PROFILE}, DFlash=${ENABLE_DSPARK}."
-echo "project=${MIA_PROJECT_NAME} API=${VLLM_PORT} master=${MASTER_ADDR}:${MASTER_PORT}"
+echo "project=${MIA_PROJECT_NAME} API=${VLLM_PORT} master=${MIA3_RUNTIME_MGMT_NAMES[0]}:${MASTER_PORT}"

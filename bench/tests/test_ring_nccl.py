@@ -73,27 +73,27 @@ TRANSPORT = "\n".join(
 
 class RingNcclArtifactTests(unittest.TestCase):
     def test_valid_three_node_proof(self) -> None:
-        for node in ("cerebrus1", "cerebrus2", "cerebrus3"):
+        for node in ("cerberus1", "cerberus2", "cerberus3"):
             validate_result(node, make_result(node), TRANSPORT, 23007)
             validate_diff(node, make_diff(node), 1024 * 1024)
 
     def test_wrong_runtime_fails(self) -> None:
-        bad_runtime = make_result("cerebrus1")
+        bad_runtime = make_result("cerberus1")
         bad_runtime["nccl_runtime_version"] = 22809
         with self.assertRaisesRegex(RuntimeError, "nccl_runtime_version"):
-            validate_result("cerebrus1", bad_runtime, TRANSPORT, 23007)
+            validate_result("cerberus1", bad_runtime, TRANSPORT, 23007)
 
     def test_idle_hca_fails(self) -> None:
-        bad_hca = make_diff("cerebrus2")
+        bad_hca = make_diff("cerberus2")
         bad_hca["rdma"][RDMAS[0]]["rx_bytes"] = 0
         with self.assertRaisesRegex(RuntimeError, "minimum"):
-            validate_diff("cerebrus2", bad_hca, 1024 * 1024)
+            validate_diff("cerberus2", bad_hca, 1024 * 1024)
 
     def test_transport_error_fails(self) -> None:
-        bad_error = make_diff("cerebrus3")
+        bad_error = make_diff("cerberus3")
         bad_error["rdma"][RDMAS[1]]["packet_seq_err"] = 1
         with self.assertRaisesRegex(RuntimeError, "packet_seq_err"):
-            validate_diff("cerebrus3", bad_error, 1024 * 1024)
+            validate_diff("cerberus3", bad_error, 1024 * 1024)
 
 
 if __name__ == "__main__":

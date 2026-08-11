@@ -30,7 +30,7 @@ printf '11111111111111111111111111111111\n' >"${test_root}/machine-id"
 
 cat > "${fixture_root}/dspark_mia/bin/common.sh" <<EOF
 #!/usr/bin/env bash
-WORKER_HOST=\${TEST_WORKER_HOST:-cerebrus2}
+WORKER_HOST=\${TEST_WORKER_HOST:-cerberus2}
 CLUSTER_SSH_KEY=${test_root}/cluster-key
 MIA_SSH_OPTIONS=(-i "\${CLUSTER_SSH_KEY}" -o BatchMode=yes)
 require_ssh_identity() {
@@ -44,7 +44,7 @@ EOF
 cat > "${fake_bin}/hostname" <<'EOF'
 #!/usr/bin/env bash
 [[ "${1:-}" == "-s" ]]
-printf '%s\n' "${MOCK_HOSTNAME:-cerebrus1}"
+printf '%s\n' "${MOCK_HOSTNAME:-cerberus1}"
 EOF
 
 cat > "${fake_bin}/sudo" <<'EOF'
@@ -68,10 +68,10 @@ remote_command="${args[${#args[@]} - 1]}"
 if [[ "${remote_command}" == *machine-id* ]]; then
   printf 'identity %s\n' "${host}" >> "${MOCK_SSH_LOG}"
   case "${host}" in
-    cerebrus1|cerebrus1.lan|10.10.84.28)
+    cerberus1|cerberus1.lan)
       printf '11111111111111111111111111111111\n'
       ;;
-    cerebrus2|cerebrus2.lan|10.10.84.12)
+    cerberus2|cerberus2.lan)
       printf '22222222222222222222222222222222\n'
       ;;
     *) printf '33333333333333333333333333333333\n' ;;
@@ -118,42 +118,42 @@ grep -Fq "image_id=${expected_id}" <<<"${pull_output}"
 : > "${MOCK_SUDO_LOG}"
 : > "${MOCK_SSH_LOG}"
 both_output="$("${script}" --pull-both)"
-grep -Fq "cerebrus1 and cerebrus2: ${expected_id}" <<<"${both_output}"
+grep -Fq "cerberus1 and cerberus2: ${expected_id}" <<<"${both_output}"
 mapfile -t both_calls <"${MOCK_SSH_LOG}"
-[[ "${both_calls[*]}" == "identity cerebrus2 pull cerebrus2" ]]
+[[ "${both_calls[*]}" == "identity cerberus2 pull cerberus2" ]]
 
 : > "${MOCK_SUDO_LOG}"
 : > "${MOCK_SSH_LOG}"
 all_output="$("${script}" --pull-all)"
-grep -Fq "cerebrus1, cerebrus2, and cerebrus3: ${expected_id}" <<<"${all_output}"
+grep -Fq "cerberus1, cerberus2, and cerberus3: ${expected_id}" <<<"${all_output}"
 mapfile -t pulled_hosts < "${MOCK_SSH_LOG}"
 [[ "${pulled_hosts[*]}" == \
-  "identity cerebrus2 identity cerebrus3 pull cerebrus2 pull cerebrus3" ]]
+  "identity cerberus2 identity cerberus3 pull cerberus2 pull cerberus3" ]]
 [[ "$(wc -l < "${MOCK_SUDO_LOG}")" == 2 ]]
 
 : > "${MOCK_SSH_LOG}"
 set +e
-mismatch_output="$(MOCK_MISMATCH_HOST=cerebrus3 "${script}" --pull-all 2>&1)"
+mismatch_output="$(MOCK_MISMATCH_HOST=cerberus3 "${script}" --pull-all 2>&1)"
 mismatch_status=$?
-bad_digest_output="$(MOCK_BAD_DIGEST_HOST=cerebrus3 "${script}" --pull-all 2>&1)"
+bad_digest_output="$(MOCK_BAD_DIGEST_HOST=cerberus3 "${script}" --pull-all 2>&1)"
 bad_digest_status=$?
 unsafe_host_output="$(DSPARK_PULL_THIRD_HOST='-oProxyCommand=bad' "${script}" --pull-all 2>&1)"
 unsafe_host_status=$?
-duplicate_alias_output="$(DSPARK_PULL_THIRD_HOST=cerebrus2.lan "${script}" --pull-all 2>&1)"
+duplicate_alias_output="$(DSPARK_PULL_THIRD_HOST=cerberus2.lan "${script}" --pull-all 2>&1)"
 duplicate_alias_status=$?
-wrong_head_output="$(MOCK_HOSTNAME=cerebrus2 "${script}" --pull-all 2>&1)"
+wrong_head_output="$(MOCK_HOSTNAME=cerberus2 "${script}" --pull-all 2>&1)"
 wrong_head_status=$?
 set -e
 [[ "${mismatch_status}" == 1 ]]
 grep -Fq 'Image IDs differ:' <<<"${mismatch_output}"
 [[ "${bad_digest_status}" == 1 ]]
-grep -Fq 'Pinned repo digest is absent on cerebrus3' <<<"${bad_digest_output}"
+grep -Fq 'Pinned repo digest is absent on cerberus3' <<<"${bad_digest_output}"
 [[ "${unsafe_host_status}" == 2 ]]
 grep -Fq 'Unsafe DSPARK_PULL_THIRD_HOST' <<<"${unsafe_host_output}"
 [[ "${duplicate_alias_status}" == 2 ]]
 grep -Fq 'fewer than three distinct machines' <<<"${duplicate_alias_output}"
 [[ "${wrong_head_status}" == 2 ]]
-grep -Fq 'Coordinate the cluster image pull from cerebrus1' <<<"${wrong_head_output}"
+grep -Fq 'Coordinate the cluster image pull from cerberus1' <<<"${wrong_head_output}"
 
 printf 'image=not-a-digest\n' > "${fixture_root}/dspark_mia/UPSTREAM.lock"
 set +e

@@ -18,6 +18,11 @@ if [[ ! -x "$(command -v torchrun || true)" ||
 fi
 
 rank="${DGX_NODE_RANK:-0}"
+cerberus2_host="${CERBERUS2_SSH_HOST:-${SPARK2_SSH_HOST:-cerberus2.local}}"
+[[ "${cerberus2_host}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+  echo "Unsafe Cerberus 2 SSH host: ${cerberus2_host}" >&2
+  exit 2
+}
 if [[ "${rank}" != "0" && "${rank}" != "1" ]]; then
   echo "DGX_NODE_RANK must be 0 or 1." >&2
   exit 2
@@ -77,9 +82,9 @@ if [[ "${rank}" == "0" ]]; then
     -o IdentityAgent=none \
     -o IdentitiesOnly=yes \
     -o BatchMode=yes \
-    spark2 \
+    "${cerberus2_host}" \
     "env DGX_NODE_RANK=1 VLLM_VENV_BIN='${VLLM_VENV_BIN:-${HOME}/venvs/vllm025/bin}' NCCL_230_PYTHON_OVERLAY='${NCCL_230_PYTHON_OVERLAY:-${HOME}/nccl-230-overlay}' NCCL_230_LIBRARY_DIR='${nccl_library_dir}' NCCL_IB_QPS_PER_CONNECTION='${NCCL_IB_QPS_PER_CONNECTION}' NCCL_IB_SPLIT_DATA_ON_QPS='${NCCL_IB_SPLIT_DATA_ON_QPS}' '${root_dir}/bench/run_verify_multirail_nccl230.sh'" \
-    >"${root_dir}/logs/nccl230-multirail-spark2.stdout.log" 2>&1 &
+    >"${root_dir}/logs/nccl230-multirail-cerberus2.stdout.log" 2>&1 &
   remote_pid=$!
 fi
 
@@ -95,5 +100,5 @@ show_counters after
 
 if [[ "${rank}" == "0" ]]; then
   wait "${remote_pid}"
-  cat "${root_dir}/logs/nccl230-multirail-spark2.stdout.log"
+  cat "${root_dir}/logs/nccl230-multirail-cerberus2.stdout.log"
 fi

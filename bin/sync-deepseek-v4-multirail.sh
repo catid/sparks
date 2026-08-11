@@ -2,7 +2,7 @@
 # shellcheck disable=SC2029  # Remote commands intentionally use local paths.
 set -euo pipefail
 
-# Copy the DeepSeek V4 target and DFlash draft from Spark 1 to Spark 2 while
+# Copy the DeepSeek V4 target and DFlash draft from Cerberus 1 to Cerberus 2 while
 # striping the large target shards over all four directly connected CX-7
 # logical links. The four logical links map to two physical cables.
 
@@ -14,17 +14,21 @@ draft_destination="${DRAFT_DESTINATION:-${HOME}/models/DeepSeek-V4-Flash-specula
 ssh_key="${CLUSTER_SSH_KEY:-${HOME}/.ssh/id_ed25519_dgx_cluster}"
 log_dir="${SYNC_LOG_DIR:-${root_dir}/logs/deepseek-v4-sync}"
 
-spark2_rails=(
+cerberus2_rails=(
   192.168.100.11
   192.168.101.11
   192.168.102.11
   192.168.103.11
 )
 
-if [[ "$(hostname -s)" != "spark1" ]]; then
-  echo "This copy coordinator must run on spark1." >&2
-  exit 2
-fi
+coordinator_hostname="$(hostname -s)"
+case "${coordinator_hostname}" in
+  cerberus1 | cerebrus1 | spark1) ;;
+  *)
+    echo "This copy coordinator must run on cerberus1." >&2
+    exit 2
+    ;;
+esac
 for source_dir in "${target_source}" "${draft_source}"; do
   if [[ ! -d "${source_dir}" ]]; then
     echo "Missing source directory: ${source_dir}" >&2
@@ -57,7 +61,7 @@ for option in "${ssh_options[@]}"; do
   printf -v rsync_ssh '%s %q' "${rsync_ssh}" "${option}"
 done
 
-ssh "${ssh_options[@]}" "${spark2_rails[0]}" \
+ssh "${ssh_options[@]}" "${cerberus2_rails[0]}" \
   "mkdir -p '${target_destination}' '${draft_destination}'"
 
 # Copy the small repository metadata once. Weight shards are assigned
@@ -67,7 +71,7 @@ rsync -a --whole-file --partial \
   --exclude='.cache/' \
   -e "${rsync_ssh}" \
   "${target_source}/" \
-  "${spark2_rails[0]}:${target_destination}/"
+  "${cerberus2_rails[0]}:${target_destination}/"
 
 mapfile -t target_shards < <(
   find "${target_source}" -maxdepth 1 -type f -name '*.safetensors' \
@@ -79,18 +83,18 @@ if (( ${#target_shards[@]} == 0 )); then
 fi
 
 for index in "${!target_shards[@]}"; do
-  rail=$((index % ${#spark2_rails[@]}))
+  rail=$((index % ${#cerberus2_rails[@]}))
   printf '%s\n' "${target_shards[index]}" >>"${manifest_dir}/rail-${rail}.txt"
 done
 
 pids=()
-for rail in "${!spark2_rails[@]}"; do
+for rail in "${!cerberus2_rails[@]}"; do
   log_file="${log_dir}/rail-${rail}.log"
   rsync -a --whole-file --partial --info=progress2 \
     --files-from="${manifest_dir}/rail-${rail}.txt" \
     -e "${rsync_ssh}" \
     "${target_source}/" \
-    "${spark2_rails[rail]}:${target_destination}/" \
+    "${cerberus2_rails[rail]}:${target_destination}/" \
     >"${log_file}" 2>&1 &
   pids+=("$!")
 done
@@ -111,7 +115,7 @@ rsync -a --whole-file --partial --info=progress2 \
   --exclude='.cache/' \
   -e "${rsync_ssh}" \
   "${draft_source}/" \
-  "${spark2_rails[1]}:${draft_destination}/" \
+  "${cerberus2_rails[1]}:${draft_destination}/" \
   >"${log_dir}/draft.log" 2>&1
 
 local_target_bytes="$(
@@ -119,7 +123,7 @@ local_target_bytes="$(
     -printf '%s\n' | awk '{total += $1} END {printf "%.0f", total}'
 )"
 remote_target_bytes="$(
-  ssh "${ssh_options[@]}" "${spark2_rails[0]}" \
+  ssh "${ssh_options[@]}" "${cerberus2_rails[0]}" \
     "find '${target_destination}' -maxdepth 1 -type f -name '*.safetensors' -printf '%s\\n' | awk '{total += \$1} END {printf \"%.0f\", total}'"
 )"
 local_draft_bytes="$(
@@ -127,7 +131,7 @@ local_draft_bytes="$(
     -printf '%s\n' | awk '{total += $1} END {printf "%.0f", total}'
 )"
 remote_draft_bytes="$(
-  ssh "${ssh_options[@]}" "${spark2_rails[0]}" \
+  ssh "${ssh_options[@]}" "${cerberus2_rails[0]}" \
     "find '${draft_destination}' -maxdepth 1 -type f -name '*.safetensors' -printf '%s\\n' | awk '{total += \$1} END {printf \"%.0f\", total}'"
 )"
 

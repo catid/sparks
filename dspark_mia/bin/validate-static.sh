@@ -12,15 +12,11 @@ need_command jq
 expected_head_hca='=rocep1s0f1:1:0,roceP2p1s0f1:1:0'
 expected_worker_hca='=rocep1s0f0:1:0,roceP2p1s0f0:1:0'
 [[ "${HEAD_NCCL_IB_HCA}" == "${expected_head_hca}" ]] || {
-  echo "HEAD_NCCL_IB_HCA must select only the cerebrus1 P1 pair." >&2
+  echo "HEAD_NCCL_IB_HCA must select only the cerberus1 P1 pair." >&2
   exit 1
 }
 [[ "${WORKER_NCCL_IB_HCA}" == "${expected_worker_hca}" ]] || {
-  echo "WORKER_NCCL_IB_HCA must select only the cerebrus2 P0 pair." >&2
-  exit 1
-}
-[[ "${MASTER_ADDR}" == "${VLLM_HOST_IP}" ]] || {
-  echo "MASTER_ADDR must equal the cerebrus1 management VLLM_HOST_IP." >&2
+  echo "WORKER_NCCL_IB_HCA must select only the cerberus2 P0 pair." >&2
   exit 1
 }
 [[ "${NCCL_SOCKET_IFNAME}" == "=enP7s7" &&
@@ -71,13 +67,17 @@ done
 
 rank0_json="$(mktemp)"
 rank1_json="$(mktemp)"
+static_head_ip="192.0.2.10"
+static_worker_ip="192.0.2.11"
 cleanup() {
   rm -f -- "${rank0_json}" "${rank1_json}"
 }
 trap cleanup EXIT
 
-"${MIA_ROOT}/bin/node-compose.sh" 0 config --format json >"${rank0_json}"
-"${MIA_ROOT}/bin/node-compose.sh" 1 config --format json >"${rank1_json}"
+MASTER_ADDR="${static_head_ip}" VLLM_HOST_IP="${static_head_ip}" \
+  "${MIA_ROOT}/bin/node-compose.sh" 0 config --format json >"${rank0_json}"
+MASTER_ADDR="${static_head_ip}" VLLM_HOST_IP="${static_worker_ip}" \
+  "${MIA_ROOT}/bin/node-compose.sh" 1 config --format json >"${rank1_json}"
 
 for rendered in "${rank0_json}" "${rank1_json}"; do
   jq -e --arg project "${MIA_PROJECT_NAME}" \
@@ -152,17 +152,21 @@ for rendered in "${rank0_json}" "${rank1_json}"; do
 done
 
 jq -e \
-  --arg host_ip "${VLLM_HOST_IP}" \
+  --arg master_ip "${static_head_ip}" \
+  --arg host_ip "${static_head_ip}" \
   --arg hca "${HEAD_NCCL_IB_HCA}" '
   .services["vllm-dspark"].environment.NODE_RANK == "0" and
+  .services["vllm-dspark"].environment.MASTER_ADDR == $master_ip and
   .services["vllm-dspark"].environment.VLLM_HOST_IP == $host_ip and
   .services["vllm-dspark"].environment.NCCL_IB_HCA == $hca and
   ((.services["vllm-dspark"].command | join(" ") | contains("--headless")) | not)
 ' "${rank0_json}" >/dev/null
 jq -e \
-  --arg host_ip "${WORKER_VLLM_HOST_IP}" \
+  --arg master_ip "${static_head_ip}" \
+  --arg host_ip "${static_worker_ip}" \
   --arg hca "${WORKER_NCCL_IB_HCA}" '
   .services["vllm-dspark"].environment.NODE_RANK == "1" and
+  .services["vllm-dspark"].environment.MASTER_ADDR == $master_ip and
   .services["vllm-dspark"].environment.VLLM_HOST_IP == $host_ip and
   .services["vllm-dspark"].environment.NCCL_IB_HCA == $hca and
   (.services["vllm-dspark"].command | join(" ") | contains("--headless"))

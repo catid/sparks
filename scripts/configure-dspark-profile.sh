@@ -19,9 +19,6 @@ the scheduler/graph set to C8 for OpenClaw-style traffic.
 Optional environment overrides:
   DSPARK_PROFILE_KIND          throughput (default) or agent
   DSPARK_MODEL_VARIANT         active (default) or official
-  CEREBRUS2_HOST               default: cerebrus2
-  CEREBRUS1_MGMT_IP            default: 10.10.84.28
-  CEREBRUS2_MGMT_IP            default: 10.10.84.12
   CLUSTER_SSH_KEY              default: ~/.ssh/id_ed25519_dgx_cluster
   DSPARK_MODEL_HOST_PATH       default follows the selected model variant
   MIA_PROJECT_NAME             throughput: mia-dspark-throughput
@@ -36,8 +33,13 @@ whitespace or shell metacharacters are rejected because the same file is used
 by Bash, Compose, SSH, and systemd. Existing profiles are never replaced
 unless --force is supplied.
 
-The management addresses carry SSH control, rendezvous, Gloo, and socket
-bootstrap. RoCE data stays on the fixed direct cerebrus1-cerebrus2 edge.
+Profiles always store HEAD_HOST=cerberus1 and WORKER_HOST=cerberus2. The
+current enP7s7 addresses are resolved and validated when a lifecycle command
+runs; DHCP addresses are never rendered into a profile. During DNS migration,
+canonical cerberusN.local mDNS is preferred and the canonical SSH aliases may
+point at a resolvable transitional DNS name such as spark1.lan or spark2.lan.
+RoCE data stays on the fixed direct
+cerberus1-cerberus2 edge.
 EOF
 }
 
@@ -127,14 +129,16 @@ if [[ ! "${output_basename}" =~ ^[A-Za-z0-9._-]+\.env$ ||
   exit 2
 fi
 
-if [[ -n "${CEREBRUS2_HOST:-}" && -n "${SPARK2_HOST:-}" &&
-      "${CEREBRUS2_HOST}" != "${SPARK2_HOST}" ]]; then
-  echo "CEREBRUS2_HOST and transitional SPARK2_HOST disagree." >&2
-  exit 2
-fi
-worker_host="${CEREBRUS2_HOST:-${SPARK2_HOST:-cerebrus2}}"
-cerebrus1_mgmt_ip="${CEREBRUS1_MGMT_IP:-10.10.84.28}"
-cerebrus2_mgmt_ip="${CEREBRUS2_MGMT_IP:-10.10.84.12}"
+for deprecated_name in CERBERUS1_MGMT_IP CERBERUS2_MGMT_IP \
+  CEREBRUS1_MGMT_IP CEREBRUS2_MGMT_IP CERBERUS2_HOST \
+  CEREBRUS2_HOST SPARK2_HOST; do
+  if [[ -n "${!deprecated_name:-}" ]]; then
+    echo "${deprecated_name} is no longer accepted; profiles keep canonical hostnames and resolve enP7s7 at runtime." >&2
+    exit 2
+  fi
+done
+head_host="cerberus1"
+worker_host="cerberus2"
 cluster_ssh_key="${CLUSTER_SSH_KEY:-${HOME}/.ssh/id_ed25519_dgx_cluster}"
 model_path="${DSPARK_MODEL_HOST_PATH:-${HOME}/models/${default_model_dir}}"
 project_name="${MIA_PROJECT_NAME:-${default_project_name}}"
@@ -146,38 +150,11 @@ valid_port() {
   [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535))
 }
 
-valid_ipv4() {
-  local address="$1"
-  local octet
-  local -a octets=()
-  [[ "${address}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
-  IFS=. read -r -a octets <<<"${address}"
-  for octet in "${octets[@]}"; do
-    ((10#${octet} <= 255)) || return 1
-  done
-}
-
 safe_path() {
   local LC_ALL=C
   [[ "$1" =~ ^/[A-Za-z0-9._/@+-]+$ ]]
 }
 
-[[ "${worker_host}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
-  echo "CEREBRUS2_HOST is not a safe hostname." >&2
-  exit 2
-}
-valid_ipv4 "${cerebrus1_mgmt_ip}" || {
-  echo "CEREBRUS1_MGMT_IP must be an IPv4 address." >&2
-  exit 2
-}
-valid_ipv4 "${cerebrus2_mgmt_ip}" || {
-  echo "CEREBRUS2_MGMT_IP must be an IPv4 address." >&2
-  exit 2
-}
-[[ "${cerebrus1_mgmt_ip}" != "${cerebrus2_mgmt_ip}" ]] || {
-  echo "The two management addresses must differ." >&2
-  exit 2
-}
 safe_path "${cluster_ssh_key}" || {
   echo "CLUSTER_SSH_KEY must be an absolute path without whitespace or metacharacters." >&2
   exit 2
@@ -225,9 +202,8 @@ sed_escape() {
 
 project_escaped="$(sed_escape "${root_dir}")"
 home_escaped="$(sed_escape "${HOME}")"
+head_escaped="$(sed_escape "${head_host}")"
 worker_escaped="$(sed_escape "${worker_host}")"
-cerebrus1_mgmt_escaped="$(sed_escape "${cerebrus1_mgmt_ip}")"
-cerebrus2_mgmt_escaped="$(sed_escape "${cerebrus2_mgmt_ip}")"
 key_escaped="$(sed_escape "${cluster_ssh_key}")"
 model_escaped="$(sed_escape "${model_path}")"
 model_container_escaped="$(sed_escape "${model_container_path}")"
@@ -247,9 +223,8 @@ trap cleanup EXIT
 sed \
   -e "s|@PROJECT_DIR@|${project_escaped}|g" \
   -e "s|@HOME@|${home_escaped}|g" \
+  -e "s|@HEAD_HOST@|${head_escaped}|g" \
   -e "s|@WORKER_HOST@|${worker_escaped}|g" \
-  -e "s|@CEREBRUS1_MGMT_IP@|${cerebrus1_mgmt_escaped}|g" \
-  -e "s|@CEREBRUS2_MGMT_IP@|${cerebrus2_mgmt_escaped}|g" \
   -e "s|@CLUSTER_SSH_KEY@|${key_escaped}|g" \
   -e "s|@DSPARK_MODEL_HOST_PATH@|${model_escaped}|g" \
   -e "s|@DSPARK_MODEL@|${model_container_escaped}|g" \

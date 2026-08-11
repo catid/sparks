@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for argument in "$@"; do
+  if [[ "${argument}" == "-G" ]]; then
+    host="${*: -1}"
+    case "${host}" in
+      cerberus1) printf '%s\n' 'hostname spark1.lan' ;;
+      cerberus2) printf '%s\n' 'hostname spark2.lan' ;;
+      *) printf 'hostname %s\n' "${host}" ;;
+    esac
+    exit 0
+  fi
+done
+
+scenario="${MIA_RUNTIME_FIXTURE_SCENARIO:-ok}"
+remote_host=cerberus2
+remote_ip=198.51.100.11
+remote_route=enP7s7
+[[ "${scenario}" == "remote_host_wrong" ]] && remote_host=cerberus3
+[[ "${scenario}" == "remote_route_wrong" ]] && remote_route=docker0
+printf '%s|%s|%s\n' "${remote_host}" "${remote_ip}" "${remote_route}"

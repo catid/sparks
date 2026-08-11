@@ -29,7 +29,7 @@ set +a
 source_dir="${MODEL_SOURCE:-${DSPARK_MODEL_HOST_PATH}}"
 destination="${MODEL_DESTINATION:-${DSPARK_MODEL_HOST_PATH}}"
 ssh_key="${CLUSTER_SSH_KEY}"
-remote_user="${CEREBRUS2_USER:-${SPARK2_USER:-${USER:-$(id -un)}}}"
+remote_user="${CERBERUS2_USER:-${SPARK2_USER:-${USER:-$(id -un)}}}"
 state_root="${XDG_STATE_HOME:-${HOME}/.local/state}"
 log_dir="${MODEL_SYNC_LOG_DIR:-${state_root}/sparks/model-sync}"
 read -r -a rails <<<"${MODEL_SYNC_RAILS:-192.168.0.2 192.168.1.2}"
@@ -59,12 +59,12 @@ if ! safe_path "${source_dir}" ||
 fi
 if [[ ! "${remote_user}" =~ ^[a-z_][a-z0-9_-]*[$]?$ ||
       ! "${WORKER_HOST}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-  echo "Unsafe cerebrus2 user or hostname." >&2
+  echo "Unsafe cerberus2 user or hostname." >&2
   exit 2
 fi
 
 if ((${#rails[@]} != 2)); then
-  echo "MODEL_SYNC_RAILS must contain exactly the two cerebrus2 P0 addresses." >&2
+  echo "MODEL_SYNC_RAILS must contain exactly the two cerberus2 P0 addresses." >&2
   exit 2
 fi
 for rail_address in "${rails[@]}"; do
@@ -82,7 +82,7 @@ destination=${remote_user}@${WORKER_HOST}:${destination}
 rails=${rails[*]}
 
 Run '$0 --sync' after verifying both direct-edge SSH host keys and completing
-the cerebrus1 model download.
+the cerberus1 model download.
 EOF
     exit 0
     ;;
@@ -91,9 +91,9 @@ EOF
     cat <<'EOF'
 Usage: sync-pinned-model-multirail.sh [describe|--sync]
 
-From cerebrus1, --sync validates the pinned local checkpoint, synchronizes the
-pinned integration/profile to cerebrus2, confirms both direct-edge addresses
-end on the same worker, copies 48 shards in parallel, and validates cerebrus2.
+From cerberus1, --sync validates the pinned local checkpoint, synchronizes the
+pinned integration/profile to cerberus2, confirms both direct-edge addresses
+end on the same worker, copies 48 shards in parallel, and validates cerberus2.
 
 MODEL_SYNC_RAILS may override the two space-separated worker edge addresses.
 EOF
@@ -106,9 +106,9 @@ EOF
 esac
 
 case "$(hostname -s)" in
-  cerebrus1|spark1) ;;
+  cerberus1|spark1) ;;
   *)
-    echo "Run the striped copy coordinator on cerebrus1 (spark1 is a transitional alias)." >&2
+    echo "Run the striped copy coordinator on cerberus1 (spark1 is a transitional alias)." >&2
     exit 2
     ;;
 esac

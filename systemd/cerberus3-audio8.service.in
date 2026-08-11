@@ -1,9 +1,9 @@
 [Unit]
-Description=Audio8 0.6B synthetic TTS service on Cerberus node 3 (cerebrus3)
+Description=Audio8 0.6B synthetic TTS service on Cerberus node 3 (cerberus3)
 Documentation=file:@PROJECT_DIR@/audio8/README.md
 Wants=network-online.target docker.service
 After=network-online.target docker.service
-Conflicts=dgx-spark-dspark-mia3.service
+Conflicts=dgx-spark-dspark-mia3.service cerebrus3-audio8.service
 
 [Service]
 Type=simple
@@ -12,10 +12,10 @@ Group=@GROUP@
 WorkingDirectory=@PROJECT_DIR@
 Environment=HOME=@HOME@
 Environment=AUDIO8_MODEL_DIR=@MODEL_DIR@
-EnvironmentFile=-/etc/default/cerebrus3-audio8
-ExecStartPre=-/usr/bin/docker rm -f cerebrus3-audio8
+EnvironmentFile=-/etc/default/cerberus3-audio8
+ExecStartPre=-/usr/bin/docker rm -f cerberus3-audio8
 ExecStart=@PROJECT_DIR@/audio8/run-server.sh
-ExecStop=-/usr/bin/docker stop --time 15 cerebrus3-audio8
+ExecStop=-/usr/bin/docker stop --time 15 cerberus3-audio8
 Restart=always
 RestartSec=5s
 TimeoutStartSec=0

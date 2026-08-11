@@ -215,7 +215,7 @@ class ServerTests(unittest.TestCase):
 
     def test_probe_parser_and_cpu_delta(self):
         parsed = dashboard.parse_probe(
-            """HOSTNAME=cerebrus3
+            """HOSTNAME=cerberus3
 CPU=1000,600
 MEMORY=1000,250
 GPU=25,46
@@ -229,7 +229,7 @@ THERMAL=\\_TZ_.TGPU,99000
 THERMAL=MEMORY,41850
 """
         )
-        self.assertEqual(parsed["reported_hostname"], "cerebrus3")
+        self.assertEqual(parsed["reported_hostname"], "cerberus3")
         self.assertEqual(parsed["gpu_percent"], 50)
         # nvidia-smi wins over the firmware TGPU fallback.
         self.assertEqual(parsed["gpu_temperature_c"], 48)
@@ -346,21 +346,21 @@ vllm:request_generation_tokens_sum 45
         self.assertEqual(snapshot["cluster"]["sampled_hosts"]["cpu_temperature"], 3)
         self.assertEqual(snapshot["cluster"]["sampled_hosts"]["gpu_temperature"], 3)
         self.assertEqual(snapshot["cluster"]["sampled_hosts"]["ram_temperature"], 0)
-        self.assertEqual(snapshot["hosts"]["cerebrus2"]["ram_percent"], 40)
-        self.assertEqual(snapshot["hosts"]["cerebrus2"]["cpu_temperature_c"], 42)
-        self.assertEqual(snapshot["hosts"]["cerebrus2"]["gpu_temperature_c"], 52)
+        self.assertEqual(snapshot["hosts"]["cerberus2"]["ram_percent"], 40)
+        self.assertEqual(snapshot["hosts"]["cerberus2"]["cpu_temperature_c"], 42)
+        self.assertEqual(snapshot["hosts"]["cerberus2"]["gpu_temperature_c"], 52)
         self.assertFalse(
-            snapshot["hosts"]["cerebrus2"]["memory_temperature_sensor_available"]
+            snapshot["hosts"]["cerberus2"]["memory_temperature_sensor_available"]
         )
         self.assertEqual(snapshot["throughput"]["tokens_per_second"], 5)
         self.assertEqual(snapshot["throughput"]["state"], "active")
         self.assertEqual(snapshot["throughput"]["source"], "vllm")
         self.assertEqual(snapshot["voice_agent"]["stage"], "openclaw")
-        self.assertNotIn("cerebrus1:8889", str(snapshot))
+        self.assertNotIn("cerberus1:8889", str(snapshot))
         self.assertEqual(len(snapshot["history"]), 2)
         self.assertIn("cluster", snapshot["history"][-1])
         self.assertIn("hosts", snapshot["history"][-1])
-        history_host = snapshot["history"][-1]["hosts"]["cerebrus2"]
+        history_host = snapshot["history"][-1]["hosts"]["cerberus2"]
         self.assertEqual(history_host["cpu_temperature_c"], 42)
         self.assertEqual(history_host["gpu_temperature_c"], 52)
         self.assertIsNone(history_host["ram_temperature_c"])
@@ -368,14 +368,14 @@ vllm:request_generation_tokens_sum 45
     def test_failed_host_is_down_and_cluster_is_degraded(self):
         collector = dashboard.Collector(
             interval=5,
-            host_prober=FakeProbe(down=("cerebrus2",)),
+            host_prober=FakeProbe(down=("cerberus2",)),
             metrics_fetcher=FakeMetrics([100]),
         )
         collector.collect(now=100)
         snapshot = collector.get_snapshot()
 
-        self.assertEqual(snapshot["hosts"]["cerebrus2"]["state"], "down")
-        self.assertEqual(snapshot["hosts"]["cerebrus2"]["error"], "ssh timeout")
+        self.assertEqual(snapshot["hosts"]["cerberus2"]["state"], "down")
+        self.assertEqual(snapshot["hosts"]["cerberus2"]["error"], "ssh timeout")
         self.assertEqual(snapshot["cluster"]["state"], "degraded")
         self.assertEqual(snapshot["cluster"]["available_hosts"], 2)
         self.assertEqual(snapshot["cluster"]["sampled_hosts"]["gpu"], 2)
@@ -426,14 +426,14 @@ vllm:request_generation_tokens_sum 45
         with self.assertRaises(ValueError):
             dashboard.validate_nodes(("-oProxyCommand=bad",))
         with self.assertRaises(ValueError):
-            dashboard.validate_nodes(("spark1", "cerebrus1"))
+            dashboard.validate_nodes(("spark1", "cerberus1"))
 
     def test_local_alias_uses_shell_while_remote_uses_strict_ssh(self):
         prober = dashboard.HostProber(
-            "/cluster-key", "/known-hosts", local_hostname="cerebrus3"
+            "/cluster-key", "/known-hosts", local_hostname="cerberus3"
         )
         self.assertEqual(prober.command("spark3"), ["sh", "-s"])
-        remote = prober.command("cerebrus1")
+        remote = prober.command("cerberus1")
         self.assertEqual(remote[0], "ssh")
         self.assertIn("StrictHostKeyChecking=yes", remote)
         self.assertIn("UserKnownHostsFile=/known-hosts", remote)

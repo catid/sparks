@@ -9,7 +9,7 @@ RUN /usr/bin/python3 -m pip install --no-cache-dir \
     && /usr/bin/python3 -c \
       'import soundfile, torch, transformers; assert transformers.__version__ == "4.57.1"; print(torch.__version__, transformers.__version__, soundfile.__version__)'
 
-WORKDIR /opt/cerebrus-audio8
+WORKDIR /opt/cerberus-audio8
 COPY server.py ./server.py
 EXPOSE 8010
-ENTRYPOINT ["/usr/bin/python3", "/opt/cerebrus-audio8/server.py"]
+ENTRYPOINT ["/usr/bin/python3", "/opt/cerberus-audio8/server.py"]

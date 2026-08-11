@@ -1,8 +1,9 @@
 [Unit]
-Description=Cerberus voice OpenClaw gateway on cerebrus3
+Description=Cerberus voice OpenClaw gateway on cerberus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
 Wants=network-online.target
 After=network-online.target
+Conflicts=cerebrus3-openclaw-voice.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -48,4 +49,4 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0077
 
 [Install]
-WantedBy=cerebrus3-voice-stack.target
+WantedBy=cerberus3-voice-stack.target

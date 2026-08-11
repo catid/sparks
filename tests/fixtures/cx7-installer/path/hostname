@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "${1:-}" == "-s" ]]; then
-  printf '%s\n' "${CX7_INSTALLER_TEST_HOSTNAME:-cerebrus1}"
+  printf '%s\n' "${CX7_INSTALLER_TEST_HOSTNAME:-cerberus1}"
 else
-  printf '%s\n' "${CX7_INSTALLER_TEST_HOSTNAME:-cerebrus1}"
+  printf '%s\n' "${CX7_INSTALLER_TEST_HOSTNAME:-cerberus1}"
 fi

@@ -107,16 +107,16 @@ to run it.
 The fabric readiness check can be run separately and safely:
 
 ```bash
-CX7_NODE_ROLE=cerebrus1 ./bin/wait-cx7-ready.sh --check-once --scope tp2
-ssh cerebrus2 \
-  'cd /path/to/sparks && CX7_NODE_ROLE=cerebrus2 ./bin/wait-cx7-ready.sh --check-once --scope tp2'
+CX7_NODE_ROLE=cerberus1 ./bin/wait-cx7-ready.sh --check-once --scope tp2
+ssh cerberus2 \
+  'cd /path/to/sparks && CX7_NODE_ROLE=cerberus2 ./bin/wait-cx7-ready.sh --check-once --scope tp2'
 
 # Independently validate both neighbor edges on every ring node:
-CX7_NODE_ROLE=cerebrus1 ./bin/wait-cx7-ready.sh --check-once --scope ring
-ssh cerebrus2 \
-  'cd /path/to/sparks && CX7_NODE_ROLE=cerebrus2 ./bin/wait-cx7-ready.sh --check-once --scope ring'
-ssh cerebrus3 \
-  'cd /path/to/sparks && CX7_NODE_ROLE=cerebrus3 ./bin/wait-cx7-ready.sh --check-once --scope ring --c3-port-map c3-p0-to-c1'
+CX7_NODE_ROLE=cerberus1 ./bin/wait-cx7-ready.sh --check-once --scope ring
+ssh cerberus2 \
+  'cd /path/to/sparks && CX7_NODE_ROLE=cerberus2 ./bin/wait-cx7-ready.sh --check-once --scope ring'
+ssh cerberus3 \
+  'cd /path/to/sparks && CX7_NODE_ROLE=cerberus3 ./bin/wait-cx7-ready.sh --check-once --scope ring --c3-port-map c3-p0-to-c1'
 ```
 
 Ring readiness proves the exact IP, carrier, speed, MTU, RDMA state, and peer
@@ -195,27 +195,27 @@ substantial serving workload:
 ```bash
 state_dir="${XDG_STATE_HOME:-${HOME}/.local/state}/sparks/rail-proof"
 mkdir -p "${state_dir}"
-python3 bench/rdma_counters.py --save "${state_dir}/cerebrus1-before.json"
-ssh cerebrus2 \
+python3 bench/rdma_counters.py --save "${state_dir}/cerberus1-before.json"
+ssh cerberus2 \
   'cd /path/to/sparks && python3 bench/rdma_counters.py' \
-  >"${state_dir}/cerebrus2-before.json"
+  >"${state_dir}/cerberus2-before.json"
 ```
 
 Run a fixed, repeatable inference wave, then take matching `after` snapshots.
 Capture and compare each host:
 
 ```bash
-python3 bench/rdma_counters.py --save "${state_dir}/cerebrus1-after.json"
-ssh cerebrus2 \
+python3 bench/rdma_counters.py --save "${state_dir}/cerberus1-after.json"
+ssh cerberus2 \
   'cd /path/to/sparks && python3 bench/rdma_counters.py' \
-  >"${state_dir}/cerebrus2-after.json"
+  >"${state_dir}/cerberus2-after.json"
 
 python3 bench/rdma_counters.py \
-  --before "${state_dir}/cerebrus1-before.json" \
-  --after "${state_dir}/cerebrus1-after.json"
+  --before "${state_dir}/cerberus1-before.json" \
+  --after "${state_dir}/cerberus1-after.json"
 python3 bench/rdma_counters.py \
-  --before "${state_dir}/cerebrus2-before.json" \
-  --after "${state_dir}/cerebrus2-after.json"
+  --before "${state_dir}/cerberus2-before.json" \
+  --after "${state_dir}/cerberus2-after.json"
 ```
 
 For production TP2, only C1 P1 (`*f1`) and C2 P0 (`*f0`) should have

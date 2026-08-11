@@ -9,7 +9,7 @@ uses BF16 on the GB10 GPU, and exposes an OpenAI-compatible
 The HTTP API deliberately rejects client-supplied references and filesystem
 paths. An operator can condition the service on one pre-approved voice by
 placing `reference.wav` and its exact `transcript.txt` in a private directory
-and setting `AUDIO8_REFERENCE_DIR` in `/etc/default/cerebrus3-audio8`. Obtain
+and setting `AUDIO8_REFERENCE_DIR` in `/etc/default/cerberus3-audio8`. Obtain
 the speaker's permission and disclose that outputs are synthetic. Neither the
 reference nor its transcript belongs in this public repository. Upstream also
 recommends keeping individual utterances under roughly 150 characters for best
@@ -35,6 +35,15 @@ Install and start it with `scripts/install-audio8.sh`; a non-default
 the same setting is supplied for `install`, `enable`, or `start`. The test loop
 is intentionally a transient manual operation and is never enabled at boot:
 
+`prepare` always builds the canonical `cerberus/audio8-tts` image tag; Docker
+may reuse the layers from the legacy tag, but the service never depends on that
+old identity. On a pre-rename installation, `install`, `enable`, and `start` first stop and
+disable the legacy unit and remove its exact old container. A private
+root-owned mode-`0600` Audio8 override is copied atomically to the canonical
+path when that path is absent; repeat runs preserve the canonical file. The
+new unit also conflicts with the legacy unit, so both identities cannot serve
+port 8010 simultaneously. No private override contents are logged.
+
 ```bash
 ./audio8/synthesize-test.sh
 systemd-run --user --unit=audio8-speaker-test-loop \
@@ -45,8 +54,8 @@ systemctl --user stop audio8-speaker-test-loop.service
 Health and synthesis examples:
 
 ```bash
-curl http://cerebrus3.lan:8010/health
+curl http://cerberus3.lan:8010/health
 curl --fail-with-body -H 'Content-Type: application/json' \
   -d '{"model":"audio8/tts-0.6b","input":"Hello from Cerberus Three."}' \
-  http://cerebrus3.lan:8010/v1/audio/speech -o speech.wav
+  http://cerberus3.lan:8010/v1/audio/speech -o speech.wav
 ```

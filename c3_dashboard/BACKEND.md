@@ -1,8 +1,8 @@
 # C3 dashboard backend
 
 `server.py` is a Python-standard-library metrics collector and static-file
-server for the Cerberus C3 kiosk. It polls `cerebrus1`, `cerebrus2`, and
-`cerebrus3` concurrently every five seconds. The local node is read directly;
+server for the Cerberus C3 kiosk. It polls `cerberus1`, `cerberus2`, and
+`cerberus3` concurrently every five seconds. The local node is read directly;
 peers use the existing non-interactive cluster SSH identity with strict host
 key checking.
 
@@ -29,7 +29,9 @@ Host and cluster history entries carry `cpu_temperature_c`,
 `ram_temperature_c`/`memory_temperature_c` fields alongside utilization.
 
 Production generation throughput comes from
-`http://cerebrus1:8889/metrics` by default. The backend differentiates the
+`http://cerberus1.local:8889/metrics` by default. The canonical mDNS name is
+published only on the management interface, so it follows DHCP without ever
+selecting a ConnectX ring address. The backend differentiates the
 cumulative `vllm:generation_tokens_total` counter across successful scrapes;
 it never exposes that lifetime total as the current rate. The API distinguishes
 `warming`, `active`, `idle` (an exact `0`), `stale`, and `down`. Failed scrapes
@@ -37,7 +39,7 @@ never retain the prior live rate. This counter describes the C1-served TP2 API
 as a whole; the backend does not claim per-rank or per-node token attribution.
 
 The local bridge writes an atomic, privacy-safe heartbeat to
-`/run/cerebrus3-voice-bridge/status.json`. The backend reads that regular file
+`/run/cerberus3-voice-bridge/status.json`. The backend reads that regular file
 with `O_NOFOLLOW`, rejects payloads over 32 KiB or with the wrong schema/service,
 and copies only operational fields into `voice_agent`; content-bearing and
 unknown fields are discarded. Missing, malformed, unreadable, schema-mismatched,

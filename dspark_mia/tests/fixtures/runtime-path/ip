@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$*" == "-4 -o address show dev enP7s7 scope global" ]]; then
+  printf '%s\n' '2: enP7s7    inet 198.51.100.10/24 brd 198.51.100.255 scope global enP7s7'
+  exit 0
+fi
+
+if [[ "${1:-}" == "-4" && "${2:-}" == "route" && "${3:-}" == "get" ]]; then
+  address="${4:-}"
+  device=enP7s7
+  if [[ "${MIA_RUNTIME_FIXTURE_SCENARIO:-ok}" == "worker_route_wrong" &&
+        "${address}" == "198.51.100.11" ]]; then
+    device=docker0
+  fi
+  case "${address}" in
+    127.0.1.1) printf 'local %s dev lo src 127.0.1.1\n' "${address}" ;;
+    198.51.100.*) printf '%s via 198.51.100.1 dev %s src 198.51.100.10\n' "${address}" "${device}" ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
+
+echo "Unexpected ip fixture arguments: $*" >&2
+exit 2

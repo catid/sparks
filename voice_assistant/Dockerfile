@@ -7,7 +7,7 @@ RUN /usr/bin/python3 -m pip install --no-cache-dir \
     && /usr/bin/python3 -c \
       'import torch, transformers; from transformers import AutoModelForMultimodalLM; assert transformers.__version__ == "5.13.0"; print(torch.__version__, transformers.__version__)'
 
-WORKDIR /opt/cerebrus-qwen-asr
+WORKDIR /opt/cerberus-qwen-asr
 COPY asr_server.py ./asr_server.py
 EXPOSE 8020
-ENTRYPOINT ["/usr/bin/python3", "/opt/cerebrus-qwen-asr/asr_server.py"]
+ENTRYPOINT ["/usr/bin/python3", "/opt/cerberus-qwen-asr/asr_server.py"]

@@ -65,7 +65,7 @@ output="$(
   KEYGEN_COMMENT_LOG="${keygen_log}" "${test_installer}" rank0-key
 )"
 /usr/bin/grep -Fq 'Preserving the existing dedicated keypair.' <<<"${output}"
-/usr/bin/grep -Fq "Public key for Spark 2: ${test_key}.pub" <<<"${output}"
+/usr/bin/grep -Fq "Public key for cerberus2: ${test_key}.pub" <<<"${output}"
 
 read -r derived_type derived_blob derived_comment <"${keygen_log}"
 [[ "${derived_type}" == "ssh-ed25519" ]]

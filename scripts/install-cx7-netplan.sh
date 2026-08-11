@@ -12,21 +12,22 @@ sys_class_net_root="${CX7_SYS_CLASS_NET_ROOT:-/sys/class/net}"
 
 usage() {
   cat <<'EOF'
-Usage: install-cx7-netplan.sh cerebrus1|cerebrus2|cerebrus3 \
+Usage: install-cx7-netplan.sh cerberus1|cerberus2|cerberus3 \
   [--c3-port-map c3-p0-to-c1|c3-p0-to-c2] [--apply]
 
-The exact transitional aliases spark1, spark2, and spark3 are also accepted
-during hostname migration. Without --apply, the selected canonical repository
-file or explicit C3 variant is validated in an isolated Netplan root. With
+The legacy cerebrus1-3 misspelling and transitional spark1-3 aliases are also
+accepted during hostname migration and normalize to cerberus1-3. Without
+--apply, the selected canonical repository file or explicit C3 variant is
+validated in an isolated Netplan root. With
 --apply, the exact target is backed up, installed, generated, applied, and
 checked against its reachable ring neighbor(s).
 
-The C3 port-map option is valid only for cerebrus3:
+The C3 port-map option is valid only for cerberus3:
   c3-p0-to-c1  C3 P0 faces C1 and C3 P1 faces C2 (current canonical file).
   c3-p0-to-c2  C3 P0 faces C2 and C3 P1 faces C1 (NVIDIA crossed layout).
 
-A cerebrus3 dry run without the option validates the unchanged canonical
-c3-p0-to-c1 file. A cerebrus3 apply requires an explicit port map so a cable
+A cerberus3 dry run without the option validates the unchanged canonical
+c3-p0-to-c1 file. A cerberus3 apply requires an explicit port map so a cable
 swap can never silently install the wrong address-to-port assignment.
 
 The management interface is never changed. Retain console access when applying
@@ -36,9 +37,9 @@ EOF
 
 canonical_role() {
   case "$1" in
-    cerebrus1|spark1) printf 'cerebrus1\n' ;;
-    cerebrus2|spark2) printf 'cerebrus2\n' ;;
-    cerebrus3|spark3) printf 'cerebrus3\n' ;;
+    cerberus1|cerebrus1|spark1) printf 'cerberus1\n' ;;
+    cerberus2|cerebrus2|spark2) printf 'cerberus2\n' ;;
+    cerberus3|cerebrus3|spark3) printf 'cerberus3\n' ;;
     *) return 1 ;;
   esac
 }
@@ -95,16 +96,16 @@ while (($#)); do
   shift
 done
 
-if [[ "${role}" == "cerebrus3" ]]; then
+if [[ "${role}" == "cerberus3" ]]; then
   if [[ -z "${c3_port_map}" ]]; then
     c3_port_map=c3-p0-to-c1
   fi
   case "${c3_port_map}" in
     c3-p0-to-c1)
-      source_file="${root_dir}/netplan/cerebrus3-40-cx7.yaml"
+      source_file="${root_dir}/netplan/cerberus3-40-cx7.yaml"
       ;;
     c3-p0-to-c2)
-      source_file="${root_dir}/netplan/cerebrus3-40-cx7-p0-to-c2.yaml"
+      source_file="${root_dir}/netplan/cerberus3-40-cx7-p0-to-c2.yaml"
       ;;
     *)
       echo "Invalid C3 port map: ${c3_port_map}." >&2
@@ -113,11 +114,11 @@ if [[ "${role}" == "cerebrus3" ]]; then
       ;;
   esac
   if ((apply && !c3_port_map_seen)); then
-    echo "Refusing to apply cerebrus3 networking without an explicit --c3-port-map." >&2
+    echo "Refusing to apply cerberus3 networking without an explicit --c3-port-map." >&2
     exit 2
   fi
 elif ((c3_port_map_seen)); then
-  echo "--c3-port-map is valid only for cerebrus3." >&2
+  echo "--c3-port-map is valid only for cerberus3." >&2
   exit 2
 else
   source_file="${root_dir}/netplan/${role}-40-cx7.yaml"
@@ -182,7 +183,7 @@ install -d -m 0755 "${validation_root}/etc/netplan"
 install -m 0600 "${source_file}" "${validation_root}/etc/netplan/40-cx7.yaml"
 sudo netplan generate --root-dir "${validation_root}"
 
-if [[ "${role}" == "cerebrus3" ]]; then
+if [[ "${role}" == "cerberus3" ]]; then
   echo "Validated ${source_file} for ${role} (${c3_port_map})."
 else
   echo "Validated ${source_file} for ${role}."
@@ -204,11 +205,11 @@ sudo netplan generate
 sudo netplan apply
 
 case "${role}" in
-  cerebrus1|cerebrus2)
+  cerberus1|cerberus2)
     CX7_NODE_ROLE="${role}" \
       "${root_dir}/bin/wait-cx7-ready.sh" --check-once --scope tp2
     ;;
-  cerebrus3)
+  cerberus3)
     CX7_NODE_ROLE="${role}" CX7_C3_PORT_MAP="${c3_port_map}" \
       "${root_dir}/bin/wait-cx7-ready.sh" --check-once --scope ring
     ;;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Coordinate Spark 2's headless vLLM rank from Spark 1. All remote command
+# Coordinate Cerberus 2's headless vLLM rank from Cerberus 1. All remote command
 # strings are constants; configurable values are passed only as local ssh
 # arguments, preventing environment values from becoming remote shell syntax.
 
@@ -214,7 +214,7 @@ if [[ "${action}" == "start-wait" ]]; then
         "${wait_timeout}" >&2
       exit 1
     fi
-    echo "Spark 2 SSH/systemd is not ready; retrying." >&2
+    echo "Cerberus 2 SSH/systemd is not ready; retrying." >&2
     /usr/bin/sleep "${poll_seconds}"
   done
 
@@ -268,7 +268,7 @@ while ! stop_remote_rank; do
       "${stop_timeout}" >&2
     exit 1
   fi
-  echo "Spark 2 SSH/systemd is not ready for stop; retrying." >&2
+  echo "Cerberus 2 SSH/systemd is not ready for stop; retrying." >&2
   /usr/bin/sleep "${poll_seconds}"
 done
 

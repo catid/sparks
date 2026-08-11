@@ -3,31 +3,31 @@
 The hardware is a three-node CX-7 ring, but the active DeepSeek V4 Flash
 service is a two-rank tensor-parallel deployment:
 
-- `cerebrus1` is rank 0, the API host, and the sole lifecycle orchestrator.
-- `cerebrus2` is headless rank 1 and has no model HTTP endpoint.
-- `cerebrus3` completes the physical ring but is not a rank in this service.
+- `cerberus1` is rank 0, the API host, and the sole lifecycle orchestrator.
+- `cerberus2` is headless rank 1 and has no model HTTP endpoint.
+- `cerberus3` completes the physical ring but is not a rank in this service.
 
 The exact `spark1`, `spark2`, and `spark3` names are transitional aliases. New
-configuration and operational commands use the canonical `cerebrus1` through
-`cerebrus3` names.
+configuration and operational commands use the canonical `cerberus1` through
+`cerberus3` names.
 
 ## Data and control paths
 
 ```text
                               management LAN / enP7s7
- client ───── HTTP ───────> cerebrus1:8889
+ client ───── HTTP ───────> cerberus1:8889
                                   │
-              SSH control ────────┼────────────> cerebrus2
+              SSH control ────────┼────────────> cerberus2
               rendezvous/Gloo ────┘
 
                          production TP2 data
-                  cerebrus1 P1 ═══════ cerebrus2 P0
+                  cerberus1 P1 ═══════ cerberus2 P0
                       │                         │
                       │ complete physical ring │
                       │                         │
-                  cerebrus1 P0             cerebrus2 P1
+                  cerberus1 P0             cerberus2 P1
                       ╲                         ╱
-                       ╲════ cerebrus3 ═══════╱
+                       ╲════ cerberus3 ═══════╱
 ```
 
 The management LAN carries API traffic, SSH, vLLM rendezvous, Gloo, package
@@ -36,7 +36,7 @@ have no default gateway. There is no CX-7 subnet shared by all three nodes.
 
 | Plane or edge | Endpoint A | Endpoint B | Purpose |
 | --- | --- | --- | --- |
-| Management | C1 `10.10.84.28` | C2 `10.10.84.12` | API, SSH, rendezvous, Gloo, socket bootstrap |
+| Management | C1 `cerberus1.lan` | C2 `cerberus2.lan` | API, SSH, rendezvous, Gloo, socket bootstrap |
 | C1-C2 | C1 P1 `.0.1/.1.1` | C2 P0 `.0.2/.1.2` | active TP2 RoCE data |
 | C1-C3 | C1 P0 `.2.1/.3.1` | C3 P1 `.2.2/.3.2` | ring-only transport |
 | C2-C3 | C2 P1 `.4.1/.5.1` | C3 P0 `.4.2/.5.2` | ring-only transport |
@@ -67,7 +67,7 @@ Compose project:
 | Scheduler | up to 8 sequences, 8,192 batched tokens |
 | Served IDs | historical ID plus canonical `deepseek-v4-flash` alias |
 | API | C1 only, port `8889` |
-| Rendezvous | C1 management address `10.10.84.28:29632` |
+| Rendezvous | C1 management DNS endpoint `cerberus1.lan:29632` |
 | RoCE HCAs | C1 P1 pair and C2 P0 pair only |
 | Container network | host network |
 | Container restart | deliberately `no` |

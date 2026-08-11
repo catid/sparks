@@ -8,9 +8,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${repo_root}/dspark_mia3/bin/common.sh"
 
 readonly expected_nccl_runtime=23007
-# MASTER_ADDR is loaded by the sourced trial profile.
-# shellcheck disable=SC2153
-readonly master_addr="${MASTER_ADDR}"
+# Resolve once on the coordinator; only the numeric container boundary receives
+# MASTER_ADDR. The tracked trial profile remains hostname-authoritative.
+resolve_management_plane
+master_addr="$(rank_runtime_ipv4 0)"
+readonly master_addr
 readonly c3_port_map=c3-p0-to-c2
 readonly nccl_ld_library_path="${NCCL_RUNTIME_PATH}:/usr/local/nvidia/lib64:/usr/local/cuda/lib64:/usr/local/nvidia/lib"
 master_port="${RING_NCCL_MASTER_PORT:-29533}"
@@ -91,7 +93,7 @@ rank_repo_file() {
 }
 
 container_name() {
-  printf 'cerebrus-ring-nccl-%s-r%s\n' "${run_id}" "$1"
+  printf 'cerberus-ring-nccl-%s-r%s\n' "${run_id}" "$1"
 }
 
 started_ranks=()
@@ -102,9 +104,9 @@ cleanup_containers() {
   for rank in "${started_ranks[@]}"; do
     name="$(container_name "${rank}")"
     benchmark_label="$(node_command "${rank}" sudo -n docker inspect \
-      --format '{{ index .Config.Labels "com.cerebrus.benchmark" }}' "${name}" 2>/dev/null)"
+      --format '{{ index .Config.Labels "com.cerberus.benchmark" }}' "${name}" 2>/dev/null)"
     run_label="$(node_command "${rank}" sudo -n docker inspect \
-      --format '{{ index .Config.Labels "com.cerebrus.run" }}' "${name}" 2>/dev/null)"
+      --format '{{ index .Config.Labels "com.cerberus.run" }}' "${name}" 2>/dev/null)"
     if [[ "${benchmark_label}" == ring-nccl-verify && "${run_label}" == "${run_id}" ]]; then
       if [[ -d "${artifact_dir}" && ! -f "${artifact_dir}/$(rank_host "${rank}").log" ]]; then
         node_command "${rank}" sudo -n docker logs --timestamps "${name}" \
@@ -208,8 +210,8 @@ launch_rank() {
   host_verify_script="$(rank_repo_file "${rank}" bench/verify_ring_nccl.py)"
   node_command "${rank}" sudo -n docker run -d \
     --name "${name}" \
-    --label com.cerebrus.benchmark=ring-nccl-verify \
-    --label "com.cerebrus.run=${run_id}" \
+    --label com.cerberus.benchmark=ring-nccl-verify \
+    --label "com.cerberus.run=${run_id}" \
     --hostname "${node}" \
     --network host \
     --read-only \
@@ -223,7 +225,7 @@ launch_rank() {
     --device /dev/infiniband/uverbs2 \
     --device /dev/infiniband/uverbs3 \
     --ulimit memlock=-1:-1 \
-    --volume "${host_verify_script}:/opt/cerebrus/verify_ring_nccl.py:ro" \
+    --volume "${host_verify_script}:/opt/cerberus/verify_ring_nccl.py:ro" \
     --env "RANK=${rank}" \
     --env WORLD_SIZE=3 \
     --env "LOCAL_RANK=0" \
@@ -256,7 +258,7 @@ launch_rank() {
     --env NCCL_DEBUG_SUBSYS=INIT,NET,GRAPH \
     --env TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
     --entrypoint /usr/bin/python3 \
-    "${image}" /opt/cerebrus/verify_ring_nccl.py
+    "${image}" /opt/cerberus/verify_ring_nccl.py
 }
 
 echo "Starting isolated NCCL ranks worker-first: rank 2, rank 1, rank 0."
@@ -302,12 +304,12 @@ done
 
 python3 "${artifact_validator}" \
   --expected-runtime "${expected_nccl_runtime}" \
-  --log "cerebrus1=${artifact_dir}/cerebrus1.log" \
-  --log "cerebrus2=${artifact_dir}/cerebrus2.log" \
-  --log "cerebrus3=${artifact_dir}/cerebrus3.log" \
-  --diff "cerebrus1=${artifact_dir}/cerebrus1-diff.json" \
-  --diff "cerebrus2=${artifact_dir}/cerebrus2-diff.json" \
-  --diff "cerebrus3=${artifact_dir}/cerebrus3-diff.json" \
+  --log "cerberus1=${artifact_dir}/cerberus1.log" \
+  --log "cerberus2=${artifact_dir}/cerberus2.log" \
+  --log "cerberus3=${artifact_dir}/cerberus3.log" \
+  --diff "cerberus1=${artifact_dir}/cerberus1-diff.json" \
+  --diff "cerberus2=${artifact_dir}/cerberus2-diff.json" \
+  --diff "cerberus3=${artifact_dir}/cerberus3-diff.json" \
   >"${artifact_dir}/summary.json" || wait_failed=1
 
 if ((wait_failed)); then

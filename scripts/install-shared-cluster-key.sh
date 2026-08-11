@@ -39,9 +39,9 @@ local_host="$(hostname -s)"
 
 canonical_cluster_role() {
   case "$1" in
-    cerebrus1|cerebrus1.lan|spark1|spark1.lan) printf 'cerebrus1\n' ;;
-    cerebrus2|cerebrus2.lan|spark2|spark2.lan) printf 'cerebrus2\n' ;;
-    cerebrus3|cerebrus3.lan|spark3|spark3.lan) printf 'cerebrus3\n' ;;
+    cerberus1|cerberus1.local|cerberus1.lan|cerebrus1|cerebrus1.lan|spark1|spark1.lan) printf 'cerberus1\n' ;;
+    cerberus2|cerberus2.local|cerberus2.lan|cerebrus2|cerebrus2.lan|spark2|spark2.lan) printf 'cerberus2\n' ;;
+    cerberus3|cerberus3.local|cerberus3.lan|cerebrus3|cerebrus3.lan|spark3|spark3.lan) printf 'cerberus3\n' ;;
     *) return 1 ;;
   esac
 }

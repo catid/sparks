@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command_name="$(basename -- "$0")"
+local_host="${MIA3_TEST_LOCAL_HOST:-cerberus1}"
+
+rank_for_name() {
+  case "$1" in
+    cerberus1.*|cerebrus1.*|spark1.*) printf '1\n' ;;
+    cerberus2.*|cerebrus2.*|spark2.*) printf '2\n' ;;
+    cerberus3.*|cerebrus3.*|spark3.*) printf '3\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+case "${command_name}" in
+  hostname)
+    [[ "${1:-}" == -s ]]
+    printf '%s\n' "${local_host}"
+    ;;
+  getent)
+    [[ "${1:-}" == ahostsv4 && $# == 2 ]]
+    dns_name="$2"
+    if [[ -n "${MIA3_TEST_RESOLVER_LOG:-}" ]]; then
+      printf '%s\n' "${dns_name}" >>"${MIA3_TEST_RESOLVER_LOG}"
+    fi
+    if [[ "${MIA3_TEST_CANONICAL_MISSING:-0}" == 1 &&
+          "${dns_name}" == cerberus* ]]; then
+      exit 2
+    fi
+    if [[ "${MIA3_TEST_LOCAL_MISSING:-0}" == 1 &&
+          "${dns_name}" == cerberus*.local ]]; then
+      exit 2
+    fi
+    rank="$(rank_for_name "${dns_name}")" || exit 2
+    address="192.0.2.$((10 + rank))"
+    if [[ "${MIA3_TEST_STALE_LOCAL:-0}" == 1 && "${rank}" == 1 ]]; then
+      address=192.0.2.99
+    fi
+    printf '%s STREAM %s\n' "${address}" "${dns_name}"
+    if [[ "${MIA3_TEST_AMBIGUOUS_RANK:-}" == "${rank}" ]]; then
+      printf '192.0.2.%s STREAM %s\n' "$((20 + rank))" "${dns_name}"
+    fi
+    ;;
+  ip)
+    if [[ "$*" == "-4 -o address show dev enP7s7 scope global" ]]; then
+      case "${local_host}" in
+        cerberus1|cerebrus1|spark1) rank=1 ;;
+        cerberus2|cerebrus2|spark2) rank=2 ;;
+        cerberus3|cerebrus3|spark3) rank=3 ;;
+        *) rank=9 ;;
+      esac
+      printf '2: enP7s7    inet 192.0.2.%s/24 scope global enP7s7\n' \
+        "$((10 + rank))"
+      exit 0
+    fi
+    if [[ "${1:-}" == -4 && "${2:-}" == route && "${3:-}" == get && $# == 4 ]]; then
+      address="$4"
+      if [[ "${MIA3_TEST_WRONG_ROUTE_ADDRESS:-}" == "${address}" ]]; then
+        printf '%s dev wlan0 src 198.51.100.8\n' "${address}"
+      else
+        case "${local_host}" in
+          cerberus1|cerebrus1|spark1) source_address=192.0.2.11 ;;
+          cerberus2|cerebrus2|spark2) source_address=192.0.2.12 ;;
+          cerberus3|cerebrus3|spark3) source_address=192.0.2.13 ;;
+          *) source_address=192.0.2.19 ;;
+        esac
+        printf '%s dev enP7s7 src %s\n' "${address}" "${source_address}"
+      fi
+      exit 0
+    fi
+    echo "Unexpected fake ip arguments: $*" >&2
+    exit 2
+    ;;
+  *)
+    echo "Unexpected fake management command: ${command_name}" >&2
+    exit 2
+    ;;
+esac

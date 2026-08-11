@@ -38,7 +38,7 @@ stop later refreshes. It independently polls `GET /api/voice-status` every
   "generated_at": "2026-08-10T18:30:05Z",
   "interval_seconds": 5,
   "hosts": {
-    "cerebrus1": {
+    "cerberus1": {
       "state": "online",
       "error": null,
       "cpu_percent": 21.2,
@@ -52,7 +52,7 @@ stop later refreshes. It independently polls `GET /api/voice-status` every
       "ram_total_bytes": 128000000000,
       "age_seconds": 1.2
     },
-    "cerebrus2": {
+    "cerberus2": {
       "state": "online",
       "error": null,
       "cpu_percent": 31.7,
@@ -66,7 +66,7 @@ stop later refreshes. It independently polls `GET /api/voice-status` every
       "ram_total_bytes": 128000000000,
       "age_seconds": 0.8
     },
-    "cerebrus3": {
+    "cerberus3": {
       "state": "online",
       "error": null,
       "cpu_percent": 18.5,
@@ -125,7 +125,7 @@ stop later refreshes. It independently polls `GET /api/voice-status` every
         "tokens_per_second": 132.0
       },
       "hosts": {
-        "cerebrus1": {
+        "cerberus1": {
           "state": "online",
           "cpu_percent": 19.0,
           "gpu_percent": 63.0,
@@ -168,7 +168,7 @@ Contract details:
   and displays a real `0`, while `stale` and `down` display no fabricated
   rate and use warning/error styling.
 - Host map keys should end in `1`, `2`, or `3`; `c1`, `spark2`, and
-  `cerebrus3` are all recognized. Stable `cerebrus1`/`2`/`3` keys are
+  `cerberus3` are all recognized. Stable `cerberus1`/`2`/`3` keys are
   preferred.
 - `age_seconds` is the collector's age for a host or throughput source. The
   whole payload is visibly marked stale when `generated_at` is older than

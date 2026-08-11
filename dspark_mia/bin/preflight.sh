@@ -19,12 +19,18 @@ remote_profile_env="$(remote_profile_assignment)"
 ssh "${MIA_SSH_OPTIONS[@]}" "${WORKER_HOST}" \
   "env ${remote_profile_env} '${WORKER_INSTALL_DIR}/bin/validate-static.sh'"
 
-# Production deliberately uses only the direct cerebrus1-P1 <->
-# cerebrus2-P0 edge. A cerebrus3 outage must not block TP2 serving.
-CX7_NODE_ROLE=cerebrus1 \
+load_tp2_runtime_addresses "${MIA_ROOT}/bin"
+remote_runtime_env="$(remote_runtime_assignment)"
+"${MIA_ROOT}/bin/validate-runtime.sh" 0
+ssh "${MIA_SSH_OPTIONS[@]}" "${WORKER_HOST}" \
+  "env ${remote_runtime_env} '${WORKER_INSTALL_DIR}/bin/validate-runtime.sh' 1"
+
+# Production deliberately uses only the direct cerberus1-P1 <->
+# cerberus2-P0 edge. A cerberus3 outage must not block TP2 serving.
+CX7_NODE_ROLE=cerberus1 \
   "${MIA_ROOT}/../bin/wait-cx7-ready.sh" --check-once --scope tp2
 ssh "${MIA_SSH_OPTIONS[@]}" "${WORKER_HOST}" \
-  "CX7_NODE_ROLE=cerebrus2 '${WORKER_INSTALL_DIR}/../bin/wait-cx7-ready.sh' --check-once --scope tp2"
+  "CX7_NODE_ROLE=cerberus2 '${WORKER_INSTALL_DIR}/../bin/wait-cx7-ready.sh' --check-once --scope tp2"
 
 # The selected profile supplies its own isolated API and rendezvous ports.
 # shellcheck disable=SC2016  # Child shell expands port/hostname at check time.
@@ -42,22 +48,22 @@ ssh "${MIA_SSH_OPTIONS[@]}" "${WORKER_HOST}" \
 # This experiment is port-isolated but not GPU-memory-isolated. Do not stop or
 # mutate the existing 8000 services implicitly; require an intentional stop.
 if pgrep -af '[v]llm (serve|entrypoints)' >/dev/null; then
-  echo "A vLLM workload is active on cerebrus1. Stop it explicitly before this trial." >&2
+  echo "A vLLM workload is active on cerberus1. Stop it explicitly before this trial." >&2
   exit 1
 fi
 if ssh "${MIA_SSH_OPTIONS[@]}" "${WORKER_HOST}" \
   "pgrep -af '[v]llm (serve|entrypoints)' >/dev/null"; then
-  echo "A vLLM workload is active on cerebrus2. Stop it explicitly before this trial." >&2
+  echo "A vLLM workload is active on cerberus2. Stop it explicitly before this trial." >&2
   exit 1
 fi
 
 sudo -n docker image inspect "${DSPARK_VLLM_IMAGE}" >/dev/null || {
-  echo "Pinned image is not local on cerebrus1; preflight never pulls it." >&2
+  echo "Pinned image is not local on cerberus1; preflight never pulls it." >&2
   exit 1
 }
 ssh "${MIA_SSH_OPTIONS[@]}" "${WORKER_HOST}" \
   "sudo -n docker image inspect '${DSPARK_VLLM_IMAGE}' >/dev/null" || {
-  echo "Pinned image is not local on cerebrus2; preflight never pulls it." >&2
+  echo "Pinned image is not local on cerberus2; preflight never pulls it." >&2
   exit 1
 }
 

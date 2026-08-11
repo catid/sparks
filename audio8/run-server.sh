@@ -3,7 +3,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 lock="${root}/audio8/MODEL.lock.json"
-image="${AUDIO8_IMAGE:-cerebrus/audio8-tts:0.6b-f9612f13}"
+image="${AUDIO8_IMAGE:-cerberus/audio8-tts:0.6b-f9612f13}"
 port="${AUDIO8_PORT:-8010}"
 max_active_requests="${AUDIO8_MAX_ACTIVE_REQUESTS:-2}"
 reference_dir="${AUDIO8_REFERENCE_DIR:-}"
@@ -79,7 +79,7 @@ if [[ -n "${reference_dir}" ]]; then
 fi
 
 exec docker run --rm \
-  --name cerebrus3-audio8 \
+  --name cerberus3-audio8 \
   --user "${runtime_uid}:${runtime_gid}" \
   --gpus all \
   --network host \

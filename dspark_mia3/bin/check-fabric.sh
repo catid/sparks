@@ -12,7 +12,9 @@ need_command rdma
 rank="${1:-}"
 [[ "${rank}" =~ ^[012]$ ]] || { echo "Usage: $0 {0|1|2}" >&2; exit 2; }
 expected_host="$(rank_host "${rank}")"
-expected_mgmt_ip="$(rank_mgmt_ip "${rank}")"
+resolve_management_plane
+expected_mgmt_ip="$(rank_runtime_ipv4 "${rank}")"
+master_ip="$(rank_runtime_ipv4 0)"
 actual_host="$(hostname -s)"
 [[ "${actual_host}" == "${expected_host}" ]] || {
   echo "Fabric rank ${rank} expected ${expected_host}, found ${actual_host}." >&2
@@ -26,9 +28,12 @@ actual_host="$(hostname -s)"
 CX7_NODE_ROLE="${expected_host}" "${MIA3_READINESS_HELPER}" \
   --check-once --scope ring --c3-port-map "${CX7_C3_PORT_MAP}"
 
-mgmt_ip="$(ip -4 -o addr show dev "${CONTROL_IFACE}" scope global | awk '{split($4,a,"/"); print a[1]; exit}')"
-[[ "${mgmt_ip}" == "${expected_mgmt_ip}" ]] || {
-  echo "${expected_host}: ${CONTROL_IFACE} has ${mgmt_ip:-no IPv4}, expected ${expected_mgmt_ip}." >&2
+mapfile -t management_ips < <(
+  ip -4 -o addr show dev "${CONTROL_IFACE}" scope global |
+    awk '{split($4,a,"/"); print a[1]}'
+)
+printf '%s\n' "${management_ips[@]}" | grep -Fxq -- "${expected_mgmt_ip}" || {
+  echo "${expected_host}: ${CONTROL_IFACE} does not own resolved address ${expected_mgmt_ip}." >&2
   exit 1
 }
 
@@ -55,8 +60,8 @@ for index in "${!eth_devices[@]}"; do
 done
 
 if [[ "${rank}" != 0 ]]; then
-  ping -I "${CONTROL_IFACE}" -c 1 -W 2 "${MASTER_ADDR}" >/dev/null || {
-    echo "${expected_host}: cannot reach rendezvous ${MASTER_ADDR} via ${CONTROL_IFACE}." >&2
+  ping -I "${CONTROL_IFACE}" -c 1 -W 2 "${master_ip}" >/dev/null || {
+    echo "${expected_host}: cannot reach rendezvous ${master_ip} via ${CONTROL_IFACE}." >&2
     exit 1
   }
 fi

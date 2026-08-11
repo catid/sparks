@@ -7,7 +7,7 @@ if [[ "${1:-}" != "--install" ]]; then
 This installs the small host-side tool set used by the playbook. It does not
 replace the DGX OS kernel, NVIDIA driver, CUDA, firmware, or Docker packages.
 Common SSH/RDMA/validation tools are installed on both nodes. Nginx is added
-only on Cerberus node 1 (short hostname cerebrus1, or legacy spark1), which
+only on Cerberus node 1 (short hostname cerberus1, or legacy spark1), which
 owns the optional dashboard.
 
 Review, then run:
@@ -18,6 +18,8 @@ EOF
 fi
 
 packages=(
+  avahi-daemon
+  avahi-utils
   ca-certificates
   curl
   ethtool
@@ -25,6 +27,7 @@ packages=(
   ibverbs-providers
   iproute2
   jq
+  libnss-mdns
   openssh-client
   openssl
   perftest
@@ -38,7 +41,7 @@ packages=(
 )
 dashboard_host=0
 case "$(hostname -s)" in
-  cerebrus1|spark1) dashboard_host=1 ;;
+  cerberus1|spark1) dashboard_host=1 ;;
 esac
 if ((dashboard_host)); then
   packages+=(nginx)
@@ -62,7 +65,7 @@ echo "Host-side playbook dependencies are installed."
 if ((dashboard_host)); then
   echo "Cerberus node 1 dashboard dependency installed: nginx"
 else
-  echo "Nginx was not installed; the dashboard web front end belongs on cerebrus1."
+  echo "Nginx was not installed; the dashboard web front end belongs on cerberus1."
 fi
 echo "For the pinned model downloader, install the credential-free HF CLI:"
 echo "  pipx install huggingface-hub"

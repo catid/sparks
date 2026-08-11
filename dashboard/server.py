@@ -2,7 +2,7 @@
 """Read-only two-node DGX Spark and vLLM dashboard.
 
 The service intentionally uses only the Python standard library.  It samples
-the local Spark directly, samples spark2 over the existing SSH trust, and
+the local Spark directly, samples Cerberus 2 over the existing SSH trust, and
 scrapes the configured vLLM/router Prometheus endpoints without mutating any
 service.  Node roles make a tensor-parallel headless worker distinct from an
 independent HTTP-serving replica.
@@ -44,9 +44,36 @@ PROM_SAMPLE = re.compile(
 )
 VALID_NODE_ROLES = frozenset({"aggregate", "replica", "worker"})
 VALID_INFERENCE_MODES = frozenset({"direct", "router"})
+CANONICAL_NODE_NAMES = ("cerberus1", "cerberus2")
+LEGACY_NODE_ALIASES = {
+    "spark1": "cerberus1",
+    "spark2": "cerberus2",
+}
 GB10_CPU_THERMAL_ZONES = frozenset({"TS0E", "TS0P", "TS1E", "TS1P"})
 MEMORY_HWMON_DRIVERS = frozenset({"jc42", "spd5118"})
 RECOVERY_HEALTHY_SAMPLES = 2
+
+
+def canonical_node_name(name: str) -> str:
+    """Map historical dashboard node keys to the canonical host identity."""
+    return LEGACY_NODE_ALIASES.get(name, name)
+
+
+def canonical_node_mapping(values: dict[str, Any]) -> dict[str, Any]:
+    """Accept legacy node-map keys while preferring canonical values.
+
+    Unknown keys are retained for callers that attach auxiliary metadata.
+    When both forms are supplied, the explicit ``cerberusN`` value wins.
+    """
+    normalized = {
+        name: value
+        for name, value in values.items()
+        if canonical_node_name(name) == name
+    }
+    for legacy, canonical in LEGACY_NODE_ALIASES.items():
+        if canonical not in normalized and legacy in values:
+            normalized[canonical] = values[legacy]
+    return normalized
 
 
 def utc_timestamp(timestamp: float) -> str:
@@ -496,8 +523,15 @@ class Collector:
         self.spark2_host = spark2_host
         self.ssh_key = ssh_key
         self.ssh_known_hosts = ssh_known_hosts
-        self.node_urls = node_urls
-        self.node_roles = node_roles
+        self.node_urls = canonical_node_mapping(node_urls)
+        self.node_roles = canonical_node_mapping(node_roles)
+        missing_urls = set(CANONICAL_NODE_NAMES).difference(self.node_urls)
+        missing_roles = set(CANONICAL_NODE_NAMES).difference(self.node_roles)
+        if missing_urls or missing_roles:
+            raise ValueError(
+                "Dashboard configuration must define both cerberus1 and "
+                "cerberus2 (legacy spark1/spark2 map keys are accepted)."
+            )
         self.inference_mode = inference_mode
         self.router_url = router_url.rstrip("/")
         self.router_metrics_url = router_metrics_url.rstrip("/")
@@ -618,13 +652,13 @@ class Collector:
             return {"hostname": host, "error": str(exc)}
 
     def spark1_system(self) -> dict[str, Any]:
-        """Sample spark1 locally by default, or over SSH from a third host."""
+        """Sample Cerberus 1 locally or remotely (compatibility method name)."""
         if not self.spark1_host:
             return self.local_system()
         return self.ssh_system(self.spark1_host, self.spark1_ssh_key)
 
     def remote_system(self) -> dict[str, Any]:
-        """Sample spark2 over SSH (kept as a compatibility entry point)."""
+        """Sample Cerberus 2 over SSH (compatibility entry point)."""
         return self.ssh_system(self.spark2_host, self.ssh_key)
 
     def vllm_metrics(self, base_url: str) -> dict[str, Any]:
@@ -1135,8 +1169,8 @@ class Collector:
 
         tasks: dict[str, Any] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-            tasks["spark1_system"] = executor.submit(self.spark1_system)
-            tasks["spark2_system"] = executor.submit(self.remote_system)
+            tasks["cerberus1_system"] = executor.submit(self.spark1_system)
+            tasks["cerberus2_system"] = executor.submit(self.remote_system)
             if self.inference_mode == "router":
                 tasks["router"] = executor.submit(self.router_metrics)
             for name, url in self.node_urls.items():
@@ -1145,7 +1179,7 @@ class Collector:
             values = {key: future.result() for key, future in tasks.items()}
 
         nodes: dict[str, Any] = {}
-        for name in ("spark1", "spark2"):
+        for name in CANONICAL_NODE_NAMES:
             system = values[f"{name}_system"]
             role = self.node_roles[name]
             if role == "worker":
@@ -1163,7 +1197,7 @@ class Collector:
                 self.add_rates(vllm, previous_node.get("vllm"), elapsed)
             node = {
                 "label": name,
-                "rank": 0 if name == "spark1" else 1,
+                "rank": 0 if name == "cerberus1" else 1,
                 "role": role,
                 "endpoint": (
                     self.node_urls[name] if role != "worker" else None
@@ -1333,8 +1367,8 @@ def main() -> None:
         if item.strip()
     )
     node_roles = {
-        "spark1": os.environ.get("SPARK1_VLLM_ROLE", "aggregate").strip().lower(),
-        "spark2": os.environ.get("SPARK2_VLLM_ROLE", "worker").strip().lower(),
+        "cerberus1": os.environ.get("SPARK1_VLLM_ROLE", "aggregate").strip().lower(),
+        "cerberus2": os.environ.get("SPARK2_VLLM_ROLE", "worker").strip().lower(),
     }
     invalid_roles = {
         name: role
@@ -1358,11 +1392,15 @@ def main() -> None:
     default_ssh_key = str(Path.home() / ".ssh" / "id_ed25519_dgx_cluster")
     spark2_ssh_key = os.environ.get("SPARK2_SSH_KEY", default_ssh_key)
     collector = Collector(
-        spark2_host=os.environ.get("SPARK2_SSH_HOST", "spark2"),
+        spark2_host=os.environ.get("SPARK2_SSH_HOST", "cerberus2"),
         ssh_key=spark2_ssh_key,
         node_urls={
-            "spark1": os.environ.get("SPARK1_VLLM_URL", "http://127.0.0.1:8000"),
-            "spark2": os.environ.get("SPARK2_VLLM_URL", "http://192.168.100.11:8000"),
+            "cerberus1": os.environ.get(
+                "SPARK1_VLLM_URL", "http://127.0.0.1:8000"
+            ),
+            "cerberus2": os.environ.get(
+                "SPARK2_VLLM_URL", "http://cerberus2.local:8000"
+            ),
         },
         node_roles=node_roles,
         inference_mode=inference_mode,

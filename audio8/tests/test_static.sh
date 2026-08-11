@@ -140,15 +140,30 @@ grep -Fq 'not a valid WAV container' <<<"${invalid_wav_output}"
 grep -Fxq 'COPY server.py ./server.py' "${repo_root}/audio8/Dockerfile"
 grep -Fq '"${root}/audio8"' "${repo_root}/scripts/install-audio8.sh"
 grep -Fxq 'Restart=always' \
-  "${repo_root}/systemd/cerebrus3-audio8.service.in"
-rendered_unit="${test_root}/cerebrus3-audio8.service"
+  "${repo_root}/systemd/cerberus3-audio8.service.in"
+grep -Eq '^Conflicts=.*cerebrus3-audio8\.service' \
+  "${repo_root}/systemd/cerberus3-audio8.service.in"
+grep -Fq 'legacy_private_config="/etc/default/cerebrus3-audio8"' \
+  "${repo_root}/scripts/install-audio8.sh"
+grep -Fq 'image="${AUDIO8_IMAGE:-cerberus/audio8-tts:0.6b-f9612f13}"' \
+  "${repo_root}/scripts/install-audio8.sh"
+grep -Fq -- '--tag "${image}"' "${repo_root}/scripts/install-audio8.sh"
+if rg -q 'cerebrus/audio8-tts' "${repo_root}/scripts/install-audio8.sh"; then
+  echo 'Audio8 installer still launches the misspelled image namespace.' >&2
+  exit 1
+fi
+grep -Fq 'systemctl reset-failed "${legacy_unit}"' \
+  "${repo_root}/scripts/install-audio8.sh"
+grep -Fq 'sudo systemctl stop "${legacy_unit}"' \
+  "${repo_root}/scripts/install-audio8.sh"
+rendered_unit="${test_root}/cerberus3-audio8.service"
 sed \
   -e "s|@PROJECT_DIR@|${repo_root}|g" \
   -e "s|@HOME@|${HOME}|g" \
   -e "s|@MODEL_DIR@|${model_dir}|g" \
   -e "s|@USER@|$(id -un)|g" \
   -e "s|@GROUP@|$(id -gn)|g" \
-  "${repo_root}/systemd/cerebrus3-audio8.service.in" >"${rendered_unit}"
+  "${repo_root}/systemd/cerberus3-audio8.service.in" >"${rendered_unit}"
 verify_log="${test_root}/systemd-verify.log"
 if ! systemd-analyze verify "${rendered_unit}" >"${verify_log}" 2>&1; then
   cat "${verify_log}" >&2

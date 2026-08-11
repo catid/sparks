@@ -39,15 +39,19 @@ if command -v shellcheck >/dev/null 2>&1; then
 fi
 
 rank0_layout="$(
-  CX7_LOCAL_SUFFIX=10 "${root_dir}/bin/wait-cx7-ready.sh" --describe
+  CX7_NODE_ROLE=cerberus1 \
+    "${root_dir}/bin/wait-cx7-ready.sh" --describe --scope tp2
 )"
 rank1_layout="$(
-  CX7_LOCAL_SUFFIX=11 "${root_dir}/bin/wait-cx7-ready.sh" --describe
+  CX7_NODE_ROLE=cerberus2 \
+    "${root_dir}/bin/wait-cx7-ready.sh" --describe --scope tp2
 )"
-[[ "${rank0_layout}" == *"192.168.100.10/24 peer=192.168.100.11"* ]]
-[[ "${rank1_layout}" == *"192.168.103.11/24 peer=192.168.103.10"* ]]
+[[ "${rank0_layout}" == *"node_role=cerberus1 scope=tp2 logical_links=2"* ]]
+[[ "${rank0_layout}" == *"192.168.0.1/24 peer=192.168.0.2"* ]]
+[[ "${rank1_layout}" == *"node_role=cerberus2 scope=tp2 logical_links=2"* ]]
+[[ "${rank1_layout}" == *"192.168.1.2/24 peer=192.168.1.1"* ]]
 
-if DEEPSEEK_RANK1_HOST='spark2;false' \
+if DEEPSEEK_RANK1_HOST='cerberus2;false' \
   "${root_dir}/bin/manage-deepseek-v4-rank1.sh" describe \
   >/dev/null 2>&1; then
   echo "Unsafe SSH host validation unexpectedly succeeded." >&2

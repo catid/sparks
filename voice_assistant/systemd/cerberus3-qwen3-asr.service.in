@@ -1,8 +1,9 @@
 [Unit]
-Description=Qwen3 ASR 1.7B service for Cerberus on cerebrus3
+Description=Qwen3 ASR 1.7B service for Cerberus on cerberus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
 Wants=network-online.target docker.service
 After=network-online.target docker.service
+Conflicts=cerebrus3-qwen3-asr.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -18,10 +19,10 @@ Environment=QWEN_ASR_PORT=8020
 Environment=XDG_CACHE_HOME=@ASR_CACHE_DIR@
 Environment=HF_HOME=@ASR_CACHE_DIR@/huggingface
 Environment=TORCH_HOME=@ASR_CACHE_DIR@/torch
-EnvironmentFile=-/etc/default/cerebrus3-qwen3-asr
-ExecStartPre=-/usr/bin/docker rm -f cerebrus3-qwen-asr
+EnvironmentFile=-/etc/default/cerberus3-qwen3-asr
+ExecStartPre=-/usr/bin/docker rm -f cerberus3-qwen-asr
 ExecStart=@PROJECT_DIR@/voice_assistant/run-asr.sh
-ExecStop=-/usr/bin/docker stop --time 30 cerebrus3-qwen-asr
+ExecStop=-/usr/bin/docker stop --time 30 cerberus3-qwen-asr
 Restart=always
 RestartSec=5s
 TimeoutStartSec=0
@@ -45,4 +46,4 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0077
 
 [Install]
-WantedBy=cerebrus3-voice-stack.target
+WantedBy=cerberus3-voice-stack.target

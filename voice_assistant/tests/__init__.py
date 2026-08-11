@@ -1,1 +1,1 @@
-"""Offline tests for the Cerberus voice assistant on cerebrus3."""
+"""Offline tests for the Cerberus voice assistant on cerberus3."""

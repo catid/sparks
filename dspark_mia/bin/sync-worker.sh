@@ -69,7 +69,7 @@ remote_readiness_sha="$(
     "sha256sum '$(printf '%q' "${remote_readiness_helper}")' | awk '{print \$1}'"
 )"
 [[ "${remote_readiness_sha}" == "${local_readiness_sha}" ]] || {
-  echo "Worker ring/TP2 readiness helper does not match cerebrus1." >&2
+  echo "Worker ring/TP2 readiness helper does not match cerberus1." >&2
   exit 1
 }
 

@@ -18,8 +18,8 @@ CONTAINER_NCCL_PREFIX = (
 
 def named_path(value: str) -> tuple[str, Path]:
     name, separator, raw_path = value.partition("=")
-    if not separator or name not in {"cerebrus1", "cerebrus2", "cerebrus3"}:
-        raise argparse.ArgumentTypeError("expected cerebrusN=/path")
+    if not separator or name not in {"cerberus1", "cerberus2", "cerberus3"}:
+        raise argparse.ArgumentTypeError("expected cerberusN=/path")
     return name, Path(raw_path)
 
 
@@ -40,7 +40,7 @@ def load_result(path: Path) -> tuple[dict, str]:
 def validate_result(
     node: str, result: dict, transport_log: str, expected_runtime: int
 ) -> dict:
-    rank = int(node.removeprefix("cerebrus")) - 1
+    rank = int(node.removeprefix("cerberus")) - 1
     problems = []
     expected_fields = {
         "schema": 1,
@@ -132,9 +132,9 @@ def main() -> None:
 
     logs = dict(args.log)
     diffs = dict(args.diff)
-    expected_nodes = {"cerebrus1", "cerebrus2", "cerebrus3"}
+    expected_nodes = {"cerberus1", "cerberus2", "cerberus3"}
     if set(logs) != expected_nodes or set(diffs) != expected_nodes:
-        raise RuntimeError("exactly one log and counter diff per cerebrus node is required")
+        raise RuntimeError("exactly one log and counter diff per cerberus node is required")
     if args.expected_runtime <= 0 or args.min_hca_bytes <= 0:
         raise RuntimeError("runtime and minimum byte threshold must be positive")
 

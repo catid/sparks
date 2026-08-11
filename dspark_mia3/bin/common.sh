@@ -52,6 +52,18 @@ source "${MIA3_ENV_FILE}"
 source "${MIA3_PARTITION_FILE}"
 set +a
 
+for obsolete_name in \
+  HEAD_MGMT_IP RANK1_MGMT_IP RANK2_MGMT_IP MASTER_ADDR VLLM_HOST_IP; do
+  if grep -Eq "^[[:space:]]*(export[[:space:]]+)?${obsolete_name}=" \
+      "${MIA3_ENV_FILE}"; then
+    echo "Obsolete numeric management setting in trial profile: ${obsolete_name}" >&2
+    exit 2
+  fi
+done
+# A caller's shell may still export values from the old profile. Numeric
+# management values are derived below and injected only by node-compose.sh.
+unset HEAD_MGMT_IP RANK1_MGMT_IP RANK2_MGMT_IP MASTER_ADDR VLLM_HOST_IP
+
 case "${requested_dflash}" in
   "") ;;
   on|1|true) ENABLE_DSPARK=1 ;;
@@ -68,9 +80,8 @@ unset NCCL_IB_GID_INDEX
 
 for required_name in \
   MIA_PROJECT_NAME HEAD_HOST RANK1_HOST RANK2_HOST \
-  HEAD_MGMT_IP RANK1_MGMT_IP RANK2_MGMT_IP \
   RANK1_SYNC_HOST RANK2_SYNC_HOST REMOTE_INSTALL_DIR \
-  CLUSTER_SSH_KEY MASTER_ADDR MASTER_PORT VLLM_PORT \
+  CLUSTER_SSH_KEY MASTER_PORT VLLM_PORT \
   DSPARK_VLLM_IMAGE DSPARK_MODEL_HOST_PATH DSPARK_MODEL \
   HF_CACHE DSPARK_TMP_HOST \
   DSPARK_MODEL_REPO DSPARK_MODEL_REVISION SERVED_MODEL_NAME \
@@ -83,6 +94,16 @@ for required_name in \
     exit 2
   fi
 done
+
+[[ "${HEAD_HOST}" == cerberus1 && "${RANK1_HOST}" == cerberus2 &&
+   "${RANK2_HOST}" == cerberus3 ]] || {
+  echo "Mia3 ranks must use canonical cerberus1, cerberus2, and cerberus3 hostnames." >&2
+  exit 2
+}
+[[ "${CONTROL_IFACE}" =~ ^[A-Za-z0-9._-]+$ ]] || {
+  echo "Unsafe control interface in trial profile: ${CONTROL_IFACE}" >&2
+  exit 2
+}
 
 [[ "${MIA_PROJECT_NAME}" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
   echo "Unsafe Compose project name: ${MIA_PROJECT_NAME}" >&2
@@ -103,20 +124,12 @@ valid_ipv4() {
     ((10#${octet} <= 255)) || return 1
   done
 }
-for cluster_address in \
-  "${HEAD_MGMT_IP}" "${RANK1_MGMT_IP}" "${RANK2_MGMT_IP}" \
-  "${RANK1_SYNC_HOST}" "${RANK2_SYNC_HOST}"; do
+for cluster_address in "${RANK1_SYNC_HOST}" "${RANK2_SYNC_HOST}"; do
   valid_ipv4 "${cluster_address}" || {
     echo "Invalid cluster IPv4 address in trial profile: ${cluster_address}" >&2
     exit 2
   }
 done
-[[ "${HEAD_MGMT_IP}" != "${RANK1_MGMT_IP}" && \
-   "${HEAD_MGMT_IP}" != "${RANK2_MGMT_IP}" && \
-   "${RANK1_MGMT_IP}" != "${RANK2_MGMT_IP}" ]] || {
-  echo "Management addresses must be distinct." >&2
-  exit 2
-}
 for safe_path in "${REMOTE_INSTALL_DIR}" "${CLUSTER_SSH_KEY}" \
   "${DSPARK_MODEL_HOST_PATH}" "${DSPARK_MODEL}" \
   "${HF_CACHE}" "${DSPARK_TMP_HOST}" "${NCCL_RUNTIME_PATH}"; do
@@ -204,13 +217,166 @@ rank_host() {
   esac
 }
 
-rank_mgmt_ip() {
+canonical_cluster_role() {
   case "$1" in
-    0) printf '%s\n' "${HEAD_MGMT_IP}" ;;
-    1) printf '%s\n' "${RANK1_MGMT_IP}" ;;
-    2) printf '%s\n' "${RANK2_MGMT_IP}" ;;
+    cerberus1|cerebrus1|spark1) printf 'cerberus1\n' ;;
+    cerberus2|cerebrus2|spark2) printf 'cerberus2\n' ;;
+    cerberus3|cerebrus3|spark3) printf 'cerberus3\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+declare -a MIA3_CONTROL_IPV4S=()
+declare -a MIA3_RUNTIME_MGMT_IPV4S=()
+declare -a MIA3_RUNTIME_MGMT_NAMES=()
+MIA3_MANAGEMENT_RESOLVED=0
+MIA3_LOOKUP_IPV4=""
+
+address_is_on_control_iface() {
+  local expected="$1" address
+  for address in "${MIA3_CONTROL_IPV4S[@]}"; do
+    [[ "${address}" == "${expected}" ]] && return 0
+  done
+  return 1
+}
+
+lookup_unique_management_ipv4() {
+  local dns_name="$1" output address
+  local -a addresses=()
+  MIA3_LOOKUP_IPV4=""
+  if ! output="$(getent ahostsv4 "${dns_name}" 2>/dev/null)"; then
+    return 3
+  fi
+  mapfile -t addresses < <(
+    awk '{print $1}' <<<"${output}" | sort -u
+  )
+  ((${#addresses[@]} > 0)) || return 3
+  for address in "${addresses[@]}"; do
+    valid_ipv4 "${address}" || {
+      echo "${dns_name} returned an invalid IPv4 address: ${address}" >&2
+      return 2
+    }
+  done
+  if ((${#addresses[@]} != 1)); then
+    echo "${dns_name} returned ambiguous IPv4 addresses: ${addresses[*]}" >&2
+    return 2
+  fi
+  MIA3_LOOKUP_IPV4="${addresses[0]}"
+}
+
+validate_management_route() {
+  local rank="$1" dns_name="$2" address="$3"
+  local actual_role="" expected_role route route_dev route_source
+  expected_role="$(rank_host "${rank}")"
+  actual_role="$(canonical_cluster_role "$(hostname -s)" 2>/dev/null || true)"
+
+  if address_is_on_control_iface "${address}"; then
+    if [[ -z "${actual_role}" || "${actual_role}" != "${expected_role}" ]]; then
+      echo "${dns_name} unexpectedly resolves to this host's ${CONTROL_IFACE} address ${address}." >&2
+      return 1
+    fi
+    return 0
+  fi
+  if [[ "${actual_role}" == "${expected_role}" ]]; then
+    echo "${dns_name} resolves to ${address}, which is not owned by local ${CONTROL_IFACE}." >&2
+    return 1
+  fi
+
+  route="$(ip -4 route get "${address}" 2>/dev/null | head -n 1)"
+  route_dev="$(awk '{for (i=1; i<NF; i++) if ($i == "dev") {print $(i+1); exit}}' <<<"${route}")"
+  route_source="$(awk '{for (i=1; i<NF; i++) if ($i == "src") {print $(i+1); exit}}' <<<"${route}")"
+  if [[ "${route_dev}" != "${CONTROL_IFACE}" ]]; then
+    echo "${dns_name} (${address}) routes via ${route_dev:-none}, not ${CONTROL_IFACE}." >&2
+    return 1
+  fi
+  if ! address_is_on_control_iface "${route_source}"; then
+    echo "${dns_name} (${address}) uses source ${route_source:-none}, not a ${CONTROL_IFACE} IPv4." >&2
+    return 1
+  fi
+}
+
+resolve_rank_management_ipv4() {
+  local rank="$1" canonical legacy spark dns_name lookup_status index
+  local -a candidates=()
+  canonical="$(rank_host "${rank}")"
+  legacy="${canonical/cerberus/cerebrus}"
+  spark="${canonical/cerberus/spark}"
+  candidates=(
+    "${canonical}.local"
+    "${canonical}.lan"
+    "${legacy}.lan"
+    "${spark}.lan"
+    "${legacy}.local"
+    "${spark}.local"
+  )
+
+  for index in "${!candidates[@]}"; do
+    dns_name="${candidates[${index}]}"
+    if lookup_unique_management_ipv4 "${dns_name}"; then
+      validate_management_route "${rank}" "${dns_name}" "${MIA3_LOOKUP_IPV4}" || return 1
+      MIA3_RUNTIME_MGMT_IPV4S[rank]="${MIA3_LOOKUP_IPV4}"
+      MIA3_RUNTIME_MGMT_NAMES[rank]="${dns_name}"
+      if ((index > 1)); then
+        echo "WARNING: canonical DNS is unavailable for ${canonical}; using transitional ${dns_name}." >&2
+      fi
+      return 0
+    else
+      lookup_status=$?
+      ((lookup_status == 3)) || return "${lookup_status}"
+    fi
+  done
+  echo "Cannot resolve ${canonical} on management DNS or an explicit transitional alias." >&2
+  return 1
+}
+
+resolve_management_plane() {
+  local rank address
+  ((MIA3_MANAGEMENT_RESOLVED == 0)) || return 0
+  need_command getent
+  need_command hostname
+  need_command ip
+  mapfile -t MIA3_CONTROL_IPV4S < <(
+    ip -4 -o address show dev "${CONTROL_IFACE}" scope global |
+      awk '{split($4, value, "/"); print value[1]}' | sort -u
+  )
+  ((${#MIA3_CONTROL_IPV4S[@]} > 0)) || {
+    echo "${CONTROL_IFACE} has no global IPv4 address." >&2
+    return 1
+  }
+  for address in "${MIA3_CONTROL_IPV4S[@]}"; do
+    valid_ipv4 "${address}" || {
+      echo "${CONTROL_IFACE} returned an invalid IPv4 address: ${address}" >&2
+      return 1
+    }
+  done
+  for rank in 0 1 2; do
+    resolve_rank_management_ipv4 "${rank}" || return
+  done
+  [[ "${MIA3_RUNTIME_MGMT_IPV4S[0]}" != "${MIA3_RUNTIME_MGMT_IPV4S[1]}" &&
+     "${MIA3_RUNTIME_MGMT_IPV4S[0]}" != "${MIA3_RUNTIME_MGMT_IPV4S[2]}" &&
+     "${MIA3_RUNTIME_MGMT_IPV4S[1]}" != "${MIA3_RUNTIME_MGMT_IPV4S[2]}" ]] || {
+    echo "Resolved management addresses must be distinct." >&2
+    return 1
+  }
+  MIA3_MANAGEMENT_RESOLVED=1
+}
+
+rank_runtime_ipv4() {
+  case "$1" in
+    0|1|2) ;;
     *) echo "Rank must be 0, 1, or 2." >&2; return 2 ;;
   esac
+  resolve_management_plane || return
+  printf '%s\n' "${MIA3_RUNTIME_MGMT_IPV4S[$1]}"
+}
+
+rank_runtime_management_name() {
+  case "$1" in
+    0|1|2) ;;
+    *) echo "Rank must be 0, 1, or 2." >&2; return 2 ;;
+  esac
+  resolve_management_plane || return
+  printf '%s\n' "${MIA3_RUNTIME_MGMT_NAMES[$1]}"
 }
 
 rank_sync_host() {
@@ -242,8 +408,19 @@ ssh_command() {
   local host="$1"
   shift
   local remote_command
+  host="$(management_ssh_host "${host}")"
   remote_command="$(shell_join "$@")"
   ssh "${MIA3_SSH_OPTIONS[@]}" "${host}" "${remote_command}"
+}
+
+management_ssh_host() {
+  local host="$1" role
+  role="$(canonical_cluster_role "${host}" 2>/dev/null || true)"
+  if [[ -n "${role}" ]]; then
+    printf '%s.local\n' "${role}"
+  else
+    printf '%s\n' "${host}"
+  fi
 }
 
 remote_trial_command() {

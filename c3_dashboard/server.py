@@ -32,12 +32,12 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_NODES = ("cerebrus1", "cerebrus2", "cerebrus3")
+DEFAULT_NODES = ("cerberus1", "cerberus2", "cerberus3")
 DEFAULT_INTERVAL_SECONDS = 5.0
 DEFAULT_PORT = 9763
 MAX_METRICS_BYTES = 4 * 1024 * 1024
 MAX_VOICE_STATUS_BYTES = 32 * 1024
-DEFAULT_VOICE_STATUS_PATH = "/run/cerebrus3-voice-bridge/status.json"
+DEFAULT_VOICE_STATUS_PATH = "/run/cerberus3-voice-bridge/status.json"
 DEFAULT_VOICE_STALE_SECONDS = 6.0
 MAX_STATUS_TIMESTAMP = 253_402_300_799.0  # 9999-12-31T23:59:59Z
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -156,7 +156,15 @@ def millidegree_c(value: Any) -> float | None:
 
 def canonical_host(host: str) -> str:
     short = host.strip().lower().split(".", 1)[0]
-    aliases = {"spark1": "cerebrus1", "spark2": "cerebrus2", "spark3": "cerebrus3"}
+    aliases = {
+        "spark1": "cerberus1",
+        "spark2": "cerberus2",
+        "spark3": "cerberus3",
+        # Input-only compatibility for the former misspelling. Never emit it.
+        "cerebrus1": "cerberus1",
+        "cerebrus2": "cerberus2",
+        "cerebrus3": "cerberus3",
+    }
     return aliases.get(short, short)
 
 
@@ -801,7 +809,7 @@ class Collector:
         self,
         nodes: tuple[str, ...] = DEFAULT_NODES,
         interval: float = DEFAULT_INTERVAL_SECONDS,
-        metrics_url: str = "http://cerebrus1:8889/metrics",
+        metrics_url: str = "http://cerberus1.local:8889/metrics",
         history_points: int = 720,
         host_prober: Callable[[str], dict[str, Any]] | None = None,
         metrics_fetcher: Callable[[str, float], str] = fetch_text,
@@ -1254,7 +1262,7 @@ def main() -> None:
         interval=args.interval,
         metrics_url=os.environ.get(
             "C3_DASHBOARD_VLLM_METRICS_URL",
-            "http://cerebrus1:8889/metrics",
+            "http://cerberus1.local:8889/metrics",
         ),
         history_points=int(os.environ.get("C3_DASHBOARD_HISTORY_POINTS", "720")),
         ssh_key=optional_path(

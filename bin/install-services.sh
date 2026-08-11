@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install and enable the persistent two-Spark serving stack without starting
-# or restarting any service. Run from spark1; spark2 must already have this
-# project at the same path because its backend unit executes files from it.
+# Install and enable the retired two-replica serving stack without starting or
+# restarting any service. Run from Cerberus 1; Cerberus 2 must already have
+# this project at the same path because its backend unit executes files from it.
 
 if [[ "${1:-}" != "--legacy-two-replica" || $# -ne 1 ]]; then
   cat >&2 <<'EOF'
@@ -11,8 +11,8 @@ This installer is retained only for the legacy pair of independent TP1
 replicas and router. It does not install the current DeepSeek V4 TP2 service.
 
 For the current service, use:
-  bin/install-deepseek-v4-services.sh rank1  # locally on Spark 2
-  bin/install-deepseek-v4-services.sh rank0  # locally on Spark 1
+  bin/install-deepseek-v4-services.sh rank1  # locally on cerberus2
+  bin/install-deepseek-v4-services.sh rank0  # locally on cerberus1
 
 To intentionally install the legacy layout, re-run:
   bin/install-services.sh --legacy-two-replica
@@ -21,8 +21,8 @@ EOF
 fi
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-spark2_host="${SPARK2_SSH_HOST:-spark2}"
-ssh_key="${SPARK2_SSH_KEY:-/home/catid/.ssh/id_ed25519_dgx_cluster}"
+cerberus2_host="${CERBERUS2_SSH_HOST:-${SPARK2_SSH_HOST:-cerberus2.local}}"
+ssh_key="${CLUSTER_SSH_KEY:-${SPARK2_SSH_KEY:-/home/catid/.ssh/id_ed25519_dgx_cluster}}"
 backend_unit="dgx-spark-laguna-vllm-agent.service"
 router_unit="dgx-laguna-router.service"
 router_front_unit="dgx-laguna-router-front.service"
@@ -31,10 +31,14 @@ backend_config="dgx-spark-laguna-vllm-agent.conf"
 dashboard_config="dgx-spark-laguna-dashboard"
 dashboard_config_source="${root_dir}/dashboard/dashboard.env.lan"
 
-if [[ "$(hostname -s)" != "spark1" ]]; then
-  echo "Run this cluster installer on spark1 (current host: $(hostname -s))." >&2
-  exit 2
-fi
+coordinator_hostname="$(hostname -s)"
+case "${coordinator_hostname}" in
+  cerberus1 | cerebrus1 | spark1) ;;
+  *)
+    echo "Run this cluster installer on cerberus1 (current host: ${coordinator_hostname})." >&2
+    exit 2
+    ;;
+esac
 
 for path in \
   "${root_dir}/systemd/${backend_unit}" \
@@ -86,7 +90,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable \
   "${backend_unit}" "${router_unit}" "${router_front_unit}" "${dashboard_unit}"
 
-ssh "${ssh_args[@]}" "${spark2_host}" bash -s -- \
+ssh "${ssh_args[@]}" "${cerberus2_host}" bash -s -- \
   "${root_dir}" "${backend_unit}" "${backend_config}" <<'REMOTE_INSTALL'
 set -euo pipefail
 root_dir="$1"
@@ -109,11 +113,11 @@ REMOTE_INSTALL
 
 cat <<EOF
 Installed and enabled the persistent Laguna stack:
-  spark1: ${backend_unit}, ${router_unit}, ${router_front_unit}, ${dashboard_unit}
-  spark2: ${backend_unit}
+  cerberus1: ${backend_unit}, ${router_unit}, ${router_front_unit}, ${dashboard_unit}
+  cerberus2: ${backend_unit}
 
 No service was started or restarted. Enabled units will start automatically on
 the next boot. Inspect the current state with:
   systemctl status ${backend_unit} ${router_unit} ${dashboard_unit}
-  ssh ${spark2_host} systemctl status ${backend_unit}
+  ssh ${cerberus2_host} systemctl status ${backend_unit}
 EOF

@@ -5,10 +5,21 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${root_dir}/bin/cluster-env.sh"
 
 mode="${1:-dflash}"
-node="${DGX_REPLICA_NODE:-spark1}"
+node="${DGX_REPLICA_NODE:-cerberus1}"
 port="${VLLM_PORT:-8000}"
 model="poolside/Laguna-S-2.1-NVFP4"
 dflash_tokens="${DFLASH_TOKENS:-15}"
+cerberus2_host="${CERBERUS2_SSH_HOST:-${SPARK2_SSH_HOST:-cerberus2.local}}"
+ssh_key="${CLUSTER_SSH_KEY:-/home/catid/.ssh/id_ed25519_dgx_cluster}"
+
+case "${node}" in
+  cerberus1 | cerebrus1 | spark1) node=cerberus1 ;;
+  cerberus2 | cerebrus2 | spark2) node=cerberus2 ;;
+  *)
+    echo "DGX_REPLICA_NODE must identify cerberus1 or cerberus2." >&2
+    exit 2
+    ;;
+esac
 
 case "${mode}" in
   baseline)
@@ -43,13 +54,13 @@ common_args=(
 )
 
 mkdir -p "${root_dir}/logs"
-if [[ "${node}" == "spark2" ]]; then
+if [[ "${node}" == "cerberus2" ]]; then
   exec vllm serve "${common_args[@]}"
 fi
 
-remote_log="${root_dir}/logs/nvfp4-${mode}-spark2.log"
-ssh -i /home/catid/.ssh/id_ed25519_dgx_cluster \
-  -o IdentitiesOnly=yes spark2 \
-  "nohup env DGX_REPLICA_NODE=spark2 DFLASH_TOKENS='${dflash_tokens}' VLLM_PORT='${port}' '${root_dir}/bin/launch-nvfp4-replicas.sh' '${mode}' >'${remote_log}' 2>&1 & echo \$! >'${root_dir}/logs/nvfp4-${mode}-spark2.pid'"
+remote_log="${root_dir}/logs/nvfp4-${mode}-cerberus2.log"
+ssh -i "${ssh_key}" \
+  -o IdentitiesOnly=yes "${cerberus2_host}" \
+  "nohup env DGX_REPLICA_NODE=cerberus2 DFLASH_TOKENS='${dflash_tokens}' VLLM_PORT='${port}' '${root_dir}/bin/launch-nvfp4-replicas.sh' '${mode}' >'${remote_log}' 2>&1 & echo \$! >'${root_dir}/logs/nvfp4-${mode}-cerberus2.pid'"
 
 exec vllm serve "${common_args[@]}"

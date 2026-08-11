@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "${1:-}" == "ahostsv4" && -n "${2:-}" ]] || exit 2
+name="$2"
+scenario="${MIA_RUNTIME_FIXTURE_SCENARIO:-ok}"
+
+emit() {
+  printf '%s STREAM %s\n' "$1" "$2"
+  printf '%s DGRAM  %s\n' "$1" "$2"
+  printf '%s RAW    %s\n' "$1" "$2"
+}
+
+case "${name}" in
+  cerberus1) emit 127.0.1.1 cerberus1 ;;
+  cerberus1.local|spark1.lan)
+    emit 198.51.100.10 "${name}"
+    ;;
+  cerebrus1.lan) emit 192.0.2.11 cerebrus1.lan ;;
+  cerberus2) emit 192.0.2.12 cerberus2 ;;
+  cerberus2.local|spark2.lan)
+    if [[ "${scenario}" == "worker_dns_mismatch" ]]; then
+      emit 198.51.100.12 "${name}"
+    else
+      emit 198.51.100.11 "${name}"
+    fi
+    ;;
+  cerebrus2.lan) emit 192.0.2.12 cerebrus2.lan ;;
+  *) exit 2 ;;
+esac

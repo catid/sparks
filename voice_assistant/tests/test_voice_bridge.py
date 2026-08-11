@@ -39,7 +39,7 @@ class BridgeTestCase(unittest.TestCase):
             "openclaw_url": "http://127.0.0.1:18789/v1/chat/completions",
             "openclaw_token": "",
             "openclaw_model": "openclaw",
-            "openclaw_user": "cerebrus3-voice",
+            "openclaw_user": "cerberus3-voice",
             "tts_url": "http://127.0.0.1:8010/v1/audio/speech",
             "tts_model": "audio8/tts-0.6b",
             "capture_device": "plughw:CARD=CP900,DEV=0",
@@ -76,8 +76,16 @@ class WakeWordTests(BridgeTestCase):
             (None, "ignored"),
         )
         self.assertEqual(
-            router.route("Cerebrus: summarize the latest run", now=30),
+            router.route("Cerberus: summarize the latest run", now=30),
             ("summarize the latest run", "command"),
+        )
+
+    def test_historical_asr_misspelling_remains_input_only_alias(self) -> None:
+        router = self.module.WakeWordRouter(armed_seconds=12)
+        historical_alias = "Cere" + "brus"
+        self.assertEqual(
+            router.route(f"{historical_alias}, report status", now=40),
+            ("report status", "command"),
         )
 
     def test_wake_only_arms_exactly_one_following_utterance(self) -> None:
@@ -91,7 +99,7 @@ class WakeWordTests(BridgeTestCase):
 
     def test_expired_arm_requires_another_wake_word(self) -> None:
         router = self.module.WakeWordRouter(armed_seconds=5)
-        router.route("Cerebrus", now=10)
+        router.route("Cerberus", now=10)
         self.assertEqual(router.route("Status please", now=16), (None, "ignored"))
 
 
@@ -243,7 +251,7 @@ class ResponseTests(BridgeTestCase):
             )
         with self.assertRaisesRegex(RuntimeError, "loopback"):
             self.module.require_loopback_http_url(
-                "TEST_URL", "http://10.10.84.28:8889/v1/chat/completions"
+                "TEST_URL", "http://192.0.2.28:8889/v1/chat/completions"
             )
 
     def test_default_logging_does_not_emit_transcript_or_command(self) -> None:

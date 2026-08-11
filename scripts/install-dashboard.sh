@@ -36,7 +36,8 @@ Environment:
   SPARK_SERVICE_USER  Account that owns the checkout and cluster SSH key.
   DASHBOARD_ENV_FILE  Source environment (default: dashboard.env.example).
   DASHBOARD_AUTH      Optional user:password written with mode 0600.
-  DASHBOARD_WEB_HOST  HTTPS hostname (default: cerebrus1.lan).
+  DASHBOARD_WEB_HOST      HTTPS hostname (default: cerberus1.lan).
+  DASHBOARD_WEB_ALT_HOST  Alternate certificate name (default: cerberus1.local).
   DASHBOARD_LAN_IP    Optional IP SAN passed to the TLS certificate installer.
 
 On a fresh --web install, a random operator password is generated when
@@ -90,9 +91,9 @@ if [[ "${allow_unauthenticated_web}" == "1" && "${install_web}" != "1" ]]; then
 fi
 if [[ "${action}" != "verify" && "${remote_collector}" != "1" ]]; then
   case "$(hostname -s)" in
-    cerebrus1|spark1) ;;
+    cerberus1|spark1) ;;
     *)
-      echo "Install the cluster dashboard on cerebrus1 (legacy spark1)." >&2
+      echo "Install the cluster dashboard on cerberus1 (legacy spark1)." >&2
       echo "Use --remote-collector for a dedicated collector host." >&2
       exit 2
       ;;
@@ -285,6 +286,6 @@ fi
 
 echo "Dashboard service installed for user ${service_user}."
 if [[ "${install_web}" == "1" ]]; then
-  echo "Web endpoint: https://${DASHBOARD_WEB_HOST:-cerebrus1.lan}"
+  echo "Web endpoint: https://${DASHBOARD_WEB_HOST:-cerberus1.lan}"
   echo "(HTTP redirects to self-signed HTTPS.)"
 fi

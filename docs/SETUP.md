@@ -5,8 +5,8 @@ two inference ranks over a three-DGX-Spark ring. It assumes:
 
 - all three machines run a current DGX OS image and use their supplied 240 W NVIDIA
   power adapters;
-- each machine is reachable at its documented management address; section 2
-  installs the canonical `cerebrus1` through `cerebrus3` identities and local
+- each machine is reachable through its canonical management DNS name; section 2
+  installs the canonical `cerberus1` through `cerberus3` identities and local
   name map;
 - the same unprivileged service user exists on all three;
 - that user's home and checkout paths contain no whitespace or shell
@@ -52,34 +52,56 @@ checkout. This is a public repository.
 ## 2. Assign canonical host identities
 
 Run the role-specific dry run and apply over the independent management
-connection. The installer binds each role to its exact management address,
-backs up `/etc/hosts`, sets the short hostname, installs all canonical and
-transitional aliases, and rolls back both files if validation fails:
+connection. The installer canonicalizes the role, backs up `/etc/hosts`, sets
+the short hostname, and keeps only that canonical name on its loopback entry.
+It removes stale cluster address pins while preserving unrelated hosts entries
+and rolls back both hostname and file if installation fails. Management
+addresses remain DHCP/DNS-owned:
 
 ```bash
-# On the host at 10.10.84.28:
-scripts/install-cluster-host-identity.sh cerebrus1
-scripts/install-cluster-host-identity.sh cerebrus1 --apply
+# On the machine that will be Cerberus 1:
+scripts/install-cluster-host-identity.sh cerberus1
+scripts/install-cluster-host-identity.sh cerberus1 --apply
 
-# On the host at 10.10.84.12:
-scripts/install-cluster-host-identity.sh cerebrus2
-scripts/install-cluster-host-identity.sh cerebrus2 --apply
+# On the machine that will be Cerberus 2:
+scripts/install-cluster-host-identity.sh cerberus2
+scripts/install-cluster-host-identity.sh cerberus2 --apply
 
-# On the host at 10.10.84.121:
-scripts/install-cluster-host-identity.sh cerebrus3
-scripts/install-cluster-host-identity.sh cerebrus3 --apply
+# On the machine that will be Cerberus 3:
+scripts/install-cluster-host-identity.sh cerberus3
+scripts/install-cluster-host-identity.sh cerberus3 --apply
 ```
 
 Open a new shell after the hostname change, then verify on every node:
 
 ```bash
 hostname -s
-getent ahostsv4 cerebrus1 cerebrus2 cerebrus3
+scripts/install-cerberus-management.sh apply
+scripts/install-cerberus-management.sh verify
+scripts/install-cerberus-mdns.sh verify
+scripts/install-cerberus-mdns.sh apply
+avahi-resolve-host-name -4 cerberus1.local cerberus2.local cerberus3.local
 ```
 
-The checked-in `hosts/cerebrus*.hosts` files intentionally publish this
-non-routable reference topology. Adapt and review those sources before using
-the runbook on a different management subnet.
+The management-profile installer creates a persistent NetworkManager
+`cerberus-mgmt` profile for `enP7s7`. It uses DHCP, explicitly sends the
+canonical `cerberusN` client hostname, and stores no management address.
+`apply` does not interrupt the active connection; the profile takes over on
+the next boot. During an attended maintenance session, pass `--activate` to
+switch immediately, understanding that the SSH connection can briefly drop.
+
+The checked-in `hosts/cerberus*.hosts` fragments contain only the local
+loopback identity and standard localhost entries. They deliberately contain
+no peer aliases or management addresses.
+
+The mDNS installer restricts Avahi to `enP7s7`, preventing a canonical
+`cerberusN.local` lookup from selecting a ConnectX ring address. Firewalla may
+keep serving the old DHCP client name after the hostname change, so the
+optional `cerberusN.lan` lookup can fail even when the legacy
+`cerebrusN.lan` or `sparkN.lan` name still works. Renew the management DHCP
+lease or update the Firewalla local-domain record and verify canonical DNS
+when `.lan` access is desired. Never copy a transient DHCP address into the
+repository to bypass this transition.
 
 ## 3. Verify the DGX base and install host tools
 
@@ -140,17 +162,17 @@ The exact six-subnet matrix and port mapping are in
 
 ```bash
 cd ~/sparks
-scripts/install-cx7-netplan.sh cerebrus1
-ssh cerebrus2 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus2'
-ssh cerebrus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus3 --c3-port-map c3-p0-to-c1'
+scripts/install-cx7-netplan.sh cerberus1
+ssh cerberus2 'cd ~/sparks && scripts/install-cx7-netplan.sh cerberus2'
+ssh cerberus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerberus3 --c3-port-map c3-p0-to-c1'
 ```
 
 Retain console or management-network access, then apply on all three nodes:
 
 ```bash
-scripts/install-cx7-netplan.sh cerebrus1 --apply
-ssh cerebrus2 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus2 --apply'
-ssh cerebrus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerebrus3 --c3-port-map c3-p0-to-c1 --apply'
+scripts/install-cx7-netplan.sh cerberus1 --apply
+ssh cerberus2 'cd ~/sparks && scripts/install-cx7-netplan.sh cerberus2 --apply'
+ssh cerberus3 'cd ~/sparks && scripts/install-cx7-netplan.sh cerberus3 --c3-port-map c3-p0-to-c1 --apply'
 ```
 
 Validate the whole ring with `--scope ring`. Production preflight and systemd
@@ -158,9 +180,9 @@ use `--scope tp2`, which checks only C1-P1 to C2-P0 and cannot be blocked by
 C3:
 
 ```bash
-CX7_NODE_ROLE=cerebrus1 bin/wait-cx7-ready.sh --check-once --scope ring
-CX7_NODE_ROLE=cerebrus1 bin/wait-cx7-ready.sh --check-once --scope tp2
-ssh cerebrus3 'CX7_NODE_ROLE=cerebrus3 ~/sparks/bin/wait-cx7-ready.sh --check-once --scope ring --c3-port-map c3-p0-to-c1'
+CX7_NODE_ROLE=cerberus1 bin/wait-cx7-ready.sh --check-once --scope ring
+CX7_NODE_ROLE=cerberus1 bin/wait-cx7-ready.sh --check-once --scope tp2
+ssh cerberus3 'CX7_NODE_ROLE=cerberus3 ~/sparks/bin/wait-cx7-ready.sh --check-once --scope ring --c3-port-map c3-p0-to-c1'
 rdma link show
 ```
 
@@ -181,15 +203,15 @@ ssh-keygen -t ed25519 \
 chmod 0600 ~/.ssh/id_ed25519_dgx_cluster
 
 # Bootstrap authorization through the already authenticated management path.
-ssh-copy-id -i ~/.ssh/id_ed25519_dgx_cluster.pub cerebrus1
-ssh-copy-id -i ~/.ssh/id_ed25519_dgx_cluster.pub cerebrus2
-ssh-copy-id -i ~/.ssh/id_ed25519_dgx_cluster.pub cerebrus3
+ssh-copy-id -i ~/.ssh/id_ed25519_dgx_cluster.pub cerberus1.local
+ssh-copy-id -i ~/.ssh/id_ed25519_dgx_cluster.pub cerberus2.local
+ssh-copy-id -i ~/.ssh/id_ed25519_dgx_cluster.pub cerberus3.local
 
 # Build a cluster-only known-hosts file. Compare every displayed fingerprint
 # with `sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on that host's
 # already authenticated console/session before installing this file.
 cluster_scan="$(mktemp)"
-for host in cerebrus1 cerebrus2 cerebrus3; do
+for host in cerberus1.local cerberus2.local cerberus3.local; do
   ssh-keyscan -H -t ed25519 "$host" >>"${cluster_scan}"
 done
 ssh-keygen -lf "${cluster_scan}"
@@ -199,16 +221,18 @@ rm -f -- "${cluster_scan}"
 # The installer copies only the dedicated keypair and verified cluster
 # known-hosts file; it never copies a general ~/.ssh/config.
 scripts/install-shared-cluster-key.sh --install \
-  cerebrus1 cerebrus2 cerebrus3
+  cerberus1.local cerberus2.local cerberus3.local
 scripts/install-shared-cluster-key.sh --verify \
-  cerebrus1 cerebrus2 cerebrus3
+  cerberus1.local cerberus2.local cerberus3.local
 ```
 
 `ssh/cluster.config.example` is an optional, cluster-only alias block for
-interactive SSH. Review its user/path values and include a copied fragment
-from `~/.ssh/config`; do not replace or distribute a workstation's complete
-SSH configuration. Lifecycle scripts already pass their key options
-explicitly and rely on the installed `/etc/hosts` aliases.
+interactive SSH. It recognizes legacy role spellings as command aliases, but
+every stanza connects to canonical `cerberusN.local` mDNS and contains no
+numeric management address. Review its user/path values and include a copied
+fragment from `~/.ssh/config`; do not replace or distribute a workstation's
+complete SSH configuration. Lifecycle scripts already pass their key options
+explicitly and rely on canonical management DNS.
 
 Use an empty key passphrase only when unattended boot recovery is required,
 and compensate with a dedicated account, trusted management network, and
@@ -383,7 +407,7 @@ cd ~/sparks/dspark_mia
 ./bin/validate-model.sh
 
 remote_profile="$HOME/sparks/dspark_mia/$(basename "${MIA_ENV_FILE}")"
-ssh -i ~/.ssh/id_ed25519_dgx_cluster -o IdentitiesOnly=yes cerebrus2 \
+ssh -i ~/.ssh/id_ed25519_dgx_cluster -o IdentitiesOnly=yes cerberus2 \
   "MIA_ENV_FILE='${remote_profile}' \
    '$HOME/sparks/dspark_mia/bin/validate-model.sh'"
 ```
@@ -471,14 +495,15 @@ Install the read-only dashboard and Nginx front end on C1:
 
 ```bash
 cd ~/sparks
-DASHBOARD_WEB_HOST=cerebrus1.lan \
+DASHBOARD_WEB_HOST=cerberus1.lan \
+DASHBOARD_WEB_ALT_HOST=cerberus1.local \
   scripts/install-dashboard.sh start --web
 ```
 
 The public template binds the Python collector to loopback. Nginx accepts the
-friendly port-80 URL and redirects it to HTTPS. `cerebrus1.lan` is both the
-code default and the canonical dashboard endpoint; set `DASHBOARD_WEB_HOST`
-only when the site's resolvable DNS name differs. On a fresh install the script
+friendly port-80 URL and redirects it to HTTPS. The certificate covers both
+`cerberus1.lan` and the address-independent `cerberus1.local` fallback by
+default. On a fresh install the script
 creates a random Basic-auth password in the mode-0600 host environment; the TLS
 private key and password never enter Git. Configure `DASHBOARD_AUTH` explicitly
 before any direct non-loopback collector bind.
@@ -534,7 +559,7 @@ systemctl is-enabled dgx-spark-dspark-mia.service
 systemctl is-active dgx-spark-dspark-mia.service
 cd ~/sparks/dspark_mia
 ./bin/probe.sh
-CX7_NODE_ROLE=cerebrus1 ../bin/wait-cx7-ready.sh --check-once --scope tp2
+CX7_NODE_ROLE=cerberus1 ../bin/wait-cx7-ready.sh --check-once --scope tp2
 ```
 
 Finally run the checks in [`VALIDATION.md`](VALIDATION.md), including the

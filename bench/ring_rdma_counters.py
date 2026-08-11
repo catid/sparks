@@ -63,7 +63,7 @@ def read_counter(path: Path) -> int:
 
 
 def snapshot(node: str) -> dict:
-    if node not in {"cerebrus1", "cerebrus2", "cerebrus3"}:
+    if node not in {"cerberus1", "cerberus2", "cerberus3"}:
         raise RuntimeError(f"invalid node name: {node}")
     result: dict = {
         "schema": 1,

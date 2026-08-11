@@ -11,8 +11,14 @@ if (($#)); then
 fi
 
 service_user="${SPARK_SERVICE_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
-runtime_root="${VOICE_OPENCLAW_RUNTIME_ROOT:-/opt/cerebrus/openclaw-runtime}"
-secret_file="${VOICE_STACK_SECRET_FILE:-/etc/cerebrus3-voice/gateway.env}"
+runtime_root="${VOICE_OPENCLAW_RUNTIME_ROOT:-/opt/cerberus/openclaw-runtime}"
+legacy_runtime_root="${VOICE_OPENCLAW_LEGACY_RUNTIME_ROOT:-/opt/cerebrus/openclaw-runtime}"
+secret_file="${VOICE_STACK_SECRET_FILE:-/etc/cerberus3-voice/gateway.env}"
+legacy_secret_file="${VOICE_STACK_LEGACY_SECRET_FILE:-/etc/cerebrus3-voice/gateway.env}"
+asr_env_file="${VOICE_STACK_ASR_ENV_FILE:-/etc/default/cerberus3-qwen3-asr}"
+legacy_asr_env_file="${VOICE_STACK_LEGACY_ASR_ENV_FILE:-/etc/default/cerebrus3-qwen3-asr}"
+bridge_env_file="${VOICE_STACK_BRIDGE_ENV_FILE:-/etc/default/cerberus3-voice-bridge}"
+legacy_bridge_env_file="${VOICE_STACK_LEGACY_BRIDGE_ENV_FILE:-/etc/default/cerebrus3-voice-bridge}"
 replace_config=0
 replace_workspace=0
 
@@ -33,7 +39,13 @@ Options:
 Environment:
   SPARK_SERVICE_USER          Runtime account (default: invoking user)
   VOICE_OPENCLAW_RUNTIME_ROOT Pinned runtime root
+  VOICE_OPENCLAW_LEGACY_RUNTIME_ROOT  Pre-rename runtime copied when needed
   VOICE_STACK_SECRET_FILE     Root-owned token dotenv path
+  VOICE_STACK_LEGACY_SECRET_FILE  Pre-rename token dotenv copied when needed
+  VOICE_STACK_ASR_ENV_FILE    Optional root-owned ASR override path
+  VOICE_STACK_LEGACY_ASR_ENV_FILE  Pre-rename ASR override copied when needed
+  VOICE_STACK_BRIDGE_ENV_FILE Optional root-owned bridge override path
+  VOICE_STACK_LEGACY_BRIDGE_ENV_FILE  Pre-rename bridge override copied when needed
 
 The gateway bearer token is generated once, stored root-owned with mode 0600,
 shared with the local voice bridge through systemd, and never printed.
@@ -68,27 +80,36 @@ safe_absolute_path() {
 
 [[ "${service_user}" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || fail "unsafe service user"
 service_uid="$(id -u "${service_user}")"
+service_gid="$(id -g "${service_user}")"
 service_group="$(id -gn "${service_user}")"
 service_home="$(getent passwd "${service_user}" | cut -d: -f6)"
 [[ "${service_uid}" != "0" ]] || fail "services must not run as root"
 [[ "${service_group}" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || fail "unsafe service group"
-for path_value in "${project_dir}" "${service_home}" "${runtime_root}" "${secret_file}"; do
+for path_value in \
+  "${project_dir}" "${service_home}" "${runtime_root}" "${legacy_runtime_root}" \
+  "${secret_file}" "${legacy_secret_file}" \
+  "${asr_env_file}" "${legacy_asr_env_file}" \
+  "${bridge_env_file}" "${legacy_bridge_env_file}"; do
   safe_absolute_path "${path_value}" || fail "unsafe absolute path"
 done
 
-state_dir="${service_home}/.local/state/cerebrus-voice/openclaw"
-workspace="${service_home}/.local/share/cerebrus-voice/workspace"
-cache_dir="${service_home}/.cache/cerebrus-voice/openclaw"
-asr_cache_dir="${service_home}/.cache/cerebrus-voice/qwen3-asr"
+state_dir="${service_home}/.local/state/cerberus-voice/openclaw"
+workspace="${service_home}/.local/share/cerberus-voice/workspace"
+cache_dir="${service_home}/.cache/cerberus-voice/openclaw"
+asr_cache_dir="${service_home}/.cache/cerberus-voice/qwen3-asr"
+legacy_state_dir="${service_home}/.local/state/cerebrus-voice/openclaw"
+legacy_workspace="${service_home}/.local/share/cerebrus-voice/workspace"
+legacy_cache_dir="${service_home}/.cache/cerebrus-voice/openclaw"
+legacy_asr_cache_dir="${service_home}/.cache/cerebrus-voice/qwen3-asr"
 config_path="${state_dir}/openclaw.json"
 node_dir="${runtime_root}/releases/node-v24.15.0-linux-arm64"
 openclaw_release="${runtime_root}/releases/openclaw-2026.7.1-2"
 
 unit_names=(
-  cerebrus3-openclaw-voice.service
-  cerebrus3-qwen3-asr.service
-  cerebrus3-voice-bridge.service
-  cerebrus3-voice-stack.target
+  cerberus3-openclaw-voice.service
+  cerberus3-qwen3-asr.service
+  cerberus3-voice-bridge.service
+  cerberus3-voice-stack.target
 )
 required_files=(
   "${voice_dir}/asr_server.py"
@@ -101,10 +122,11 @@ required_files=(
   "${voice_dir}/openclaw/AGENTS.md"
   "${voice_dir}/openclaw/gateway-wrapper.sh"
   "${voice_dir}/scripts/install-openclaw-runtime.sh"
+  "${voice_dir}/scripts/migrate-legacy-state.py"
   "${voice_dir}/tests/fixtures/fake-node"
   "${voice_dir}/tests/fixtures/fake-openclaw"
   "${voice_dir}/tests/fixtures/fake-openclaw-package.json"
-  "${voice_dir}/tests/fixtures/cerebrus3-audio8.service"
+  "${voice_dir}/tests/fixtures/cerberus3-audio8.service"
 )
 for unit_name in "${unit_names[@]}"; do
   required_files+=("${voice_dir}/systemd/${unit_name}.in")
@@ -129,7 +151,10 @@ bash -n \
   "${voice_dir}/scripts/install-openclaw-runtime.sh" \
   "${voice_dir}/scripts/install-voice-stack.sh"
 python3 -m json.tool "${voice_dir}/openclaw/runtime.lock.json" >/dev/null
-python3 - "${voice_dir}/asr_server.py" "${voice_dir}/voice_bridge.py" <<'PY'
+python3 - \
+  "${voice_dir}/asr_server.py" \
+  "${voice_dir}/voice_bridge.py" \
+  "${voice_dir}/scripts/migrate-legacy-state.py" <<'PY'
 import pathlib
 import sys
 
@@ -145,7 +170,7 @@ rendered_config="${temporary_dir}/openclaw.json"
 
 render_node_dir="${node_dir}"
 render_openclaw_release="${openclaw_release}"
-if [[ "${action}" == "verify" ]]; then
+if [[ "${action}" == "verify" || "${action}" == "prepare" ]]; then
   render_node_dir="${temporary_dir}/pinned-node"
   render_openclaw_release="${temporary_dir}/pinned-openclaw"
   install -d -m 0755 \
@@ -157,8 +182,8 @@ if [[ "${action}" == "verify" ]]; then
     "${render_openclaw_release}/bin/openclaw"
   install -m 0644 "${voice_dir}/tests/fixtures/fake-openclaw-package.json" \
     "${render_openclaw_release}/lib/node_modules/openclaw/package.json"
-  install -m 0644 "${voice_dir}/tests/fixtures/cerebrus3-audio8.service" \
-    "${temporary_dir}/cerebrus3-audio8.service"
+  install -m 0644 "${voice_dir}/tests/fixtures/cerberus3-audio8.service" \
+    "${temporary_dir}/cerberus3-audio8.service"
 fi
 
 python3 - \
@@ -214,10 +239,10 @@ done
 
 SYSTEMD_UNIT_PATH="${temporary_dir}:/usr/local/lib/systemd/system:/usr/lib/systemd/system:/lib/systemd/system" \
   systemd-analyze verify \
-    "${temporary_dir}/cerebrus3-openclaw-voice.service" \
-    "${temporary_dir}/cerebrus3-qwen3-asr.service" \
-    "${temporary_dir}/cerebrus3-voice-bridge.service" \
-    "${temporary_dir}/cerebrus3-voice-stack.target"
+    "${temporary_dir}/cerberus3-openclaw-voice.service" \
+    "${temporary_dir}/cerberus3-qwen3-asr.service" \
+    "${temporary_dir}/cerberus3-voice-bridge.service" \
+    "${temporary_dir}/cerberus3-voice-stack.target"
 
 if [[ "${action}" == "verify" ]]; then
   echo "Verified the Cerberus voice config, wrappers, Python sources, and systemd units."
@@ -225,8 +250,8 @@ if [[ "${action}" == "verify" ]]; then
 fi
 
 case "$(hostname -s)" in
-  cerebrus3|spark3) ;;
-  *) fail "installation is allowed only on cerebrus3 (legacy spark3)" ;;
+  cerberus3|spark3) ;;
+  *) fail "installation is allowed only on cerberus3 (legacy spark3)" ;;
 esac
 
 if ((EUID == 0)); then
@@ -248,11 +273,12 @@ run_as_service_user() {
 
 if [[ "${action}" == "prepare" ]]; then
   VOICE_OPENCLAW_RUNTIME_ROOT="${runtime_root}" \
+  VOICE_OPENCLAW_LEGACY_RUNTIME_ROOT="${legacy_runtime_root}" \
     "${voice_dir}/scripts/install-openclaw-runtime.sh" install
   run_as_service_user "${voice_dir}/download-model.sh"
   run_as_service_user docker build \
     --pull=false \
-    --tag cerebrus/qwen3-asr:1.7b-bcd2b5b7 \
+    --tag cerberus/qwen3-asr:1.7b-bcd2b5b7 \
     --file "${voice_dir}/Dockerfile" \
     "${voice_dir}"
   echo "Prepared pinned OpenClaw and Qwen3 ASR runtimes."
@@ -261,14 +287,67 @@ fi
 
 systemctl_command="$(command -v systemctl || true)"
 [[ -x "${systemctl_command}" ]] || fail "systemctl is required for installation"
-"${systemctl_command}" cat cerebrus3-audio8.service >/dev/null 2>&1 ||
-  fail "cerebrus3-audio8.service is a prerequisite; run scripts/install-audio8.sh start first"
+"${systemctl_command}" cat cerberus3-audio8.service >/dev/null 2>&1 ||
+  fail "cerberus3-audio8.service is a prerequisite; run scripts/install-audio8.sh start first"
 
 VOICE_OPENCLAW_RUNTIME_ROOT="${runtime_root}" \
   "${voice_dir}/scripts/install-openclaw-runtime.sh" verify-installed >/dev/null ||
   fail "pinned OpenClaw runtime is missing; run prepare first"
-docker image inspect cerebrus/qwen3-asr:1.7b-bcd2b5b7 >/dev/null 2>&1 ||
+docker image inspect cerberus/qwen3-asr:1.7b-bcd2b5b7 >/dev/null 2>&1 ||
   fail "pinned Qwen3 ASR image is missing; run prepare first"
+
+legacy_stop_order=(
+  cerebrus3-voice-bridge.service
+  cerebrus3-voice-stack.target
+  cerebrus3-openclaw-voice.service
+  cerebrus3-qwen3-asr.service
+  cerebrus3-audio8.service
+)
+legacy_unit_names=(
+  cerebrus3-openclaw-voice.service
+  cerebrus3-qwen3-asr.service
+  cerebrus3-voice-bridge.service
+  cerebrus3-voice-stack.target
+  cerebrus3-audio8.service
+)
+
+for legacy_unit in "${legacy_stop_order[@]}"; do
+  if "${systemctl_command}" cat "${legacy_unit}" >/dev/null 2>&1; then
+    "${elevate[@]}" systemctl stop "${legacy_unit}"
+  fi
+done
+for legacy_unit in "${legacy_unit_names[@]}"; do
+  if "${systemctl_command}" cat "${legacy_unit}" >/dev/null 2>&1; then
+    "${elevate[@]}" systemctl disable "${legacy_unit}"
+  fi
+  if "${systemctl_command}" is-active --quiet "${legacy_unit}"; then
+    fail "legacy unit remained active after stop: ${legacy_unit}"
+  fi
+done
+run_as_service_user docker rm -f \
+  cerebrus3-qwen-asr cerebrus3-audio8 >/dev/null 2>&1 || true
+if run_as_service_user docker ps --format '{{.Names}}' | \
+    grep -Exq 'cerebrus3-(qwen-asr|audio8)'; then
+  fail "a legacy voice container remained active after stop"
+fi
+
+"${elevate[@]}" python3 "${voice_dir}/scripts/migrate-legacy-state.py" \
+  --legacy-secret "${legacy_secret_file}" \
+  --secret "${secret_file}" \
+  --legacy-asr-env "${legacy_asr_env_file}" \
+  --asr-env "${asr_env_file}" \
+  --legacy-bridge-env "${legacy_bridge_env_file}" \
+  --bridge-env "${bridge_env_file}" \
+  --legacy-state "${legacy_state_dir}" \
+  --state "${state_dir}" \
+  --legacy-workspace "${legacy_workspace}" \
+  --workspace "${workspace}" \
+  --legacy-cache "${legacy_cache_dir}" \
+  --cache "${cache_dir}" \
+  --legacy-asr-cache "${legacy_asr_cache_dir}" \
+  --asr-cache "${asr_cache_dir}" \
+  --service-uid "${service_uid}" \
+  --service-gid "${service_gid}"
 
 "${elevate[@]}" install -d -o "${service_user}" -g "${service_group}" -m 0700 \
   "${state_dir}" "${workspace}" "${cache_dir}" "${asr_cache_dir}"
@@ -362,17 +441,23 @@ for unit_name in "${unit_names[@]}"; do
   "${elevate[@]}" install -o root -g root -m 0644 \
     "${temporary_dir}/${unit_name}" "/etc/systemd/system/${unit_name}"
 done
+for legacy_unit in "${legacy_unit_names[@]}"; do
+  "${elevate[@]}" rm -f -- "/etc/systemd/system/${legacy_unit}"
+done
 "${elevate[@]}" systemctl daemon-reload
+for legacy_unit in "${legacy_unit_names[@]}"; do
+  "${elevate[@]}" systemctl reset-failed "${legacy_unit}" >/dev/null 2>&1 || true
+done
 
 if [[ "${action}" == "enable" || "${action}" == "start" ]]; then
-  "${elevate[@]}" systemctl enable cerebrus3-voice-stack.target
+  "${elevate[@]}" systemctl enable cerberus3-voice-stack.target
 fi
 if [[ "${action}" == "start" ]]; then
-  "${elevate[@]}" systemctl restart cerebrus3-openclaw-voice.service
-  "${elevate[@]}" systemctl restart cerebrus3-qwen3-asr.service
-  "${elevate[@]}" systemctl start cerebrus3-audio8.service
-  "${elevate[@]}" systemctl restart cerebrus3-voice-bridge.service
-  "${elevate[@]}" systemctl start cerebrus3-voice-stack.target
+  "${elevate[@]}" systemctl restart cerberus3-openclaw-voice.service
+  "${elevate[@]}" systemctl restart cerberus3-qwen3-asr.service
+  "${elevate[@]}" systemctl start cerberus3-audio8.service
+  "${elevate[@]}" systemctl restart cerberus3-voice-bridge.service
+  "${elevate[@]}" systemctl start cerberus3-voice-stack.target
 fi
 
 echo "Installed Cerberus voice services for unprivileged user ${service_user}."

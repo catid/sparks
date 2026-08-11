@@ -30,6 +30,7 @@ done
 
 for rank in 2 1; do
   host="$(rank_host "${rank}")"
+  transport_host="$(management_ssh_host "${host}")"
   if ssh_command "${host}" test -e "${REMOTE_INSTALL_DIR}"; then
     ssh_command "${host}" test -d "${REMOTE_INSTALL_DIR}"
     ssh_command "${host}" test ! -L "${REMOTE_INSTALL_DIR}"
@@ -52,7 +53,7 @@ for rank in 2 1; do
     --exclude='logs/' \
     -e "${rsync_ssh}" \
     "${MIA3_ROOT}/" \
-    "${host}:${REMOTE_INSTALL_DIR}/"
+    "${transport_host}:${REMOTE_INSTALL_DIR}/"
   remote_digest="$(ssh_command "${host}" "${REMOTE_INSTALL_DIR}/bin/tree-digest.sh")"
   [[ "${remote_digest}" == "${local_digest}" ]] || {
     echo "${host}: synced integration digest differs from ${HEAD_HOST}." >&2

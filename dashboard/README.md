@@ -2,8 +2,8 @@
 
 This is a dependency-free, read-only dashboard for the two-rank DSpark
 deployment. Its default topology is the current tensor-parallel service:
-C1/rank 0 owns the only vLLM HTTP endpoint and exports cluster-wide counters,
-while C2/rank 1 is a headless worker. It samples
+Cerberus 1/rank 0 owns the only vLLM HTTP endpoint and exports cluster-wide
+counters, while Cerberus 2/rank 1 is a headless worker. It samples
 every two seconds and reports:
 
 - GPU temperature, power, utilization, and SM clock
@@ -19,7 +19,7 @@ every two seconds and reports:
   alongside Linux interface state, MTU, and error totals for all four local
   CX-7 functions (production TP2 uses the two functions facing the direct edge)
 - rolling three-minute server-retained plots for aggregate generation
-  throughput and C1/C2 GPU and CPU-cluster temperatures
+  throughput and Cerberus 1/2 GPU and CPU-cluster temperatures
 
 GB10 does not expose a discrete framebuffer total through `nvidia-smi`.
 Unified-memory use and vLLM RSS are therefore the truthful memory measurements.
@@ -41,7 +41,7 @@ dashboard/run-dashboard.sh
 ```
 
 Nginx exposes the dashboard on standard web ports. Open
-<http://cerebrus1.lan> or <https://cerebrus1.lan>; cleartext HTTP redirects to
+<http://cerberus1.lan> or <https://cerberus1.lan>; cleartext HTTP redirects to
 HTTPS so Basic credentials are never sent unencrypted. The private `.lan`
 endpoint uses a self-signed certificate, so the browser requires a one-time
 trust exception unless the certificate is imported locally.
@@ -53,7 +53,7 @@ Binding the collector itself directly to the LAN still requires Basic
 authentication:
 
 ```bash
-DASHBOARD_HOST=cerebrus1.lan \
+DASHBOARD_HOST=cerberus1.lan \
 DASHBOARD_AUTH='operator:a-long-random-password' \
 dashboard/run-dashboard.sh
 ```
@@ -71,6 +71,13 @@ SPARK1_VLLM_ROLE=aggregate
 SPARK2_VLLM_ROLE=worker
 SPARK1_VLLM_URL=http://127.0.0.1:8889
 ```
+
+The `SPARK1_*` and `SPARK2_*` variable names are retained as a stable
+deployment interface. They configure Cerberus 1 and Cerberus 2 respectively;
+the JSON API and browser UI publish only the canonical `cerberus1` and
+`cerberus2` node identities. The browser tolerates historical `spark1` and
+`spark2` JSON keys during a rolling upgrade but immediately renders them as
+Cerberus.
 
 `aggregate` means the endpoint's Prometheus counters cover the complete
 multi-rank request. `worker` suppresses HTTP scraping and API-derived token,
@@ -91,7 +98,7 @@ The older two-independent-replica deployment remains available:
 DASHBOARD_INFERENCE_MODE=router
 SPARK1_VLLM_ROLE=replica
 SPARK2_VLLM_ROLE=replica
-SPARK2_VLLM_URL=http://192.168.100.11:8000
+SPARK2_VLLM_URL=http://cerberus2.local:8000
 VLLM_ROUTER_URL=http://127.0.0.1:8080
 VLLM_ROUTER_METRICS_URL=http://127.0.0.1:29000
 ```
@@ -119,7 +126,7 @@ sudo sed -n 's/^DASHBOARD_AUTH=//p' \
   /etc/default/dgx-spark-laguna-dashboard
 ```
 
-Open <http://cerebrus1.lan> or <https://cerebrus1.lan>; the former redirects to the
+Open <http://cerberus1.lan> or <https://cerberus1.lan>; the former redirects to the
 latter. HTTPS uses a locally generated self-signed certificate. Existing
 environment files are preserved; use
 `--replace-environment` only when you intend to deploy a replacement. The
@@ -131,18 +138,19 @@ Only the installer's `start` action restarts the collector.
 
 ## Dedicated collector host
 
-The dashboard can later move to a third Linux host so neither Spark carries
-its process or in-memory plot history. Set `SPARK1_SSH_HOST` to opt into
-read-only SSH collection for Spark 1; Spark 2 remains remote as before. The
-sanitized `dashboard.remote.env.example`, fixed-command SSH probe, hardened
-systemd install flow, host-key pinning, firewall guidance, and cutover/rollback
-procedure are documented in
+The dashboard can later move to a third Linux host so neither Cerberus node
+carries its process or in-memory plot history. Set `SPARK1_SSH_HOST` to opt
+into read-only SSH collection for Cerberus 1; Cerberus 2 remains remote as
+before. The sanitized `dashboard.remote.env.example`, fixed-command SSH probe,
+hardened systemd install flow, host-key pinning, firewall guidance, and
+cutover/rollback procedure are documented in
 [`docs/REMOTE_DASHBOARD.md`](../docs/REMOTE_DASHBOARD.md).
 
-Leaving `SPARK1_SSH_HOST` unset preserves the current on-Spark behavior.
+Leaving `SPARK1_SSH_HOST` unset preserves the current on-Cerberus-1 behavior.
 
 ## API
 
 `GET /api/status` returns the exact JSON used by the UI. All probes are
 read-only. When `DASHBOARD_AUTH` is configured, both the UI and API require
-HTTP Basic authentication.
+HTTP Basic authentication. Node records, affected-node lists, metric-source
+lists, and history records use `cerberus1` and `cerberus2` keys.

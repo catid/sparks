@@ -1,7 +1,7 @@
 # Software inventory and pins
 
 This is the reproducibility snapshot from the serving pair on 2026-07-29,
-rechecked on newly provisioned `cerebrus3` on 2026-08-10. Versions are evidence
+rechecked on newly provisioned `cerberus3` on 2026-08-10. Versions are evidence
 of the working deployment, not an instruction to downgrade a newer supported
 DGX OS automatically.
 
@@ -29,7 +29,7 @@ All three nodes matched unless noted:
 | OpenSSH | 9.6p1 |
 | ethtool | 6.7 |
 | nvme-cli | 2.8 |
-| Nginx, `cerebrus1` only | 1.24.0 |
+| Nginx, `cerberus1` only | 1.24.0 |
 
 Do not copy `/etc/dgx-release` into an issue or report: it includes the
 machine's serial number. Record only its software-build and OTA fields.

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Validate the fixed three-node DGX Spark ring. Each physical CX-7 port exposes
 # two logical Ethernet/RDMA links. Production TP2 intentionally checks only
-# the direct cerebrus1-P1 <-> cerebrus2-P0 edge, so cerebrus3 cannot block it.
+# the direct cerberus1-P1 <-> cerberus2-P0 edge, so cerberus3 cannot block it.
 
 readonly -a cx7_interfaces=(
   enp1s0f0np0
@@ -30,11 +30,11 @@ Usage: wait-cx7-ready.sh [--wait|--check-once|--describe] [--scope ring|tp2] \
 
 Scopes:
   ring  Validate both local physical ports: four logical links to two peers.
-  tp2   Validate only cerebrus1-P1 <-> cerebrus2-P0: two logical links.
+  tp2   Validate only cerberus1-P1 <-> cerberus2-P0: two logical links.
 
 Environment:
-  CX7_NODE_ROLE             cerebrus1, cerebrus2, or cerebrus3. Exact spark1,
-                            spark2, and spark3 aliases remain transitional.
+  CX7_NODE_ROLE             cerberus1, cerberus2, or cerberus3. Legacy
+                            cerebrus1-3 and spark1-3 aliases are accepted.
                             The short hostname is used by default.
   CX7_SCOPE                 ring (default) or tp2; overridden by --scope.
   CX7_C3_PORT_MAP           c3-p0-to-c1 (current canonical default) or
@@ -52,9 +52,9 @@ EOF
 
 canonical_role() {
   case "$1" in
-    cerebrus1|spark1) printf 'cerebrus1\n' ;;
-    cerebrus2|spark2) printf 'cerebrus2\n' ;;
-    cerebrus3|spark3) printf 'cerebrus3\n' ;;
+    cerberus1|cerebrus1|spark1) printf 'cerberus1\n' ;;
+    cerberus2|cerebrus2|spark2) printf 'cerberus2\n' ;;
+    cerberus3|cerebrus3|spark3) printf 'cerberus3\n' ;;
     *) return 1 ;;
   esac
 }
@@ -134,11 +134,11 @@ if ((expected_mtu < 576 || expected_speed < 1 || poll_seconds < 1 || ping_timeou
 fi
 
 if ! node_role="$(canonical_role "${requested_role}")"; then
-  echo "Cannot infer a ring role from ${requested_role}; set CX7_NODE_ROLE to cerebrus1, cerebrus2, or cerebrus3." >&2
+  echo "Cannot infer a ring role from ${requested_role}; set CX7_NODE_ROLE to cerberus1, cerberus2, or cerberus3." >&2
   exit 2
 fi
-if [[ "${scope}" == "tp2" && "${node_role}" == "cerebrus3" ]]; then
-  echo "The production tp2 scope exists only on cerebrus1 and cerebrus2." >&2
+if [[ "${scope}" == "tp2" && "${node_role}" == "cerberus3" ]]; then
+  echo "The production tp2 scope exists only on cerberus1 and cerberus2." >&2
   exit 2
 fi
 
@@ -148,35 +148,35 @@ declare -a peer_nodes=()
 declare -a edge_names=()
 
 case "${node_role}" in
-  cerebrus1)
-    # P0 <-> the selected cerebrus3 port; P1 <-> cerebrus2 P0.
+  cerberus1)
+    # P0 <-> the selected cerberus3 port; P1 <-> cerberus2 P0.
     local_cidrs=(192.168.2.1/24 192.168.3.1/24 192.168.0.1/24 192.168.1.1/24)
     peer_ips=(192.168.2.2 192.168.3.2 192.168.0.2 192.168.1.2)
-    peer_nodes=(cerebrus3 cerebrus3 cerebrus2 cerebrus2)
-    edge_names=(cerebrus1-cerebrus3 cerebrus1-cerebrus3 cerebrus1-cerebrus2 cerebrus1-cerebrus2)
+    peer_nodes=(cerberus3 cerberus3 cerberus2 cerberus2)
+    edge_names=(cerberus1-cerberus3 cerberus1-cerberus3 cerberus1-cerberus2 cerberus1-cerberus2)
     ;;
-  cerebrus2)
-    # P0 <-> cerebrus1 P1; P1 <-> the selected cerebrus3 port.
+  cerberus2)
+    # P0 <-> cerberus1 P1; P1 <-> the selected cerberus3 port.
     local_cidrs=(192.168.0.2/24 192.168.1.2/24 192.168.4.1/24 192.168.5.1/24)
     peer_ips=(192.168.0.1 192.168.1.1 192.168.4.2 192.168.5.2)
-    peer_nodes=(cerebrus1 cerebrus1 cerebrus3 cerebrus3)
-    edge_names=(cerebrus1-cerebrus2 cerebrus1-cerebrus2 cerebrus2-cerebrus3 cerebrus2-cerebrus3)
+    peer_nodes=(cerberus1 cerberus1 cerberus3 cerberus3)
+    edge_names=(cerberus1-cerberus2 cerberus1-cerberus2 cerberus2-cerberus3 cerberus2-cerberus3)
     ;;
-  cerebrus3)
+  cerberus3)
     case "${c3_port_map}" in
       c3-p0-to-c1)
         # Current canonical wiring: C3 P0 <-> C1 P0; C3 P1 <-> C2 P1.
         local_cidrs=(192.168.2.2/24 192.168.3.2/24 192.168.4.2/24 192.168.5.2/24)
         peer_ips=(192.168.2.1 192.168.3.1 192.168.4.1 192.168.5.1)
-        peer_nodes=(cerebrus1 cerebrus1 cerebrus2 cerebrus2)
-        edge_names=(cerebrus1-cerebrus3 cerebrus1-cerebrus3 cerebrus2-cerebrus3 cerebrus2-cerebrus3)
+        peer_nodes=(cerberus1 cerberus1 cerberus2 cerberus2)
+        edge_names=(cerberus1-cerberus3 cerberus1-cerberus3 cerberus2-cerberus3 cerberus2-cerberus3)
         ;;
       c3-p0-to-c2)
         # NVIDIA crossed wiring: C3 P0 <-> C2 P1; C3 P1 <-> C1 P0.
         local_cidrs=(192.168.4.2/24 192.168.5.2/24 192.168.2.2/24 192.168.3.2/24)
         peer_ips=(192.168.4.1 192.168.5.1 192.168.2.1 192.168.3.1)
-        peer_nodes=(cerebrus2 cerebrus2 cerebrus1 cerebrus1)
-        edge_names=(cerebrus2-cerebrus3 cerebrus2-cerebrus3 cerebrus1-cerebrus3 cerebrus1-cerebrus3)
+        peer_nodes=(cerberus2 cerberus2 cerberus1 cerberus1)
+        edge_names=(cerberus2-cerberus3 cerberus2-cerberus3 cerberus1-cerberus3 cerberus1-cerberus3)
         ;;
     esac
     ;;
@@ -185,7 +185,7 @@ esac
 declare -a selected_indices=()
 for index in "${!cx7_interfaces[@]}"; do
   if [[ "${scope}" == "ring" ||
-        "${edge_names[index]}" == "cerebrus1-cerebrus2" ]]; then
+        "${edge_names[index]}" == "cerberus1-cerberus2" ]]; then
     selected_indices+=("${index}")
   fi
 done
@@ -195,7 +195,7 @@ describe_layout() {
   local index
   printf 'node_role=%s scope=%s logical_links=%s expected_mtu=%s' \
     "${node_role}" "${scope}" "${selected_count}" "${expected_mtu}"
-  if [[ "${node_role}" == "cerebrus3" ]]; then
+  if [[ "${node_role}" == "cerberus3" ]]; then
     printf ' c3_port_map=%s' "${c3_port_map}"
   fi
   printf '\n'

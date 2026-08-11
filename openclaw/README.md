@@ -4,7 +4,7 @@ The validated topology keeps OpenClaw on a third computer and uses the two
 Sparks only as a TP2 token server:
 
 ```text
-OpenClaw host -> http://spark1.lan:8889/v1 -> Spark 1 + Spark 2
+OpenClaw host -> http://cerberus1.local:8889/v1 -> Cerberus 1 + Cerberus 2
 ```
 
 The July 2026 deployment was qualified with OpenClaw `2026.7.1-2` on an

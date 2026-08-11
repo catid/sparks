@@ -1,5 +1,5 @@
 [Unit]
-Description=Wait for the cerebrus1-cerebrus2 TP2 RoCE edge
+Description=Wait for the cerberus1-cerberus2 TP2 RoCE edge
 Documentation=file:/home/catid/dgx-spark-laguna/systemd/README-deepseek-v4.md
 Wants=NetworkManager.service network-online.target
 After=NetworkManager.service network-online.target local-fs.target

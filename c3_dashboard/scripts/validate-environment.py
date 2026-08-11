@@ -12,7 +12,7 @@ from urllib.parse import SplitResult, urlsplit
 NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 OUTPUT = re.compile(r"^[A-Za-z0-9_.:-]+$")
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
-EXPECTED_NODES = ("cerebrus1", "cerebrus2", "cerebrus3")
+EXPECTED_NODES = ("cerberus1", "cerberus2", "cerberus3")
 REQUIRED = frozenset(
     {
         "C3_DASHBOARD_HOST",
@@ -117,7 +117,7 @@ def validate(values: dict[str, str]) -> None:
 
     nodes = tuple(node.strip() for node in values["C3_DASHBOARD_NODES"].split(","))
     if nodes != EXPECTED_NODES:
-        fail("C3_DASHBOARD_NODES must be cerebrus1,cerebrus2,cerebrus3")
+        fail("C3_DASHBOARD_NODES must be cerberus1,cerberus2,cerberus3")
 
     metrics = validated_url(
         values["C3_DASHBOARD_VLLM_METRICS_URL"],
@@ -125,7 +125,12 @@ def validate(values: dict[str, str]) -> None:
     )
     if (
         metrics.scheme != "http"
-        or metrics.hostname not in {"cerebrus1", "spark1"}
+        or metrics.hostname not in {
+            "cerberus1",
+            "cerberus1.lan",
+            "cerberus1.local",
+            "spark1",
+        }
         or (metrics.port or 80) != 8889
         or metrics.path != "/metrics"
         or metrics.query

@@ -4,9 +4,9 @@ This repository captures an audited live deployment for serving the pinned
 `apetersson/DeepSeek-V4-Flash-0731-Abliterated-FP8` revision across two ranks
 on a three-node NVIDIA DGX Spark ring, together with reproducible fresh-host
 automation. The original `deepseek-ai/DeepSeek-V4-Flash-DSpark` lock remains
-available as a reference profile. `cerebrus1`
-owns the OpenAI-compatible endpoint and supervises both ranks; `cerebrus2` is
-a headless worker; `cerebrus3` completes the physical ring but is not a vLLM
+available as a reference profile. `cerberus1`
+owns the OpenAI-compatible endpoint and supervises both ranks; `cerberus2` is
+a headless worker; `cerberus3` completes the physical ring but is not a vLLM
 rank. The selected
 profile uses TP=2, native DSpark speculative decoding (`k=5`), NVFP4 DS-MLA KV
 cache, FlashInfer B12X kernels, thinking mode, and the two logical RoCE links
@@ -14,13 +14,14 @@ on the direct C1-P1 to C2-P0 edge. The active scheduler is the C8 agent profile;
 the C32 throughput profile remains available for bulk request waves.
 
 The active pair and its installed artifacts were inspected directly. The
-fresh-host tooling was also replayed on newly unboxed `cerebrus3`: DGX updates,
+fresh-host tooling was also replayed on newly unboxed `cerberus3`: DGX updates,
 firmware inspection, host packages, headless boot, performance governor, ring Netplan,
 pinned image, and exact checkpoint were validated there. A completely fresh
 two-rank serving pair has not yet been rebuilt solely from the public runbook.
 
-The canonical model endpoint is `http://cerebrus1:8889/v1`. The dashboard
-defaults to `https://cerebrus1.lan` (self-signed certificate).
+The canonical model endpoint is `http://cerberus1.local:8889/v1`. The
+dashboard certificate covers both `https://cerberus1.lan` and
+`https://cerberus1.local` by default.
 
 ## Give an installer temporary sudo access first
 
@@ -165,9 +166,9 @@ minutes for weight loading, warm-up, and CUDA-graph capture.
 - `systemd/`, `netplan/`, `dashboard/`, `security/`, `libexec/`: installed
   artifacts plus portable templates
 - `c3_dashboard/`: lightweight three-host collector and 1424x280 rootless-X
-  rack kiosk for Cerberus node 3 (`cerebrus3`)
+  rack kiosk for Cerberus node 3 (`cerberus3`)
 - `audio8/`: pinned Audio8 0.6B BF16 TTS container and service wrapper for
-  Cerberus node 3 (`cerebrus3`); reference media remains private
+  Cerberus node 3 (`cerberus3`); reference media remains private
 - `voice_assistant/`: pinned Qwen3-ASR, RAM-only CP900 wake bridge, isolated
   OpenClaw voice agent, and boot-persistent C3 systemd units
 - `deepseek_v4_bench/`: fixed-length realistic streaming benchmark

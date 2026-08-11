@@ -72,7 +72,7 @@ class WavValidationTests(unittest.TestCase):
     def test_vocabulary_prompt_is_bounded_and_single_line(self) -> None:
         expected = (
             "Vocabulary: Cerberus, Cerberus One, Cerberus Two, Cerberus Three, "
-            "cerebrus1, cerebrus2, cerebrus3."
+            "cerberus1, cerberus2, cerberus3."
         )
         self.assertEqual(
             self.module.validate_vocabulary_prompt(expected),

@@ -16,7 +16,7 @@ const statusPayload = {
   generated_at: "2026-08-10T18:30:05Z",
   interval_seconds: 5,
   hosts: {
-    cerebrus1: {
+    cerberus1: {
       state: "online",
       error: null,
       cpu_percent: 21.2,
@@ -30,7 +30,7 @@ const statusPayload = {
       ram_total_bytes: 128000000000,
       age_seconds: 1.2,
     },
-    cerebrus2: {
+    cerberus2: {
       state: "online",
       error: null,
       cpu_percent: 31.7,
@@ -42,7 +42,7 @@ const statusPayload = {
       ram_temperature_c: null,
       age_seconds: 0.8,
     },
-    cerebrus3: {
+    cerberus3: {
       state: "online",
       error: null,
       cpu_percent: 18.5,
@@ -75,9 +75,9 @@ const statusPayload = {
       cluster: { cpu_percent: 20, gpu_percent: 65, ram_percent: 62 },
       throughput: { state: "online", tokens_per_second: 132 },
       hosts: {
-        cerebrus1: { state: "online", cpu_percent: 19, gpu_percent: 63, ram_percent: 62, cpu_temperature_c: 47, gpu_temperature_c: 50, soc_temperature_c: 46, ram_temperature_c: null },
-        cerebrus2: { state: "online", cpu_percent: 29, gpu_percent: 68, ram_percent: 64, cpu_temperature_c: 48, gpu_temperature_c: 51, soc_temperature_c: 47, ram_temperature_c: null },
-        cerebrus3: { state: "online", cpu_percent: 12, gpu_percent: 61, ram_percent: 59, cpu_temperature_c: 44, gpu_temperature_c: 48, soc_temperature_c: 44, ram_temperature_c: null },
+        cerberus1: { state: "online", cpu_percent: 19, gpu_percent: 63, ram_percent: 62, cpu_temperature_c: 47, gpu_temperature_c: 50, soc_temperature_c: 46, ram_temperature_c: null },
+        cerberus2: { state: "online", cpu_percent: 29, gpu_percent: 68, ram_percent: 64, cpu_temperature_c: 48, gpu_temperature_c: 51, soc_temperature_c: 47, ram_temperature_c: null },
+        cerberus3: { state: "online", cpu_percent: 12, gpu_percent: 61, ram_percent: 59, cpu_temperature_c: 44, gpu_temperature_c: 48, soc_temperature_c: 44, ram_temperature_c: null },
       },
     },
     {
@@ -85,9 +85,9 @@ const statusPayload = {
       cluster: { cpu_percent: 22, gpu_percent: 70, ram_percent: 63 },
       throughput: { state: "online", tokens_per_second: 140 },
       hosts: {
-        cerebrus1: { state: "online", cpu_percent: 20, gpu_percent: 70, ram_percent: 63, cpu_temperature_c: 48, gpu_temperature_c: 51, soc_temperature_c: 46, ram_temperature_c: null },
-        cerebrus2: { state: "online", cpu_percent: 32, gpu_percent: 74, ram_percent: 65, cpu_temperature_c: 49, gpu_temperature_c: 52, soc_temperature_c: 47, ram_temperature_c: null },
-        cerebrus3: { state: "online", cpu_percent: 18, gpu_percent: 68, ram_percent: 61, cpu_temperature_c: 45, gpu_temperature_c: 49, soc_temperature_c: 45, ram_temperature_c: null },
+        cerberus1: { state: "online", cpu_percent: 20, gpu_percent: 70, ram_percent: 63, cpu_temperature_c: 48, gpu_temperature_c: 51, soc_temperature_c: 46, ram_temperature_c: null },
+        cerberus2: { state: "online", cpu_percent: 32, gpu_percent: 74, ram_percent: 65, cpu_temperature_c: 49, gpu_temperature_c: 52, soc_temperature_c: 47, ram_temperature_c: null },
+        cerberus3: { state: "online", cpu_percent: 18, gpu_percent: 68, ram_percent: 61, cpu_temperature_c: 45, gpu_temperature_c: 49, soc_temperature_c: 45, ram_temperature_c: null },
       },
     },
   ],
@@ -167,10 +167,10 @@ test("normalizes the backend status contract without treating missing data as ze
   assert.equal(sparse.throughput.tokens_per_second, null);
 });
 
-test("accepts the common C1, Spark 2, and cerebrus3 host labels", () => {
+test("accepts the common C1, Spark 2, and cerberus3 host labels", () => {
   assert.equal(ui.hostSlot("C1", {}, 0), 1);
   assert.equal(ui.hostSlot("Spark 2", {}, 0), 2);
-  assert.equal(ui.hostSlot("telemetry", { hostname: "cerebrus3" }, 0), 3);
+  assert.equal(ui.hostSlot("telemetry", { hostname: "cerberus3" }, 0), 3);
 });
 
 test("builds independent host graphs and API-wide token history", () => {
@@ -187,9 +187,9 @@ test("builds independent host graphs and API-wide token history", () => {
 
 test("missing host samples remain gaps rather than cluster-average fallbacks", () => {
   const payload = ui.normalizePayload({
-    hosts: { cerebrus1: { state: "online", cpu_percent: 25 } },
+    hosts: { cerberus1: { state: "online", cpu_percent: 25 } },
     history: [
-      { hosts: { cerebrus1: { cpu_percent: 10 } } },
+      { hosts: { cerberus1: { cpu_percent: 10 } } },
       { cluster: { cpu_percent: 99 }, hosts: {} },
     ],
   });

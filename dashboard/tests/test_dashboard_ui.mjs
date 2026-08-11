@@ -18,7 +18,7 @@ test("down endpoint uses the cluster health contract", () => {
       state: "down",
       healthy: false,
       endpoint_healthy: false,
-      affected_nodes: ["spark1", "spark2"],
+      affected_nodes: ["cerberus1", "cerberus2"],
       reason: "rank 1 worker is unreachable",
       outage_started_at: "2026-07-29T11:58:00Z",
       outage_elapsed_seconds: 125,
@@ -26,7 +26,7 @@ test("down endpoint uses the cluster health contract", () => {
       endpoint: {
         healthy: false,
         state: "down",
-        url: "http://spark1:8889/v1",
+        url: "http://cerberus1:8889/v1",
         reason: "endpoint refused connection",
       },
     },
@@ -36,9 +36,25 @@ test("down endpoint uses the cluster health contract", () => {
   assert.equal(model.label, "ENDPOINT DOWN");
   assert.equal(model.title, "Inference requests are unavailable");
   assert.equal(model.reason, "rank 1 worker is unreachable");
-  assert.deepEqual(Array.from(model.affected), ["spark1", "spark2"]);
+  assert.deepEqual(Array.from(model.affected), ["cerberus1", "cerberus2"]);
   assert.equal(model.elapsedLabel, "Down for");
   assert.equal(model.outageElapsed, 125);
+});
+
+test("historical Spark API keys are accepted but normalized before display", () => {
+  const model = ui.healthViewModel({
+    cluster: { state: "down", affected_nodes: ["spark1", "spark2"] },
+  });
+  const nodes = ui.canonicalNodes({
+    spark1: { marker: "legacy-rank0" },
+    spark2: { marker: "legacy-rank1" },
+    cerberus1: { marker: "canonical-rank0" },
+  });
+
+  assert.deepEqual(Array.from(model.affected), ["cerberus1", "cerberus2"]);
+  assert.equal(nodes.cerberus1.marker, "canonical-rank0");
+  assert.equal(nodes.cerberus2.marker, "legacy-rank1");
+  assert.equal(nodes.spark1, undefined);
 });
 
 test("degraded endpoint remains distinct from a full outage", () => {
@@ -47,7 +63,7 @@ test("degraded endpoint remains distinct from a full outage", () => {
       state: "degraded",
       healthy: false,
       endpoint_healthy: true,
-      affected_nodes: ["spark2"],
+      affected_nodes: ["cerberus2"],
       reason: "one replica is offline",
       outage_elapsed_seconds: 72,
     },
@@ -66,7 +82,7 @@ test("recovering state reports both outage and recovery timers", () => {
       state: "recovering",
       healthy: false,
       endpoint_healthy: true,
-      affected_nodes: ["spark2"],
+      affected_nodes: ["cerberus2"],
       reason: "",
       outage_elapsed_seconds: 605,
       recovery_started_at: "2026-07-29T12:10:00Z",
@@ -139,7 +155,7 @@ test("renderer makes outages prominent and collapses a healthy state", () => {
   ui.renderClusterHealth(ui.healthViewModel({
     cluster: {
       state: "down",
-      affected_nodes: ["spark2"],
+      affected_nodes: ["cerberus2"],
       reason: "worker unreachable",
       outage_elapsed_seconds: 91,
     },
@@ -147,9 +163,9 @@ test("renderer makes outages prominent and collapses a healthy state", () => {
   assert.equal(elements["cluster-health"].className, "cluster-health cluster-health--down");
   assert.equal(elements["health-state"].textContent, "ENDPOINT DOWN");
   assert.equal(elements["health-affected-item"].hidden, false);
-  assert.equal(elements["health-affected"].textContent, "spark2");
+  assert.equal(elements["health-affected"].textContent, "Cerberus 2");
   assert.equal(elements["health-elapsed"].textContent, "1m 31s");
-  assert.equal(context.document.title, "DOWN · Spark Array");
+  assert.equal(context.document.title, "DOWN · Cerberus Cluster");
 
   ui.renderClusterHealth(ui.healthViewModel({
     cluster: { state: "serving", affected_nodes: [], reason: "" },
@@ -157,7 +173,7 @@ test("renderer makes outages prominent and collapses a healthy state", () => {
   assert.equal(elements["cluster-health"].className, "cluster-health cluster-health--serving");
   assert.equal(elements["health-affected-item"].hidden, true);
   assert.equal(elements["health-elapsed-item"].hidden, true);
-  assert.equal(context.document.title, "Spark Array");
+  assert.equal(context.document.title, "Cerberus Cluster");
 });
 
 test("health banner has accessible fixed fields and state styling", () => {
@@ -177,6 +193,9 @@ test("health banner has accessible fixed fields and state styling", () => {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /aria-live="assertive"/);
+  assert.match(html, /Cerberus 1 GPU/);
+  assert.match(html, /Cerberus 2 GPU/);
+  assert.doesNotMatch(html, /Spark [12] (?:GPU|CPU)/);
   for (const state of ["serving", "degraded", "down", "recovering", "starting", "stale"]) {
     assert.match(css, new RegExp(`\\.cluster-health--${state}\\b`));
   }

@@ -9,12 +9,13 @@
 > four-link layout, ports, model settings, and controller below describe the
 > historical installation only.
 
-This layout runs one logical vLLM server using TP2 across the two DGX Sparks:
+This layout runs one logical vLLM server using TP2 across two DGX Spark nodes:
 
-- Spark 1 owns API port `8000`, NCCL rendezvous port `29618`, and the cluster
+- Cerberus 1 owns API port `8000`, NCCL rendezvous port `29618`, and the cluster
   restart generation.
-- Spark 2 runs a headless rank. Its service is installed but not enabled; the
-  Spark 1 rank starts and stops it over the direct `192.168.100.0/24` rail.
+- Cerberus 2 runs a headless rank. Its service is installed but not enabled;
+  the Cerberus 1 rank starts and stops it over the direct
+  `192.168.100.0/24` rail.
 - Both ranks wait for all four MTU-9000 RoCE links, their expected addresses,
   active RDMA state, and their direct peer before launching.
 - The readiness unit is a non-resident oneshot, so every initial start and
@@ -22,22 +23,28 @@ This layout runs one logical vLLM server using TP2 across the two DGX Sparks:
   `NoNewPrivileges=true` and receives only `CAP_NET_RAW`, which the ICMP peer
   probes require on the current hosts.
 
+The operational helpers name the nodes `cerberus1` and `cerberus2`. Their host
+gates still accept `cerebrusN` and `sparkN` as migration-only input aliases;
+new SSH management connections default to canonical `cerberusN.local` mDNS.
+Direct CX-7 addresses below are fixed fabric addresses, not DHCP management
+addresses.
+
 Repository files:
 
-- `dgx-spark-cx7-ready.service`: install on both Sparks.
-- `dgx-spark-deepseek-v4-rank0.service`: install and enable only on Spark 1.
-- `dgx-spark-deepseek-v4-rank1.service`: install on Spark 2, but do not enable.
+- `dgx-spark-cx7-ready.service`: install on both Cerberus nodes.
+- `dgx-spark-deepseek-v4-rank0.service`: install and enable only on Cerberus 1.
+- `dgx-spark-deepseek-v4-rank1.service`: install on Cerberus 2, but do not enable.
 - `dgx-spark-deepseek-v4.env.example`: copy to
   `/etc/dgx-spark-deepseek-v4.env` on both nodes and keep inference values
   identical. The checked-in historical profile runs both target and DFlash
   eager, uses `0.90` GPU-memory utilization, and auto-fits one maximum-context
   request (`DEEPSEEK_MAX_MODEL_LEN=-1`, `DEEPSEEK_MAX_NUM_SEQS=1`).
 - `libexec/dgx-spark-deepseek-v4-rank1-control`: root-owned forced-command
-  endpoint installed only on Spark 2.
+  endpoint installed only on Cerberus 2.
 - `security/dgx-spark-deepseek-v4-rank1-control.sudoers`: exact three-command
-  sudo policy installed only on Spark 2.
+  sudo policy installed only on Cerberus 2.
 - `bin/install-deepseek-v4-rank1-control.sh`: non-service installer for the
-  dedicated key and its Spark 2 policy.
+  dedicated key and its Cerberus 2 policy.
 
 Synchronize this repository at the same absolute path on both hosts, then run
 the side-effect-free validator on each:
@@ -61,7 +68,7 @@ Rank 0 uses a dedicated Ed25519 key at:
 /home/catid/.ssh/id_ed25519_deepseek_v4_rank1_control
 ```
 
-It does not use or replace the general cluster key. The corresponding Spark 2
+It does not use or replace the general cluster key. The corresponding Cerberus 2
 `authorized_keys` entry is source-restricted to `192.168.100.10`, uses
 OpenSSH's `restrict` option, and forces the root-owned wrapper:
 
@@ -70,7 +77,7 @@ from="192.168.100.10",restrict,command="/usr/local/libexec/dgx-spark-deepseek-v4
 ```
 
 The controller sends one of three opaque versioned request tokens. They are
-intentionally not valid Spark 2 shell commands. The wrapper accepts exact
+intentionally not valid Cerberus 2 shell commands. The wrapper accepts exact
 matches only and maps them to:
 
 - unprivileged `systemctl show` for `LoadState`, `ActiveState`, `SubState`,
@@ -84,7 +91,7 @@ requests, forwarding, and every other SSH operation are denied. A successful
 forced-mode status probe therefore verifies both SSH access and forced-wrapper
 dispatch while preserving the controller's existing `Key=Value` status parser.
 
-Spark 2 grants passwordless root permission for exactly:
+Cerberus 2 grants passwordless root permission for exactly:
 
 ```text
 /usr/bin/systemctl reset-failed dgx-spark-deepseek-v4-rank1.service
@@ -111,7 +118,7 @@ steps 1-5 do not install, enable, or disable one either.
 
 1. Synchronize this repository to the same absolute path on both nodes and run
    the side-effect-free validator on each.
-2. On Spark 1, as `catid` and without sudo, create or verify the dedicated key:
+2. On Cerberus 1, as `catid` and without sudo, create or verify the dedicated key:
 
    ```bash
    /home/catid/dgx-spark-laguna/bin/install-deepseek-v4-rank1-control.sh rank0-key
@@ -121,9 +128,9 @@ steps 1-5 do not install, enable, or disable one either.
    printed SHA256 fingerprint.
 3. Transfer only
    `/home/catid/.ssh/id_ed25519_deepseek_v4_rank1_control.pub` to a temporary
-   file on Spark 2 using the existing administrative channel. Verify the same
-   fingerprint on Spark 2 before installation.
-4. On Spark 2, append the forced key and install the wrapper/policy:
+   file on Cerberus 2 using the existing administrative channel. Verify the
+   same fingerprint on Cerberus 2 before installation.
+4. On Cerberus 2, append the forced key and install the wrapper/policy:
 
    ```bash
    /home/catid/dgx-spark-laguna/bin/install-deepseek-v4-rank1-control.sh \
@@ -143,14 +150,14 @@ steps 1-5 do not install, enable, or disable one either.
    Preserve identical inference settings. Keep the manually verified direct-IP
    host entry in the configured known-hosts file; do not trust an unverified
    `ssh-keyscan`.
-6. Install the rank-1 unit locally on Spark 2. This checks that the wrapper,
+6. Install the rank-1 unit locally on Cerberus 2. This checks that the wrapper,
    exact sudoers policy, and a correctly restricted authorized key are present:
 
    ```bash
    /home/catid/dgx-spark-laguna/bin/install-deepseek-v4-services.sh rank1
    ```
 
-7. Install rank 0 locally on Spark 1:
+7. Install rank 0 locally on Cerberus 1:
 
    ```bash
    /home/catid/dgx-spark-laguna/bin/install-deepseek-v4-services.sh rank0
@@ -177,7 +184,7 @@ Before enabling rank 0, verify:
   `192.168.100.11`.
 - The dedicated key is usable without an interactive passphrase prompt at
   boot.
-- Spark 2's new `/etc/sudoers.d/dgx-spark-deepseek-v4-rank1-control` passes
+- Cerberus 2's new `/etc/sudoers.d/dgx-spark-deepseek-v4-rank1-control` passes
   `visudo -cf`.
 - The forced key cannot open a shell or execute any command other than the
   three opaque controller requests.
@@ -191,8 +198,8 @@ administrative decision and is outside this deployment.
 The dashboard and nginx should remain independent of the model units so host
 thermals remain available while the approximately 15-minute model load is in
 progress. A TP2 server has only one HTTP endpoint: monitor
-`http://127.0.0.1:8000` on Spark 1, while continuing to collect Spark 2 hardware
-telemetry over a separately authorized read-only path.
+`http://127.0.0.1:8000` on Cerberus 1, while continuing to collect Cerberus 2
+hardware telemetry over a separately authorized read-only path.
 
 With the historical `DEEPSEEK_MAX_MODEL_LEN=-1` setting, vLLM resolves the
 actual maximum from the KV cache during startup. Record that resolved value

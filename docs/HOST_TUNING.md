@@ -41,7 +41,7 @@ context.
 ## Audited baseline
 
 The original pair reported the following after the 2026-07-29 reboot, and the
-same host policy was verified on `cerebrus3` after its 2026-08-10 update:
+same host policy was verified on `cerberus3` after its 2026-08-10 update:
 
 | Area | Audited value | Project decision |
 | --- | --- | --- |
@@ -95,7 +95,7 @@ systemctl is-active display-manager.service
 pgrep -a 'Xorg|Xwayland|gnome-shell'
 ```
 
-### Cerberus node 3 (`cerebrus3`) rack-display diagnosis
+### Cerberus node 3 (`cerberus3`) rack-display diagnosis
 
 The rack HDMI display was black before headless mode was enabled. At that
 time GDM/Xorg was healthy on display `:0`, but `xrandr` reported `HDMI-0`

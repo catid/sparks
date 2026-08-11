@@ -1,8 +1,8 @@
 # Pinned Mia DSpark integration
 
 This is an isolated two-rank integration of the MiaAI-Lab recipe on
-`cerebrus1` and `cerebrus2`. The hosts are part of a three-Spark physical
-ring, but `cerebrus3` is not a vLLM rank. The
+`cerberus1` and `cerberus2`. The hosts are part of a three-Spark physical
+ring, but `cerberus3` is not a vLLM rank. The
 upstream checkout is detached at commit
 `0220360b752349c9b3129d64799246a4ec106640` and remains unmodified. All local
 changes live beside it in this directory.
@@ -20,7 +20,7 @@ changes live beside it in this directory.
 | Context / slots | 1,048,576 / 6; 8,192 max batched tokens |
 | KV / memory | `nvfp4_ds_mla`, GPU memory utilization 0.80 |
 | Chat template | `thinking=true` |
-| API / rendezvous | `0.0.0.0:8888` / `10.10.84.28:29630` |
+| API / rendezvous | `0.0.0.0:8888` / current `cerberus1` `enP7s7`:29630 |
 | Compose project | `mia-dspark-pinned` |
 | SSH identity | `$HOME/.ssh/id_ed25519_dgx_cluster` by default, with `IdentitiesOnly=yes` |
 
@@ -57,7 +57,7 @@ k5, pinned artifacts, and the direct TP2 edge while isolating lifecycle identity
 | --- | --- |
 | Compose project | `mia-dspark-throughput` |
 | Served model name | `deepseek-v4-flash-dspark-mia-throughput` |
-| API / rendezvous | `0.0.0.0:8889` / `10.10.84.28:29631` |
+| API / rendezvous | `0.0.0.0:8889` / current `cerberus1` `enP7s7`:29631 |
 | Host tmp | `$HOME/.cache/dspark-mia-throughput-tmp` |
 | Context / slots | 1,048,576 / 32 |
 | Max batched tokens | 8,192 |
@@ -87,7 +87,7 @@ Compose/rendezvous/tmp identity and reduced scheduler are:
 | --- | --- |
 | Compose project | `mia-dspark-agent` |
 | Served model names | historical ID plus canonical `deepseek-v4-flash` alias |
-| API / rendezvous | `0.0.0.0:8889` / `10.10.84.28:29632` |
+| API / rendezvous | `0.0.0.0:8889` / current `cerberus1` `enP7s7`:29632 |
 | Host tmp | `$HOME/.cache/dspark-mia-agent-tmp` |
 | Context / slots | 1,048,576 / 8 |
 | Max batched tokens | 8,192 |
@@ -116,6 +116,33 @@ Switching the boot supervisor to this profile requires a coordinated
 not apply new scheduler limits to already-running containers.
 
 ## Rank-specific direct-edge transport
+
+Profiles are hostname-authoritative: they contain exactly
+`HEAD_HOST=cerberus1` and `WORKER_HOST=cerberus2`, never a DHCP management
+address. Every lifecycle launch resolves both hosts again. Canonical
+`cerberusN.local` mDNS is preferred because Avahi is constrained to `enP7s7`.
+The resolver also consults the canonical SSH alias and, during the router-DNS
+migration, the `sparkN.lan` and misspelled `cerebrusN.lan` aliases. An SSH
+configuration can therefore temporarily map `Host cerberusN` to a resolvable
+legacy DNS target without putting its numeric lease into this repository.
+
+Resolution is accepted only when the head address is the sole global IPv4
+assigned to local `enP7s7`, the worker address matches the sole global IPv4
+reported by remote `enP7s7`, and both directions route over `enP7s7`.
+`MASTER_ADDR` and the rank-specific `VLLM_HOST_IP` are then injected explicitly
+into the local Compose process and remote command. A stale host record, wrong
+SSH target, extra interface address, or route through a ConnectX/data/Wi-Fi
+interface fails before Docker changes state. The fixed `192.168.0/1` ConnectX
+addresses and rank-specific HCA selection below are unaffected.
+
+Observation and cleanup are intentionally different from launch. Compose
+still requires its distributed fields while rendering `ps` or `down`, so the
+wrapper supplies RFC 5737 documentation-only values for those two commands;
+they are never used by a process or persisted. `status.sh` reports C1 first
+and then attempts C2 independently. `stop.sh` starts exact-project C1 cleanup
+before attempting C2, so worker DNS, SSH, power, or interface loss cannot
+strand the local rank. A failed worker cleanup remains a nonzero, explicit
+partial result rather than being reported as a fully stopped pair.
 
 The ranks face one another on different physical port numbers:
 
@@ -153,6 +180,8 @@ Static validation neither pulls nor starts anything:
 MIA_ENV_FILE=mia-agent.local.env ./bin/validate-static.sh
 MIA_ENV_FILE=mia-throughput.env ./tests/test-profile-selection.sh
 ./tests/test-profile-renderer.sh
+./tests/test-runtime-resolution.sh
+./tests/test-local-first-outage.sh
 ./tests/test-model-catalog.sh
 MIA_ENV_FILE=mia-throughput.env ./tests/test-start-timeout.sh
 ```
@@ -161,9 +190,14 @@ Generated local profiles are the fresh-clone path. The tracked `mia.env`,
 `mia-throughput.env`, and `mia-agent.env` files preserve this audited
 deployment and contain its original absolute paths.
 
-The timeout test uses fixture helpers and fake `ssh`/`curl`; it never contacts
-Docker or C2. It proves that a failed API wait tears down both isolated
-ranks rather than leaving the headless worker behind.
+The runtime-resolution test supplies deterministic DNS, SSH, address, and
+route fixtures. It proves canonical mDNS preference, explicit legacy fallback,
+remote identity matching, and fail-closed `enP7s7` checks without contacting a
+Spark. The local-first outage test proves that worker DNS/SSH failure cannot
+suppress C1 status or scoped C1 cleanup. The timeout test uses fixture helpers
+and fake `ssh`/`curl`; it never
+contacts Docker or C2. It proves that a failed API wait tears down both
+isolated ranks rather than leaving the headless worker behind.
 
 An explicitly selected profile must be a regular `.env` file directly inside
 this integration root. `common.sh` canonicalizes and exports the choice. The
@@ -340,7 +374,7 @@ modify the retired port-8000 units.
 - `UPSTREAM.lock`: source tree, image digest, and model revision provenance
 - `MODEL.lock.json`: location-independent checkpoint metadata and path hint
 - `MODEL.abliterated-fp8.lock.json`: alternate agent-profile checkpoint pin
-- `mia.env`: pinned cluster and runtime values
+- `mia.env`: pinned cluster hostnames and runtime policy (no DHCP addresses)
 - `mia-agent.env`: audited C8 / 1M-context agent profile for this checkout
 - `mia-agent.env.example`: portable input for `--profile agent`
 - `mia-throughput.env`: isolated seq32 / conservative 8,192-token benchmark profile

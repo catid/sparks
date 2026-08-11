@@ -1,17 +1,20 @@
 # Three-node ring NCCL 2.30 proof
 
 `run_verify_ring_nccl230.sh` is a maintenance-window verifier for the complete
-`cerebrus1` ↔ `cerebrus2` ↔ `cerebrus3` ConnectX-7 ring. It does not invoke a
+`cerberus1` ↔ `cerberus2` ↔ `cerberus3` ConnectX-7 ring. It does not invoke a
 model launcher, Compose, systemd, or any production stop command. Instead, it
 refuses to run if vLLM or another GPU compute process is present on any node.
 Stop production separately and intentionally before using it.
 
 The verifier runs one temporary, ownership-labelled container per node from
 the same immutable image used by DS4F. The order is rank 2, rank 1, rank 0.
-Rendezvous uses `10.10.84.28:29533`; NCCL payload traffic uses all four exact
-RoCE HCA names per node with the internal NCCL network plugin and subnet-aware
-routing. `NCCL_CROSS_NIC` and a scalar GID index are deliberately not supplied,
-which lets NCCL select reachable cross-port paths in the asymmetric ring.
+Rendezvous resolves the current `cerberus1` management IPv4 at runtime and
+passes that numeric value only to the temporary NCCL containers on port
+`29533`. The selected address must be owned by or route through `enP7s7` on
+every node. NCCL payload traffic uses all four exact RoCE HCA names per node
+with the internal NCCL network plugin and subnet-aware routing.
+`NCCL_CROSS_NIC` and a scalar GID index are deliberately not supplied, which
+lets NCCL select reachable cross-port paths in the asymmetric ring.
 
 Hard prerequisite: all three physical edges must be cross-port. In particular,
 C3 P0 must face C2 P1 and C3 P1 must face C1 P0, with the explicit
@@ -52,10 +55,12 @@ export MIA3_ENV_FILE=mia3.local.env
 ./bench/run_verify_ring_nccl230.sh
 ```
 
-The ignored local profile is required even when every management address uses
-the documented default. It renders the checkout, SSH-key, model, cache, and
+The ignored local profile is required even though management identities are
+fixed canonical hostnames. It renders the checkout, SSH-key, model, cache, and
 temporary paths for the actual service account; the verifier otherwise falls
-back to the maintainer-audit template paths.
+back to the maintainer-audit template paths. DNS resolution is canonical
+`.lan`, then canonical `.local`, before explicit legacy aliases, and every
+result is validated against `enP7s7` before a container starts.
 
 Optional bounded settings are `RING_NCCL_MASTER_PORT`,
 `RING_NCCL_TENSOR_MIB` (default 512), `RING_NCCL_WARMUPS` (2),

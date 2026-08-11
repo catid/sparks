@@ -2,12 +2,15 @@
 
 const history = {
   cluster: [],
-  spark1Gpu: [],
-  spark1Cpu: [],
-  spark2Gpu: [],
-  spark2Cpu: [],
+  cerberus1Gpu: [],
+  cerberus1Cpu: [],
+  cerberus2Gpu: [],
+  cerberus2Cpu: [],
 };
 const maxHistory = 90;
+const canonicalNodeNames = ["cerberus1", "cerberus2"];
+const legacyNodeNames = { spark1: "cerberus1", spark2: "cerberus2" };
+const legacyNodeByCanonical = { cerberus1: "spark1", cerberus2: "spark2" };
 
 const q = (id) => document.getElementById(id);
 const safe = (v) => v === null || v === undefined || Number.isNaN(v) ? null : v;
@@ -39,6 +42,26 @@ const finiteNumber = (value) => {
   const number = Number(value);
   return value !== null && value !== undefined && Number.isFinite(number) ? number : null;
 };
+const canonicalNodeName = (name) => {
+  const text = name === null || name === undefined ? "" : String(name);
+  return legacyNodeNames[text] || text;
+};
+const nodeDisplayName = (name) => {
+  const canonical = canonicalNodeName(name);
+  const match = /^cerberus([123])$/.exec(canonical);
+  return match ? `Cerberus ${match[1]}` : canonical;
+};
+
+function canonicalNodes(rawNodes) {
+  const source = rawNodes || {};
+  const nodes = {};
+  for (const canonical of canonicalNodeNames) {
+    const legacy = legacyNodeByCanonical[canonical];
+    if (Object.prototype.hasOwnProperty.call(source, canonical)) nodes[canonical] = source[canonical];
+    else if (legacy && Object.prototype.hasOwnProperty.call(source, legacy)) nodes[canonical] = source[legacy];
+  }
+  return nodes;
+}
 
 function secondsSince(timestamp, nowMs = Date.now()) {
   if (!timestamp) return null;
@@ -81,7 +104,7 @@ function healthViewModel(data, nowMs = Date.now()) {
   }
 
   const affected = Array.isArray(cluster.affected_nodes)
-    ? [...new Set(cluster.affected_nodes.map(String).filter(Boolean))]
+    ? [...new Set(cluster.affected_nodes.map(canonicalNodeName).filter(Boolean))]
     : [];
   const outageElapsed = finiteNumber(cluster.outage_elapsed_seconds)
     ?? secondsSince(cluster.outage_started_at, nowMs);
@@ -229,7 +252,7 @@ function nodeTemplate(name, node, index) {
       <div class="node-head">
         <div class="node-title">
           <span class="node-index">0${index}</span>
-          <div><h2>${s.hostname || name}</h2><p class="endpoint mono">${endpoint}</p></div>
+          <div><h2>${nodeDisplayName(s.hostname || name)}</h2><p class="endpoint mono">${endpoint}</p></div>
         </div>
         <span class="state ${nodeHealthy ? "online" : "offline"}">${stateLabel}</span>
       </div>
@@ -294,10 +317,10 @@ function drawTemperatureChart() {
   const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr);
   const w = rect.width, h = rect.height, pad = { l: 36, r: 10, t: 10, b: 23 };
   const series = [
-    [history.spark1Gpu, "#5ce1e6", []],
-    [history.spark1Cpu, "#73e2a7", [5, 4]],
-    [history.spark2Gpu, "#a983ff", []],
-    [history.spark2Cpu, "#f7bd5b", [5, 4]],
+    [history.cerberus1Gpu, "#5ce1e6", []],
+    [history.cerberus1Cpu, "#73e2a7", [5, 4]],
+    [history.cerberus2Gpu, "#a983ff", []],
+    [history.cerberus2Cpu, "#f7bd5b", [5, 4]],
   ];
   const all = series.flatMap(([values]) => values).filter(value => safe(value) !== null).map(Number);
   let floor = all.length ? Math.floor((Math.min(...all) - 5) / 5) * 5 : 20;
@@ -336,19 +359,19 @@ function appendHistory(key, value) {
 function loadHistory(data, nodes, router) {
   const points = Array.isArray(data.history) ? data.history.slice(-maxHistory) : [];
   if (points.length) {
-    const nodeValue = (point, name, key) => (((point.nodes || {})[name] || {})[key]);
+    const nodeValue = (point, name, key) => ((canonicalNodes(point.nodes)[name] || {})[key]);
     history.cluster = points.map(point => point.generation_tokens_per_second);
-    history.spark1Gpu = points.map(point => nodeValue(point, "spark1", "gpu_c"));
-    history.spark1Cpu = points.map(point => nodeValue(point, "spark1", "cpu_cluster_max_c"));
-    history.spark2Gpu = points.map(point => nodeValue(point, "spark2", "gpu_c"));
-    history.spark2Cpu = points.map(point => nodeValue(point, "spark2", "cpu_cluster_max_c"));
+    history.cerberus1Gpu = points.map(point => nodeValue(point, "cerberus1", "gpu_c"));
+    history.cerberus1Cpu = points.map(point => nodeValue(point, "cerberus1", "cpu_cluster_max_c"));
+    history.cerberus2Gpu = points.map(point => nodeValue(point, "cerberus2", "gpu_c"));
+    history.cerberus2Cpu = points.map(point => nodeValue(point, "cerberus2", "cpu_cluster_max_c"));
     return;
   }
   appendHistory("cluster", router.backend_generation_tokens_per_second);
-  appendHistory("spark1Gpu", (((nodes.spark1 || {}).system || {}).gpu || {}).temperature_c);
-  appendHistory("spark1Cpu", (((nodes.spark1 || {}).system || {}).thermals || {}).cpu_cluster_max_c);
-  appendHistory("spark2Gpu", (((nodes.spark2 || {}).system || {}).gpu || {}).temperature_c);
-  appendHistory("spark2Cpu", (((nodes.spark2 || {}).system || {}).thermals || {}).cpu_cluster_max_c);
+  appendHistory("cerberus1Gpu", (((nodes.cerberus1 || {}).system || {}).gpu || {}).temperature_c);
+  appendHistory("cerberus1Cpu", (((nodes.cerberus1 || {}).system || {}).thermals || {}).cpu_cluster_max_c);
+  appendHistory("cerberus2Gpu", (((nodes.cerberus2 || {}).system || {}).gpu || {}).temperature_c);
+  appendHistory("cerberus2Cpu", (((nodes.cerberus2 || {}).system || {}).thermals || {}).cpu_cluster_max_c);
 }
 
 function drawCharts() {
@@ -370,7 +393,7 @@ function renderClusterHealth(model) {
   const affected = model.affected || [];
   affectedItem.hidden = affected.length === 0 || model.state === "serving";
   q("health-affected-label").textContent = affected.length === 1 ? "Affected node" : "Affected nodes";
-  q("health-affected").textContent = affected.join(", ") || "—";
+  q("health-affected").textContent = affected.map(nodeDisplayName).join(", ") || "—";
 
   const elapsedItem = q("health-elapsed-item");
   elapsedItem.hidden = model.elapsedLabel === null || model.outageElapsed === null;
@@ -382,7 +405,7 @@ function renderClusterHealth(model) {
   q("health-recovery").textContent = formatDuration(model.recoveryElapsed);
 
   const statusPrefix = model.state === "serving" ? "" : `${model.label}. `;
-  const affectedText = affected.length ? ` Affected: ${affected.join(", ")}.` : "";
+  const affectedText = affected.length ? ` Affected: ${affected.map(nodeDisplayName).join(", ")}.` : "";
   const announcement = `${statusPrefix}${model.title}.${affectedText} ${model.reason}`.trim();
   if (announcement !== lastHealthAnnouncement) {
     q("health-announcer").textContent = announcement;
@@ -397,17 +420,17 @@ function renderClusterHealth(model) {
     stale: "STALE",
   };
   document.title = titlePrefixes[model.state]
-    ? `${titlePrefixes[model.state]} · Spark Array`
-    : "Spark Array";
+    ? `${titlePrefixes[model.state]} · Cerberus Cluster`
+    : "Cerberus Cluster";
 }
 
 async function refresh() {
   try {
     const response = await fetch("/api/status", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json(), nodes = data.nodes || {}, router = data.router || {};
+    const data = await response.json(), nodes = canonicalNodes(data.nodes), router = data.router || {};
     healthApiFailureStartedAt = null;
-    q("nodes").innerHTML = ["spark1", "spark2"].map((name, i) => nodeTemplate(name, nodes[name] || {}, i + 1)).join("");
+    q("nodes").innerHTML = canonicalNodeNames.map((name, i) => nodeTemplate(name, nodes[name] || {}, i + 1)).join("");
     q("endpoint-eyebrow").textContent = router.mode === "direct" ? "TENSOR-PARALLEL API" : "UNIFIED ENDPOINT";
     q("endpoint-title").textContent = router.label || (router.mode === "direct" ? "TP2 aggregate endpoint" : "Router");
     q("router-url").textContent = router.url || "—";
@@ -447,6 +470,8 @@ async function refresh() {
 
 if (typeof globalThis !== "undefined") {
   globalThis.DashboardHealthUI = Object.freeze({
+    canonicalNodeName,
+    canonicalNodes,
     formatDuration,
     healthViewModel,
     renderClusterHealth,

@@ -83,9 +83,9 @@ read_machine_id() {
 
 require_pull_coordinator() {
   case "$(hostname -s)" in
-    cerebrus1|spark1) ;;
+    cerberus1|spark1) ;;
     *)
-      echo "Coordinate the cluster image pull from cerebrus1 (spark1 is a transitional alias)." >&2
+      echo "Coordinate the cluster image pull from cerberus1 (spark1 is a transitional alias)." >&2
       return 2
       ;;
   esac
@@ -109,7 +109,7 @@ load_cluster_config() {
 case "${action}" in
   describe)
     echo "Pinned image: ${image}"
-    echo "Run '$0 --pull' on one host, or coordinate '$0 --pull-both'/'$0 --pull-all' from cerebrus1."
+    echo "Run '$0 --pull' on one host, or coordinate '$0 --pull-both'/'$0 --pull-all' from cerberus1."
     ;;
   --pull)
     local_record="$(pull_local | tail -n 1)"
@@ -123,29 +123,29 @@ case "${action}" in
     local_machine_id="$(read_machine_id local)"
     worker_machine_id="$(read_machine_id "${WORKER_HOST}")"
     [[ "${local_machine_id}" != "${worker_machine_id}" ]] || {
-      echo "WORKER_HOST resolves to the cerebrus1 coordinator: ${WORKER_HOST}" >&2
+      echo "WORKER_HOST resolves to the cerberus1 coordinator: ${WORKER_HOST}" >&2
       exit 2
     }
     local_record="$(pull_local | tail -n 1)"
-    local_id="$(verify_image_record cerebrus1 "${local_record}")"
+    local_id="$(verify_image_record cerberus1 "${local_record}")"
     remote_record="$(pull_remote "${WORKER_HOST}")"
     remote_id="$(verify_image_record "${WORKER_HOST}" "${remote_record}")"
     [[ "${local_id}" == "${remote_id}" ]] || {
-      echo "Image IDs differ: cerebrus1=${local_id} ${WORKER_HOST}=${remote_id}" >&2
+      echo "Image IDs differ: cerberus1=${local_id} ${WORKER_HOST}=${remote_id}" >&2
       exit 1
     }
-    echo "Pinned image is identical on cerebrus1 and ${WORKER_HOST}: ${local_id}"
+    echo "Pinned image is identical on cerberus1 and ${WORKER_HOST}: ${local_id}"
     ;;
   --pull-all)
     require_pull_coordinator
     load_cluster_config
-    third_host="${DSPARK_PULL_THIRD_HOST:-cerebrus3}"
+    third_host="${DSPARK_PULL_THIRD_HOST:-cerberus3}"
     if [[ ! "${third_host}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,252}$ ]]; then
       echo "Unsafe DSPARK_PULL_THIRD_HOST: ${third_host}" >&2
       exit 2
     fi
     if [[ "${third_host}" == "${WORKER_HOST}" ||
-          "${third_host}" == "cerebrus1" || "${third_host}" == "spark1" ]]; then
+          "${third_host}" == "cerberus1" || "${third_host}" == "spark1" ]]; then
       echo "The three pull targets must be distinct; invalid third host: ${third_host}" >&2
       exit 2
     fi
@@ -161,27 +161,27 @@ case "${action}" in
     fi
 
     local_record="$(pull_local | tail -n 1)"
-    local_id="$(verify_image_record cerebrus1 "${local_record}")"
+    local_id="$(verify_image_record cerberus1 "${local_record}")"
     worker_record="$(pull_remote "${WORKER_HOST}")"
     worker_id="$(verify_image_record "${WORKER_HOST}" "${worker_record}")"
     third_record="$(pull_remote "${third_host}")"
     third_id="$(verify_image_record "${third_host}" "${third_record}")"
     if ! [[ "${local_id}" == "${worker_id}" &&
             "${local_id}" == "${third_id}" ]]; then
-      echo "Image IDs differ: cerebrus1=${local_id} ${WORKER_HOST}=${worker_id} ${third_host}=${third_id}" >&2
+      echo "Image IDs differ: cerberus1=${local_id} ${WORKER_HOST}=${worker_id} ${third_host}=${third_id}" >&2
       exit 1
     fi
-    echo "Pinned image is identical on cerebrus1, ${WORKER_HOST}, and ${third_host}: ${local_id}"
+    echo "Pinned image is identical on cerberus1, ${WORKER_HOST}, and ${third_host}: ${local_id}"
     ;;
   -h|--help)
     cat <<'EOF'
 Usage: pull-dspark-container.sh [describe|--pull|--pull-both|--pull-all]
 
 --pull       Pull and inspect the digest-pinned image on this host.
---pull-both  From cerebrus1, use MIA_ENV_FILE and the cluster SSH identity to
+--pull-both  From cerberus1, use MIA_ENV_FILE and the cluster SSH identity to
              pull it on both nodes and require identical image IDs.
 --pull-all   As above, but pull and verify all three nodes. The third host is
-             cerebrus3 unless DSPARK_PULL_THIRD_HOST overrides it.
+             cerberus3 unless DSPARK_PULL_THIRD_HOST overrides it.
 EOF
     ;;
   *)

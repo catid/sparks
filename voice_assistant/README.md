@@ -1,7 +1,7 @@
 # Cerberus voice assistant
 
 This directory contains the private, local-audio path for the Cerberus rack
-assistant running on host `cerebrus3`:
+assistant running on host `cerberus3`:
 
 ```text
 Yealink CP900 -> energy VAD -> Qwen3-ASR -> Cerberus watchword
@@ -37,7 +37,7 @@ the exact weight size and SHA-256. Prepare the checkpoint and image with:
 
 ```bash
 voice_assistant/download-model.sh
-docker build --tag cerebrus/qwen3-asr:1.7b-bcd2b5b7 voice_assistant
+docker build --tag cerberus/qwen3-asr:1.7b-bcd2b5b7 voice_assistant
 ```
 
 `run-asr.sh` validates the model directory and revision, mounts it read-only,
@@ -47,7 +47,7 @@ and launches the read-only container at `127.0.0.1:8020`. The API is:
 - `POST /transcribe` with a bounded 16-kHz, mono, signed-PCM16 WAV body
 
 The ASR request uses the pinned model's vocabulary-prompt support to bias the
-two wake-word spellings and the three node names. Override
+canonical wake word and the three node names. Override
 `QWEN_ASR_VOCABULARY_PROMPT` if necessary; the server only accepts a printable,
 single-line value of 1-512 characters.
 
@@ -60,11 +60,11 @@ The defaults match the C3 deployment:
 | `VOICE_ASR_URL` | `http://127.0.0.1:8020/transcribe` |
 | `VOICE_OPENCLAW_URL` | `http://127.0.0.1:18789/v1/chat/completions` |
 | `VOICE_OPENCLAW_MODEL` | `openclaw/voice` |
-| `VOICE_OPENCLAW_USER` | `cerebrus3-voice` |
+| `VOICE_OPENCLAW_USER` | `cerberus3-voice` |
 | `VOICE_TTS_URL` | `http://127.0.0.1:8010/v1/audio/speech` |
 | `VOICE_CAPTURE_DEVICE` | `plughw:CARD=CP900,DEV=0` |
 | `VOICE_PLAYBACK_DEVICE` | `plughw:CARD=CP900,DEV=0` |
-| `VOICE_STATE_DIR` | unset outside systemd; `/run/cerebrus3-voice-bridge` in the unit |
+| `VOICE_STATE_DIR` | unset outside systemd; `/run/cerberus3-voice-bridge` in the unit |
 
 Set `VOICE_OPENCLAW_TOKEN` through the root-owned deployment environment file;
 never put it in this public repository. VAD timing, thresholds, dependency
@@ -74,7 +74,7 @@ timeouts, and the armed/cooldown windows are also environment-configurable; see
 ## Privacy-safe dashboard status
 
 The systemd bridge unit creates the private runtime directory
-`/run/cerebrus3-voice-bridge` and the bridge atomically replaces
+`/run/cerberus3-voice-bridge` and the bridge atomically replaces
 `status.json` there on every pipeline transition. A background heartbeat
 refreshes it every two seconds, including while ASR, OpenClaw, Audio8, or
 playback is blocked. The runtime directory disappears when the bridge is

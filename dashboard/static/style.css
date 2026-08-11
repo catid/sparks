@@ -191,11 +191,11 @@ h2 { font-size: 20px; letter-spacing: -.02em; font-weight: 610; }
 .legend { display: flex; gap: 18px; color: var(--muted); font-size: 12px; }
 .legend span { display: flex; gap: 7px; align-items: center; }
 .legend i { width: 17px; height: 2px; background: var(--cyan); }
-.legend i.spark2 { background: var(--violet); }
-.legend i.spark1-cpu {
+.legend i.cerberus2 { background: var(--violet); }
+.legend i.cerberus1-cpu {
   background: repeating-linear-gradient(90deg, var(--green) 0 5px, transparent 5px 8px);
 }
-.legend i.spark2-cpu {
+.legend i.cerberus2-cpu {
   background: repeating-linear-gradient(90deg, var(--amber) 0 5px, transparent 5px 8px);
 }
 canvas { display: block; width: 100%; height: 180px; }

@@ -67,7 +67,7 @@ Initialize the pinned upstream checkout on both rank machines:
 
 ```bash
 git submodule update --init --recursive
-ssh cerebrus2 'cd /path/to/sparks && git submodule update --init --recursive'
+ssh cerberus2 'cd /path/to/sparks && git submodule update --init --recursive'
 ```
 
 Generate a local serving profile rather than editing a tracked profile. The

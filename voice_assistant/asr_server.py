@@ -23,7 +23,7 @@ LANGUAGE = os.environ.get("QWEN_ASR_LANGUAGE", "en").strip() or None
 VOCABULARY_PROMPT = os.environ.get(
     "QWEN_ASR_VOCABULARY_PROMPT",
     "Vocabulary: Cerberus, Cerberus One, Cerberus Two, Cerberus Three, "
-    "cerebrus1, cerebrus2, cerebrus3.",
+    "cerberus1, cerberus2, cerberus3.",
 ).strip()
 MAX_AUDIO_SECONDS = float(os.environ.get("QWEN_ASR_MAX_AUDIO_SECONDS", "35"))
 MIN_AUDIO_SECONDS = float(os.environ.get("QWEN_ASR_MIN_AUDIO_SECONDS", "0.15"))

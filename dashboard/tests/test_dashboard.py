@@ -15,13 +15,13 @@ SPEC.loader.exec_module(dashboard)
 
 def make_collector(**overrides):
     values = {
-        "spark2_host": "spark2",
+        "spark2_host": "cerberus2",
         "ssh_key": "/cluster-key",
         "node_urls": {
-            "spark1": "http://rank0:8000",
-            "spark2": "http://rank1:8000",
+            "cerberus1": "http://rank0:8000",
+            "cerberus2": "http://rank1:8000",
         },
-        "node_roles": {"spark1": "aggregate", "spark2": "worker"},
+        "node_roles": {"cerberus1": "aggregate", "cerberus2": "worker"},
         "inference_mode": "direct",
         "router_url": "http://router:8080",
         "router_metrics_url": "http://router:29000",
@@ -33,6 +33,29 @@ def make_collector(**overrides):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_legacy_node_maps_are_accepted_but_normalized_to_cerberus(self):
+        collector = make_collector(
+            node_urls={
+                "spark1": "http://legacy-rank0:8000",
+                "spark2": "http://legacy-rank1:8000",
+                "cerberus1": "http://canonical-rank0:8000",
+            },
+            node_roles={"spark1": "aggregate", "spark2": "worker"},
+        )
+
+        self.assertEqual(
+            collector.node_urls["cerberus1"], "http://canonical-rank0:8000"
+        )
+        self.assertEqual(
+            collector.node_urls["cerberus2"], "http://legacy-rank1:8000"
+        )
+        self.assertEqual(
+            collector.node_roles,
+            {"cerberus1": "aggregate", "cerberus2": "worker"},
+        )
+        self.assertNotIn("spark1", collector.node_urls)
+        self.assertNotIn("spark2", collector.node_roles)
+
     def test_initial_cluster_contract_is_stable_before_first_sample(self):
         status = make_collector().get_snapshot()["cluster"]
         self.assertEqual(status["state"], "down")
@@ -119,7 +142,7 @@ garbage
 
     def test_remote_probe_parser_handles_unified_memory(self):
         parsed = dashboard.parse_remote_probe(
-            """HOSTNAME=spark2
+            """HOSTNAME=cerberus2
 GPU=NVIDIA GB10, 45, 88.1, 2400, 2400, 97, 41, [N/A], [N/A]
 MEM_MemTotal:=1000
 MEM_MemAvailable:=250
@@ -169,12 +192,12 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
     def test_tp_worker_outage_is_down_and_timer_survives_recovery(self):
         collector = make_collector()
         nodes = {
-            "spark1": {
+            "cerberus1": {
                 "role": "aggregate",
                 "system": {},
                 "vllm": {"healthy": True, "state": "serving"},
             },
-            "spark2": {
+            "cerberus2": {
                 "role": "worker",
                 "system": {"error": "ssh timeout"},
                 "vllm": {
@@ -202,20 +225,20 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
         self.assertEqual(initial["state"], "down")
         self.assertFalse(initial["healthy"])
         self.assertTrue(initial["endpoint_healthy"])
-        self.assertEqual(initial["affected_nodes"], ["spark2"])
+        self.assertEqual(initial["affected_nodes"], ["cerberus2"])
         self.assertIn("cannot be reached over SSH", initial["reason"])
         self.assertEqual(initial["outage_started_at"], "1970-01-01T00:16:40Z")
         self.assertEqual(later["outage_started_at"], initial["outage_started_at"])
         self.assertEqual(later["outage_elapsed_seconds"], 12)
         self.assertIsNone(later["recovery_started_at"])
 
-        nodes["spark2"]["system"] = {"vllm_rss_bytes": 1024}
-        nodes["spark2"]["vllm"] = {
+        nodes["cerberus2"]["system"] = {"vllm_rss_bytes": 1024}
+        nodes["cerberus2"]["vllm"] = {
             "healthy": True,
             "state": "headless_worker",
         }
-        nodes["spark2"]["health"] = collector.node_health(
-            "spark2", nodes["spark2"]
+        nodes["cerberus2"]["health"] = collector.node_health(
+            "cerberus2", nodes["cerberus2"]
         )
         endpoint["active_ranks"] = 2
 
@@ -225,7 +248,7 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
 
         self.assertEqual(recovery_one["state"], "recovering")
         self.assertTrue(recovery_one["healthy"])
-        self.assertEqual(recovery_one["affected_nodes"], ["spark2"])
+        self.assertEqual(recovery_one["affected_nodes"], ["cerberus2"])
         self.assertEqual(
             recovery_one["outage_started_at"], initial["outage_started_at"]
         )
@@ -244,7 +267,7 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
     def test_endpoint_failure_is_prominent_even_if_worker_is_alive(self):
         collector = make_collector()
         nodes = {
-            "spark1": {
+            "cerberus1": {
                 "role": "aggregate",
                 "system": {},
                 "vllm": {
@@ -253,7 +276,7 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
                     "error": "connection refused",
                 },
             },
-            "spark2": {
+            "cerberus2": {
                 "role": "worker",
                 "system": {"vllm_rss_bytes": 1024},
                 "vllm": {"healthy": True, "state": "headless_worker"},
@@ -278,21 +301,21 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
         self.assertFalse(status["endpoint_healthy"])
         self.assertEqual(status["endpoint"]["url"], "http://rank0:8000")
         self.assertIn("TP2 aggregate endpoint is unreachable", status["reason"])
-        self.assertIn("spark1", status["affected_nodes"])
+        self.assertIn("cerberus1", status["affected_nodes"])
         self.assertEqual(status["outage_elapsed_seconds"], 0)
 
     def test_router_with_one_failed_replica_is_degraded(self):
         collector = make_collector(
-            node_roles={"spark1": "replica", "spark2": "replica"},
+            node_roles={"cerberus1": "replica", "cerberus2": "replica"},
             inference_mode="router",
         )
         nodes = {
-            "spark1": {
+            "cerberus1": {
                 "role": "replica",
                 "system": {},
                 "vllm": {"healthy": True, "state": "serving"},
             },
-            "spark2": {
+            "cerberus2": {
                 "role": "replica",
                 "system": {},
                 "vllm": {
@@ -318,18 +341,18 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
         self.assertEqual(status["state"], "degraded")
         self.assertFalse(status["healthy"])
         self.assertTrue(status["endpoint_healthy"])
-        self.assertEqual(status["affected_nodes"], ["spark2"])
+        self.assertEqual(status["affected_nodes"], ["cerberus2"])
         self.assertEqual(status["outage_elapsed_seconds"], 0)
 
     def test_optional_spark1_remote_probe_uses_strict_known_hosts(self):
         collector = make_collector(
-            spark1_host="operator@spark1.lan",
-            spark1_ssh_key="/spark1-key",
+            spark1_host="operator@cerberus1.lan",
+            spark1_ssh_key="/cerberus1-key",
             ssh_known_hosts="/dashboard/known_hosts",
         )
         completed = mock.Mock(
             returncode=0,
-            stdout="HOSTNAME=spark1\nVLLM_RSS=100\n",
+            stdout="HOSTNAME=cerberus1\nVLLM_RSS=100\n",
             stderr="",
         )
 
@@ -337,26 +360,26 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
             result = collector.spark1_system()
 
         command = run.call_args.args[0]
-        self.assertEqual(result["hostname"], "spark1")
-        self.assertIn("/spark1-key", command)
+        self.assertEqual(result["hostname"], "cerberus1")
+        self.assertIn("/cerberus1-key", command)
         self.assertIn("StrictHostKeyChecking=yes", command)
         self.assertIn("UserKnownHostsFile=/dashboard/known_hosts", command)
         self.assertIn("BatchMode=yes", command)
         self.assertIn("IdentitiesOnly=yes", command)
-        self.assertIn("operator@spark1.lan", command)
+        self.assertIn("operator@cerberus1.lan", command)
 
     def test_spark1_probe_remains_local_when_host_is_unset(self):
         collector = make_collector(spark1_host=None)
         with mock.patch.object(
-            collector, "local_system", return_value={"hostname": "spark1-local"}
+            collector, "local_system", return_value={"hostname": "cerberus1-local"}
         ) as local:
             result = collector.spark1_system()
         local.assert_called_once_with()
-        self.assertEqual(result["hostname"], "spark1-local")
+        self.assertEqual(result["hostname"], "cerberus1-local")
 
     def test_aggregate_metrics_take_precedence_and_worker_is_never_counted(self):
         nodes = {
-            "spark1": {
+            "cerberus1": {
                 "role": "aggregate",
                 "vllm": {
                     "rates": {
@@ -365,7 +388,7 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
                     }
                 },
             },
-            "spark2": {
+            "cerberus2": {
                 "role": "worker",
                 "vllm": {
                     "rates": {
@@ -386,13 +409,13 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
         }
         endpoint = {}
         dashboard.Collector.add_backend_rates(endpoint, nodes)
-        self.assertEqual(endpoint["metrics_source_nodes"], ["spark1"])
+        self.assertEqual(endpoint["metrics_source_nodes"], ["cerberus1"])
         self.assertEqual(endpoint["backend_prompt_tokens_per_second"], 11)
         self.assertEqual(endpoint["backend_generation_tokens_per_second"], 23)
 
     def test_replica_metrics_are_summed_when_there_is_no_aggregate(self):
         nodes = {
-            "spark1": {
+            "cerberus1": {
                 "role": "replica",
                 "vllm": {
                     "rates": {
@@ -401,7 +424,7 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
                     }
                 },
             },
-            "spark2": {
+            "cerberus2": {
                 "role": "replica",
                 "vllm": {
                     "rates": {
@@ -413,7 +436,7 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
         }
         endpoint = {}
         dashboard.Collector.add_backend_rates(endpoint, nodes)
-        self.assertEqual(endpoint["metrics_source_nodes"], ["spark1", "spark2"])
+        self.assertEqual(endpoint["metrics_source_nodes"], ["cerberus1", "cerberus2"])
         self.assertEqual(endpoint["backend_prompt_tokens_per_second"], 7)
         self.assertEqual(endpoint["backend_generation_tokens_per_second"], 10)
 
@@ -421,13 +444,13 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
         class FakeCollector(dashboard.Collector):
             def __init__(self):
                 super().__init__(
-                    spark2_host="spark2",
+                    spark2_host="cerberus2",
                     ssh_key="/unused",
                     node_urls={
-                        "spark1": "http://rank0:8000",
-                        "spark2": "http://rank1:8000",
+                        "cerberus1": "http://rank0:8000",
+                        "cerberus2": "http://rank1:8000",
                     },
-                    node_roles={"spark1": "aggregate", "spark2": "worker"},
+                    node_roles={"cerberus1": "aggregate", "cerberus2": "worker"},
                     inference_mode="direct",
                     router_url="http://unused:8080",
                     router_metrics_url="http://unused:29000",
@@ -439,7 +462,7 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
             @staticmethod
             def local_system():
                 return {
-                    "hostname": "spark1",
+                    "hostname": "cerberus1",
                     "vllm_rss_bytes": 1000,
                     "network": {},
                 }
@@ -447,7 +470,7 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
             @staticmethod
             def remote_system():
                 return {
-                    "hostname": "spark2",
+                    "hostname": "cerberus2",
                     "vllm_rss_bytes": 2000,
                     "network": {},
                 }
@@ -472,7 +495,7 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
         collector.snapshot = {
             "_sample_time": time.time() - 2,
             "nodes": {
-                "spark1": {
+                "cerberus1": {
                     "system": {"network": {}},
                     "vllm": {
                         "counters": {
@@ -482,7 +505,7 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
                         }
                     },
                 },
-                "spark2": {"system": {"network": {}}},
+                "cerberus2": {"system": {"network": {}}},
             },
             "router": {},
         }
@@ -490,22 +513,24 @@ NET=enp1s0f0np0,100,200,0,0,up,9000,rdma,rocep1s0f0,10,20
         snapshot = collector.get_snapshot()
 
         self.assertEqual(collector.vllm_calls, ["http://rank0:8000"])
-        worker = snapshot["nodes"]["spark2"]
+        worker = snapshot["nodes"]["cerberus2"]
         self.assertEqual(worker["role"], "worker")
         self.assertIsNone(worker["endpoint"])
         self.assertTrue(worker["vllm"]["healthy"])
         self.assertEqual(worker["vllm"]["state"], "headless_worker")
         self.assertEqual(snapshot["router"]["mode"], "direct")
-        self.assertEqual(snapshot["router"]["metrics_source_nodes"], ["spark1"])
+        self.assertEqual(snapshot["router"]["metrics_source_nodes"], ["cerberus1"])
         self.assertEqual(
             snapshot["router"]["backend_generation_tokens_per_second"],
-            snapshot["nodes"]["spark1"]["vllm"]["rates"][
+            snapshot["nodes"]["cerberus1"]["vllm"]["rates"][
                 "generation_tokens_per_second"
             ],
         )
         self.assertEqual(len(snapshot["history"]), 1)
         self.assertIn("generation_tokens_per_second", snapshot["history"][0])
-        self.assertIn("spark1", snapshot["history"][0]["nodes"])
+        self.assertIn("cerberus1", snapshot["history"][0]["nodes"])
+        self.assertNotIn("spark1", snapshot["nodes"])
+        self.assertNotIn("spark2", snapshot["history"][0]["nodes"])
 
 
 if __name__ == "__main__":

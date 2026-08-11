@@ -44,8 +44,8 @@
       .filter((value) => value !== null && value !== undefined)
       .map(String);
     for (const candidate of candidates) {
-      const match = candidate.match(/(?:^|[^a-z0-9])(?:c(?:erebrus)?|spark)[-_ ]?([123])(?:[^0-9]|$)/i)
-        || candidate.match(/^(?:c|spark|cerebrus)?[-_ ]?([123])$/i)
+      const match = candidate.match(/(?:^|[^a-z0-9])(?:c|cerberus|cerebrus|spark)[-_ ]?([123])(?:[^0-9]|$)/i)
+        || candidate.match(/^(?:c|spark|cerberus|cerebrus)?[-_ ]?([123])$/i)
         || candidate.match(/([123])$/);
       if (match) return Number(match[1]);
     }

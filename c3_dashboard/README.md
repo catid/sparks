@@ -114,7 +114,7 @@ c3_dashboard/scripts/install.sh start --replace-environment
 ```
 
 The environment is installed root-owned with mode 0600. Its defaults pin the
-five-second interval, the three historical `cerebrus1`-`cerebrus3` DNS aliases,
+five-second interval, the three historical `cerberus1`-`cerberus3` DNS aliases,
 C1's vLLM metrics URL, the local 9763 port, the existing cluster SSH key, C3's
 existing `known_hosts`, the voice heartbeat under `/run`, and the native panel
 mode. Host-key entries still need to be verified through a trusted channel
@@ -168,7 +168,7 @@ curl -fsS http://127.0.0.1:9763/api/voice-status | jq .
 ```
 
 The voice bridge atomically updates
-`/run/cerebrus3-voice-bridge/status.json` every two seconds and at every stage
+`/run/cerberus3-voice-bridge/status.json` every two seconds and at every stage
 transition. The dashboard reads it without following symlinks, caps it at 32
 KiB, accepts only schema version 1 for `cerberus-voice`, and exposes only a
 fixed operational-field allowlist. Transcripts, requests, replies, API tokens,

@@ -6,7 +6,8 @@ umask 077
 voice_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 lock_file="${voice_dir}/openclaw/runtime.lock.json"
 action="${1:-verify}"
-runtime_root="${VOICE_OPENCLAW_RUNTIME_ROOT:-/opt/cerebrus/openclaw-runtime}"
+runtime_root="${VOICE_OPENCLAW_RUNTIME_ROOT:-/opt/cerberus/openclaw-runtime}"
+legacy_runtime_root="${VOICE_OPENCLAW_LEGACY_RUNTIME_ROOT:-/opt/cerebrus/openclaw-runtime}"
 
 usage() {
   cat <<'EOF'
@@ -18,7 +19,9 @@ verify-installed Verify the exact installed versions without changing the host.
 
 Environment:
   VOICE_OPENCLAW_RUNTIME_ROOT  Install root
-                              (default: /opt/cerebrus/openclaw-runtime)
+                              (default: /opt/cerberus/openclaw-runtime)
+  VOICE_OPENCLAW_LEGACY_RUNTIME_ROOT
+                              Pre-rename root copied atomically when valid
 EOF
 }
 
@@ -44,6 +47,9 @@ safe_absolute_path() {
 }
 
 safe_absolute_path "${runtime_root}" || fail "unsafe runtime root"
+safe_absolute_path "${legacy_runtime_root}" || fail "unsafe legacy runtime root"
+[[ "${runtime_root}" != "${legacy_runtime_root}" ]] ||
+  fail "canonical and legacy runtime roots must differ"
 case "${runtime_root}" in
   /bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
     fail "runtime root is too broad"
@@ -108,6 +114,8 @@ done
 
 node_release="${runtime_root}/releases/node-v${node_version}-linux-arm64"
 openclaw_release="${runtime_root}/releases/openclaw-${openclaw_version}"
+legacy_node_release="${legacy_runtime_root}/releases/node-v${node_version}-linux-arm64"
+legacy_openclaw_release="${legacy_runtime_root}/releases/openclaw-${openclaw_version}"
 
 validate_node_release() {
   local release="$1"
@@ -157,6 +165,44 @@ if ((EUID == 0)); then
 else
   command -v sudo >/dev/null 2>&1 || fail "sudo is required for installation"
   elevate=(sudo)
+fi
+
+runtime_parent="$(dirname "${runtime_root}")"
+if [[ -L "${runtime_parent}" ||
+      ( -e "${runtime_parent}" && ! -d "${runtime_parent}" ) ]]; then
+  fail "runtime parent must be a regular directory"
+fi
+if [[ ! -e "${runtime_root}" && -e "${legacy_runtime_root}" ]]; then
+  [[ -d "${legacy_runtime_root}" && ! -L "${legacy_runtime_root}" ]] ||
+    fail "legacy runtime root must be a regular directory"
+  validate_node_release "${legacy_node_release}" ||
+    fail "legacy pinned Node release is invalid"
+  validate_openclaw_release "${legacy_node_release}" "${legacy_openclaw_release}" ||
+    fail "legacy pinned OpenClaw release is invalid"
+
+  "${elevate[@]}" install -d -o root -g root -m 0755 "${runtime_parent}"
+  migration_stage="${runtime_root}.migration.$$"
+  [[ ! -e "${migration_stage}" && ! -L "${migration_stage}" ]] ||
+    fail "legacy runtime migration stage already exists"
+  if ! "${elevate[@]}" cp -a --reflink=auto -- \
+      "${legacy_runtime_root}" "${migration_stage}"; then
+    "${elevate[@]}" rm -rf -- "${migration_stage}"
+    fail "could not copy the legacy runtime"
+  fi
+  "${elevate[@]}" chown -R root:root "${migration_stage}"
+  if ! validate_node_release \
+      "${migration_stage}/releases/node-v${node_version}-linux-arm64" ||
+     ! validate_openclaw_release \
+      "${migration_stage}/releases/node-v${node_version}-linux-arm64" \
+      "${migration_stage}/releases/openclaw-${openclaw_version}"; then
+    "${elevate[@]}" rm -rf -- "${migration_stage}"
+    fail "copied legacy runtime failed exact-version verification"
+  fi
+  if ! "${elevate[@]}" mv -T -- "${migration_stage}" "${runtime_root}"; then
+    "${elevate[@]}" rm -rf -- "${migration_stage}"
+    fail "could not activate the copied legacy runtime"
+  fi
+  echo "Copied and verified the pinned pre-rename runtime at the canonical path."
 fi
 
 if [[ -L "${runtime_root}" ]]; then

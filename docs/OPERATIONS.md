@@ -1,15 +1,15 @@
 # Inference operations
 
-C1 (`cerebrus1`) is the sole lifecycle coordinator. It runs rank 0, owns the
+C1 (`cerberus1`) is the sole lifecycle coordinator. It runs rank 0, owns the
 OpenAI-compatible HTTP endpoint, supervises both ranks, and hosts the
-dashboard. C2 (`cerebrus2`) runs one headless rank and must not run an independent
+dashboard. C2 (`cerberus2`) runs one headless rank and must not run an independent
 model supervisor.
 
 The active low-concurrency agent deployment is:
 
 | Role | Location |
 | --- | --- |
-| vLLM API | C1, `http://cerebrus1:8889/v1` |
+| vLLM API | C1, `http://cerberus1:8889/v1` |
 | Health and metrics | C1, ports matching the selected profile |
 | TP rank 0 | C1 |
 | TP rank 1 | C2, headless; no separate HTTP API |
@@ -247,9 +247,10 @@ the protected web endpoint:
 
 On a fresh web installation, the helper generates a random Basic-auth
 password and stores it only in the root-readable service environment. Nginx
-publishes the host selected with `DASHBOARD_WEB_HOST`, whose default is the
-canonical `https://cerebrus1.lan` endpoint. It redirects cleartext HTTP to
-HTTPS. Existing installations may retain a transitional `spark1.lan`
+publishes the host selected with `DASHBOARD_WEB_HOST`, whose default is
+`https://cerberus1.lan`; `DASHBOARD_WEB_ALT_HOST` adds the canonical mDNS
+fallback `https://cerberus1.local` to the same certificate. It redirects
+cleartext HTTP to HTTPS. Existing installations may retain a transitional `spark1.lan`
 certificate until deliberately re-rendered. See
 [`dashboard/README.md`](../dashboard/README.md) for credential retrieval,
 certificate trust, replacement-environment, and explicitly unauthenticated
@@ -322,7 +323,7 @@ curl -fsS http://127.0.0.1:8010/health | jq .
 ```
 
 An operator-approved reference can be selected with the root-readable
-`/etc/default/cerebrus3-audio8`; the audio and exact transcript stay outside
+`/etc/default/cerberus3-audio8`; the audio and exact transcript stay outside
 Git. The service never starts a speaker loop. See
 [`audio8/README.md`](../audio8/README.md).
 
@@ -331,7 +332,7 @@ Git. The service never starts a speaker loop. See
 C3 can keep the CP900 microphone open for local speech, transcribe completed
 utterances with the pinned Qwen3-ASR 1.7B checkpoint, and accept a request only
 when `Cerberus` occurs among the first two recognized words. The bridge retains
-the historical `cerebrus` spelling only as an internal ASR-tolerance alias; it
+the historical `cerberus` spelling only as an internal ASR-tolerance alias; it
 is not the device name. The bridge sends accepted text to a loopback,
 token-authenticated OpenClaw agent;
 that agent uses the C1-C2 DS4F API with `xhigh` thinking mapped to the model's
@@ -345,8 +346,8 @@ Prepare and install the complete boot stack on C3 only:
 voice_assistant/scripts/install-voice-stack.sh verify
 voice_assistant/scripts/install-voice-stack.sh prepare
 voice_assistant/scripts/install-voice-stack.sh start
-systemctl status cerebrus3-voice-stack.target
-systemctl status cerebrus3-{openclaw-voice,qwen3-asr,voice-bridge}.service
+systemctl status cerberus3-voice-stack.target
+systemctl status cerberus3-{openclaw-voice,qwen3-asr,voice-bridge}.service
 ```
 
 The installer pins Node and OpenClaw, verifies the ASR weight checksum, creates
@@ -364,8 +365,8 @@ Basic non-secret checks are:
 ```bash
 curl -fsS http://127.0.0.1:8020/health | jq .
 curl -fsS http://127.0.0.1:8010/health | jq .
-systemctl is-enabled cerebrus3-voice-stack.target cerebrus3-audio8.service
-journalctl -u cerebrus3-voice-bridge.service -n 50 --no-pager
+systemctl is-enabled cerberus3-voice-stack.target cerberus3-audio8.service
+journalctl -u cerberus3-voice-bridge.service -n 50 --no-pager
 ```
 
 See [`voice_assistant/README.md`](../voice_assistant/README.md) for the exact

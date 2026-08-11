@@ -29,6 +29,8 @@ SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
 WORD_RE = re.compile(r"[^\W_]+(?:['’\-][^\W_]+)*", re.UNICODE)
+# Keep the historical ASR misspelling as an input-only tolerance alias. It is
+# never surfaced in prompts, status, logs, or user-facing identity.
 WAKE_WORDS = frozenset({"cerberus", "cerebrus"})
 TRIM_AFTER_WAKE = " \t\r\n,.:;!?—–-"
 MAX_SPOKEN_CHARACTERS = 2_000
@@ -153,7 +155,7 @@ class Settings:
         if 1000 % frame_ms:
             raise RuntimeError("VOICE_FRAME_MS must divide evenly into 1000")
         model = os.environ.get("VOICE_OPENCLAW_MODEL", "openclaw/voice").strip()
-        user = os.environ.get("VOICE_OPENCLAW_USER", "cerebrus3-voice").strip()
+        user = os.environ.get("VOICE_OPENCLAW_USER", "cerberus3-voice").strip()
         if not model or len(model) > 200:
             raise RuntimeError("VOICE_OPENCLAW_MODEL must contain 1-200 characters")
         if not user or len(user) > 200:

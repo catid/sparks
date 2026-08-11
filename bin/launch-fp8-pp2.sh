@@ -11,6 +11,8 @@ master_addr="${VLLM_MASTER_ADDR:-192.168.100.10}"
 master_port="${VLLM_MASTER_PORT:-29501}"
 dflash_tokens="${DFLASH_TOKENS:-15}"
 model="poolside/Laguna-S-2.1-FP8"
+cerberus2_host="${CERBERUS2_SSH_HOST:-${SPARK2_SSH_HOST:-cerberus2.local}}"
+ssh_key="${CLUSTER_SSH_KEY:-/home/catid/.ssh/id_ed25519_dgx_cluster}"
 
 case "${mode}" in
   baseline)
@@ -55,9 +57,9 @@ if [[ "${rank}" == "1" ]]; then
   exec vllm serve "${common_args[@]}" --headless
 fi
 
-remote_log="${root_dir}/logs/fp8-${mode}-spark2.log"
-ssh -i /home/catid/.ssh/id_ed25519_dgx_cluster \
-  -o IdentitiesOnly=yes spark2 \
-  "nohup env DGX_NODE_RANK=1 DFLASH_TOKENS='${dflash_tokens}' VLLM_PORT='${port}' VLLM_MASTER_ADDR='${master_addr}' VLLM_MASTER_PORT='${master_port}' '${root_dir}/bin/launch-fp8-pp2.sh' '${mode}' >'${remote_log}' 2>&1 & echo \$! >'${root_dir}/logs/fp8-${mode}-spark2.pid'"
+remote_log="${root_dir}/logs/fp8-${mode}-cerberus2.log"
+ssh -i "${ssh_key}" \
+  -o IdentitiesOnly=yes "${cerberus2_host}" \
+  "nohup env DGX_NODE_RANK=1 DFLASH_TOKENS='${dflash_tokens}' VLLM_PORT='${port}' VLLM_MASTER_ADDR='${master_addr}' VLLM_MASTER_PORT='${master_port}' '${root_dir}/bin/launch-fp8-pp2.sh' '${mode}' >'${remote_log}' 2>&1 & echo \$! >'${root_dir}/logs/fp8-${mode}-cerberus2.pid'"
 
 exec vllm serve "${common_args[@]}"
