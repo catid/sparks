@@ -39,6 +39,7 @@ WORD_RE = re.compile(r"[^\W_]+(?:['’\-][^\W_]+)*", re.UNICODE)
 # Keep the historical ASR misspelling as an input-only tolerance alias. It is
 # never surfaced in prompts, status, logs, or user-facing identity.
 WAKE_WORDS = frozenset({"cerberus", "cerebrus"})
+WAKE_LEAD_INS = frozenset({"hey", "ok", "okay"})
 TRIM_AFTER_WAKE = " \t\r\n,.:;!?—–-"
 MAX_SPOKEN_CHARACTERS = 2_000
 MAX_TTS_CHUNKS = 16
@@ -1145,9 +1146,16 @@ class WakeWordRouter:
     @staticmethod
     def wake_match(text: str) -> tuple[re.Match[str], int] | None:
         words = list(WORD_RE.finditer(text))
-        for index, match in enumerate(words[:2]):
-            if match.group(0).casefold() in WAKE_WORDS:
-                return match, index
+        if not words:
+            return None
+        if words[0].group(0).casefold() in WAKE_WORDS:
+            return words[0], 0
+        if (
+            len(words) >= 2
+            and words[0].group(0).casefold() in WAKE_LEAD_INS
+            and words[1].group(0).casefold() in WAKE_WORDS
+        ):
+            return words[1], 1
         return None
 
     def route(self, text: str, now: float | None = None) -> tuple[str | None, str]:

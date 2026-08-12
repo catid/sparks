@@ -22,10 +22,14 @@ requests and complete replies are not copied into journald.
 
 ## Wake behavior
 
-- `Cerberus, summarize cluster health` handles the suffix immediately.
-- `Hey Cerberus` arms exactly one following utterance for 12 seconds.
+- `Hey Cerberus`, `OK Cerberus` (including an ASR rendering of `Okay
+  Cerberus`), and bare `Cerberus` are supported wake phrases.
+- A wake phrase by itself arms exactly one following utterance for 12 seconds.
+  A command in the same utterance, such as `OK Cerberus, summarize cluster
+  health`, is handled immediately.
 - A common ASR near-match is accepted internally for recognition tolerance.
-  The watch word is only recognized in the first two words.
+  Other words before the name do not activate the agent, which prevents phrases
+  such as `not Cerberus` or `please Cerberus` from becoming commands.
 - Capture is stopped before OpenClaw/TTS work and remains stopped through a
   short playback cooldown, preventing the speaker from waking the microphone.
 - After an accepted command, a quiet prerecorded communicator cue can begin

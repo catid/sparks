@@ -137,7 +137,26 @@ class BridgeTestCase(unittest.TestCase):
 
 
 class WakeWordTests(BridgeTestCase):
-    def test_wake_word_must_be_one_of_first_two_words(self) -> None:
+    def test_supported_wake_phrases_arm_one_following_utterance(self) -> None:
+        for phrase in ("Hey Cerberus", "OK Cerberus", "Okay, Cerberus", "Cerberus"):
+            with self.subTest(phrase=phrase):
+                router = self.module.WakeWordRouter(armed_seconds=12)
+                self.assertEqual(router.route(phrase, now=100), (None, "armed"))
+                self.assertEqual(
+                    router.route("Report cluster health", now=105),
+                    ("Report cluster health", "command"),
+                )
+
+    def test_supported_wake_phrases_accept_a_same_utterance_command(self) -> None:
+        for phrase in ("Hey Cerberus", "OK Cerberus", "Okay, Cerberus", "Cerberus"):
+            with self.subTest(phrase=phrase):
+                router = self.module.WakeWordRouter(armed_seconds=12)
+                self.assertEqual(
+                    router.route(f"{phrase}, report cluster health", now=100),
+                    ("report cluster health", "command"),
+                )
+
+    def test_only_supported_lead_ins_can_precede_the_wake_word(self) -> None:
         router = self.module.WakeWordRouter(armed_seconds=12)
         self.assertEqual(
             router.route("Hey Cerberus, give me the cluster status", now=10),
@@ -145,6 +164,14 @@ class WakeWordTests(BridgeTestCase):
         )
         self.assertEqual(
             router.route("Please ask Cerberus for status", now=20),
+            (None, "ignored"),
+        )
+        self.assertEqual(
+            router.route("Please Cerberus, report status", now=21),
+            (None, "ignored"),
+        )
+        self.assertEqual(
+            router.route("Not Cerberus, stop", now=22),
             (None, "ignored"),
         )
         self.assertEqual(
