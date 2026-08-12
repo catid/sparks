@@ -127,6 +127,18 @@ class LauncherContractTests(unittest.TestCase):
         self.assertIn("create-rollback-snapshot.sh", installer)
         self.assertIn('systemd/backend.conf', installer)
         self.assertTrue((ROOT / "systemd/backend.conf").is_file())
+        backend_config = (ROOT / "systemd/backend.conf").read_text(
+            encoding="utf-8"
+        )
+        private_reference = (
+            "/home/catid/.local/share/audio8/computer-voice-20260812"
+        )
+        self.assertIn(
+            f"AUDIO8_REFERENCE_DIR={private_reference}", backend_config
+        )
+        self.assertIn(private_reference, backend_unit)
+        self.assertNotIn("/audio8/authorized-voice", backend_config)
+        self.assertNotIn("/audio8/authorized-voice", backend_unit)
         self.assertIn("rollback-to-stock.sh", installer)
         self.assertIn('"${runtime_root}/systemd"', installer)
         self.assertNotIn("disable --now cerberus3-audio8.service", installer)

@@ -45,6 +45,7 @@ class BridgeTestCase(unittest.TestCase):
             "openclaw_user": "cerberus3-voice",
             "tts_url": "http://127.0.0.1:8010/v1/audio/speech",
             "tts_model": "audio8/tts-0.6b",
+            "thinking_cue_wav": None,
             "capture_device": "plughw:CARD=CP900,DEV=0",
             "playback_device": "plughw:CARD=CP900,DEV=0",
             "playback_lock_path": None,
@@ -85,6 +86,24 @@ class BridgeTestCase(unittest.TestCase):
 
     def immediate_playback(self, *_args, **_kwargs):
         return self.ImmediatePlayback()
+
+    def cue_wav(
+        self,
+        *,
+        duration_seconds=0.8,
+        rate=16_000,
+        channels=1,
+        amplitude=20_000,
+    ):
+        frame_count = round(rate * duration_seconds)
+        samples = [amplitude] * frame_count * channels
+        destination = io.BytesIO()
+        with self.module.wave.open(destination, "wb") as wav:
+            wav.setnchannels(channels)
+            wav.setsampwidth(2)
+            wav.setframerate(rate)
+            wav.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+        return destination.getvalue()
 
     def inline_synthesis_worker_class(self):
         tested_module = self.module
@@ -238,6 +257,152 @@ class ResponseTests(BridgeTestCase):
         self.assertTrue(all(1 <= len(chunk) <= 140 for chunk in chunks))
         self.assertEqual(" ".join(chunks), " ".join(text.split()))
 
+    def test_spoken_duration_estimate_counts_words_and_natural_pauses(self) -> None:
+        plain = self.module.estimate_spoken_seconds("one two three")
+        punctuated = self.module.estimate_spoken_seconds("one, two. three?")
+        longer = self.module.estimate_spoken_seconds("one two three four five six")
+        self.assertAlmostEqual(
+            plain,
+            3 / self.module.TTS_ESTIMATED_WORDS_PER_SECOND,
+        )
+        self.assertGreater(punctuated, plain)
+        self.assertGreater(longer, punctuated)
+        self.assertEqual(self.module.estimate_spoken_seconds("..."), 0)
+
+    def test_spoken_duration_estimate_has_opaque_token_character_floor(self) -> None:
+        opaque = "x" * self.module.TTS_FIRST_CHUNK_CHARACTERS
+        self.assertGreaterEqual(
+            self.module.estimate_spoken_seconds(opaque),
+            len(opaque) / self.module.TTS_ESTIMATED_CHARACTERS_PER_SECOND,
+        )
+
+    def test_realistic_answer_within_first_request_limit_stays_one_chunk(self) -> None:
+        answer = (
+            "The cluster is healthy, but I am checking every service and network "
+            "path once more before I report that the whole system is ready."
+        )
+        self.assertLessEqual(len(answer), self.module.TTS_FIRST_CHUNK_CHARACTERS)
+        self.assertGreater(
+            self.module.estimate_spoken_seconds(answer),
+            self.module.TTS_FIRST_TARGET_SECONDS,
+        )
+        self.assertEqual(self.module.plan_tts_chunks(answer), [answer])
+
+    def test_abbreviations_are_not_mistaken_for_sentence_boundaries(self) -> None:
+        text = "Please ask Dr. Rivera for the e.g. examples before continuing."
+        sentence, _clause = self.module._tts_boundary_indices(text, 300)
+        self.assertEqual(sentence, [len(text)])
+
+    def test_adaptive_plan_starts_short_then_combines_later_sentences(self) -> None:
+        first = (
+            "The initial response is concise enough to begin playing quickly "
+            "for the listener."
+        )
+        names = [
+            "alpha",
+            "beta",
+            "gamma",
+            "delta",
+            "epsilon",
+            "zeta",
+            "eta",
+            "theta",
+            "iota",
+            "kappa",
+            "lambda",
+            "mu",
+        ]
+        answer = first + " " + " ".join(
+            f"Node {name} remains healthy and ready." for name in names
+        )
+
+        chunks = self.module.plan_tts_chunks(answer)
+
+        self.assertEqual(chunks[0], first)
+        self.assertLessEqual(
+            len(chunks[0]), self.module.TTS_FIRST_CHUNK_CHARACTERS
+        )
+        self.assertGreater(len(chunks[1]), 140)
+        self.assertGreaterEqual(chunks[1].count("."), 3)
+        self.assertGreater(
+            self.module.estimate_spoken_seconds(chunks[1]),
+            self.module.estimate_spoken_seconds(chunks[0]),
+        )
+        self.assertTrue(
+            all(len(chunk) <= self.module.TTS_CHUNK_CHARACTERS for chunk in chunks)
+        )
+        self.assertEqual(" ".join(chunks), " ".join(answer.split()))
+
+    def test_adaptive_plan_accumulates_tiny_opening_sentence(self) -> None:
+        answer = (
+            "Yes. The next complete sentence contains enough words to establish "
+            "a stable voice before playback continues. Then this follows with a "
+            "longer explanation that ensures planning is actually required."
+        )
+        chunks = self.module.plan_tts_chunks(answer)
+        self.assertTrue(chunks[0].startswith("Yes."))
+        self.assertTrue(chunks[0].endswith("continues."))
+        self.assertGreaterEqual(
+            self.module.estimate_spoken_seconds(chunks[0]),
+            self.module.TTS_FIRST_MIN_SECONDS,
+        )
+        self.assertLessEqual(
+            self.module.estimate_spoken_seconds(chunks[0]),
+            self.module.TTS_FIRST_MAX_SECONDS,
+        )
+
+    def test_tiny_first_sentence_does_not_create_a_guaranteed_audio_gap(self) -> None:
+        long_successor = " ".join(["explanation"] * 24) + "."
+        answer = "Yes. " + long_successor + " A final note follows."
+        chunks = self.module.plan_tts_chunks(answer)
+        self.assertTrue(chunks[0].startswith("Yes. "))
+        self.assertNotEqual(chunks[0], "Yes.")
+        self.assertGreaterEqual(
+            self.module.estimate_spoken_seconds(chunks[0]),
+            self.module.TTS_MINIMUM_PREFETCH_SECONDS,
+        )
+        self.assertEqual(" ".join(chunks), answer)
+
+    def test_adaptive_plan_splits_unpunctuated_text_at_duration_and_hard_caps(
+        self,
+    ) -> None:
+        answer = " ".join(["continuation"] * 180)
+        chunks = self.module.plan_tts_chunks(answer)
+        self.assertGreater(len(chunks), 2)
+        self.assertLessEqual(
+            len(chunks[0]), self.module.TTS_FIRST_CHUNK_CHARACTERS
+        )
+        self.assertTrue(
+            all(
+                1 <= len(chunk) <= self.module.TTS_CHUNK_CHARACTERS
+                for chunk in chunks
+            )
+        )
+        self.assertEqual(" ".join(chunks), answer)
+
+    def test_opaque_token_does_not_detach_later_word_punctuation(self) -> None:
+        opaque = "A" * 118
+        answer = (
+            f"{opaque} cy. "
+            "Several ordinary words follow the opaque identifier. "
+            "Another sentence makes the complete answer require planning."
+        )
+        normalized = " ".join(answer.split())
+        chunks = self.module.plan_tts_chunks(answer)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(" ".join(chunks), normalized)
+        self.assertNotIn("cy .", " ".join(chunks))
+
+    def test_adaptive_plan_preserves_closing_quote_at_sentence_boundary(self) -> None:
+        answer = (
+            'The operator said, "Everything is healthy." '
+            "Several later sentences should remain together. This is the second. "
+            "This is the third."
+        )
+        chunks = self.module.plan_tts_chunks(answer)
+        self.assertIn('healthy."', chunks[0])
+        self.assertEqual(" ".join(chunks), answer)
+
     def test_spoken_response_has_immutable_character_and_chunk_caps(self) -> None:
         private_tail = "DO NOT SYNTHESIZE THIS PRIVATE TAIL"
         answer = ("lengthy model output. " * 1_000) + private_tail
@@ -255,6 +420,34 @@ class ResponseTests(BridgeTestCase):
             )
         )
         self.assertNotIn(private_tail, " ".join(chunks))
+
+    def test_synthesis_worker_accepts_full_reviewed_audio8_request(self) -> None:
+        sent = []
+
+        class FakeProcess:
+            @staticmethod
+            def is_alive():
+                return True
+
+        class FakeConnection:
+            @staticmethod
+            def send(value):
+                sent.append(value)
+
+        worker = object.__new__(self.module.SynthesisWorker)
+        worker.closed = False
+        worker.process = FakeProcess()
+        worker.connection = FakeConnection()
+        worker.timeout_seconds = 10
+        worker.deadline = None
+        worker.busy = False
+        worker.submit("x" * self.module.TTS_CHUNK_CHARACTERS)
+        self.assertEqual(sent, ["x" * self.module.TTS_CHUNK_CHARACTERS])
+        worker.busy = False
+        with self.assertRaisesRegex(
+            self.module.SynthesisWorkerError, "request is invalid"
+        ):
+            worker.submit("x" * (self.module.TTS_CHUNK_CHARACTERS + 1))
 
     def test_local_http_opener_explicitly_has_no_proxies(self) -> None:
         # Passing this empty handler also suppresses build_opener's default,
@@ -1303,6 +1496,194 @@ class PlaybackPipelineTests(BridgeTestCase):
         )
         self.assertEqual(samples[0], 0)
         self.assertEqual(samples[-1], 0)
+
+    def test_private_thinking_cue_loads_softened_mono_pcm_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "communicator.wav"
+            path.write_bytes(self.cue_wav(duration_seconds=1.2))
+            path.chmod(0o600)
+
+            cue = self.module.load_private_thinking_cue(str(path))
+
+        duration = self.module.validate_tts_wav(cue)
+        with self.module.wave.open(io.BytesIO(cue), "rb") as wav:
+            self.assertEqual(wav.getnchannels(), 1)
+            self.assertEqual(wav.getsampwidth(), 2)
+            samples = struct.unpack(
+                f"<{wav.getnframes()}h", wav.readframes(wav.getnframes())
+            )
+        self.assertLessEqual(duration, self.module.THINKING_CUE_MAX_SECONDS)
+        self.assertLessEqual(
+            max(abs(sample) for sample in samples),
+            round(32_767 * self.module.THINKING_CUE_TARGET_PEAK),
+        )
+        self.assertEqual(samples[0], 0)
+        self.assertEqual(samples[-1], 0)
+
+    def test_private_thinking_cue_rejects_symlinks_and_hardlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "target.wav"
+            target.write_bytes(self.cue_wav())
+            target.chmod(0o600)
+            symlink = root / "symlink.wav"
+            symlink.symlink_to(target)
+            with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                self.module.load_private_thinking_cue(str(symlink))
+
+            hardlink = root / "hardlink.wav"
+            os.link(target, hardlink)
+            with self.assertRaisesRegex(RuntimeError, "unsafe"):
+                self.module.load_private_thinking_cue(str(target))
+
+    def test_private_thinking_cue_rejects_symlinked_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            cue = private / "cue.wav"
+            cue.write_bytes(self.cue_wav())
+            cue.chmod(0o600)
+            alias = root / "alias"
+            alias.symlink_to(private, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "directory is unavailable"):
+                self.module.load_private_thinking_cue(str(alias / "cue.wav"))
+
+    def test_private_thinking_cue_rejects_public_or_oversized_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "cue.wav"
+            path.write_bytes(self.cue_wav())
+            path.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, "unsafe"):
+                self.module.load_private_thinking_cue(str(path))
+
+            path.chmod(0o600)
+            with path.open("wb") as stream:
+                stream.truncate(self.module.THINKING_CUE_MAX_SOURCE_BYTES + 1)
+            with self.assertRaisesRegex(RuntimeError, "unsafe"):
+                self.module.load_private_thinking_cue(str(path))
+
+    def test_private_thinking_cue_accepts_intended_private_home_layout(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/home/catid") as directory:
+            root = pathlib.Path(directory)
+            root.chmod(0o700)
+            asset_dir = root / ".local" / "share" / "cerberus-voice"
+            asset_dir.mkdir(parents=True, mode=0o700)
+            for private_directory in (
+                root / ".local",
+                root / ".local" / "share",
+                asset_dir,
+            ):
+                private_directory.chmod(0o700)
+            path = asset_dir / "communicator.wav"
+            path.write_bytes(self.cue_wav(duration_seconds=0.5408, rate=44_100))
+            path.chmod(0o600)
+            cue = self.module.load_private_thinking_cue(str(path))
+        self.assertGreater(self.module.validate_tts_wav(cue), 0)
+
+    def test_private_thinking_cue_rejects_stereo_or_excessive_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "cue.wav"
+            path.write_bytes(self.cue_wav(channels=2))
+            path.chmod(0o600)
+            with self.assertRaisesRegex(RuntimeError, "mono PCM16"):
+                self.module.load_private_thinking_cue(str(path))
+
+            path.write_bytes(
+                self.cue_wav(
+                    duration_seconds=self.module.THINKING_CUE_MAX_SOURCE_SECONDS
+                    + 0.1
+                )
+            )
+            with self.assertRaisesRegex(RuntimeError, "unexpectedly long"):
+                self.module.load_private_thinking_cue(str(path))
+
+    def test_private_thinking_cue_rejects_trailing_hidden_data(self) -> None:
+        payload = self.cue_wav() + b"PRIVATE-TRAILING-CONTENT"
+        with self.assertRaisesRegex(RuntimeError, "trailing or missing data"):
+            self.module.validate_thinking_cue_source(payload)
+
+    def test_bridge_uses_private_cue_without_synthesizing_mm(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "communicator.wav"
+            path.write_bytes(self.cue_wav(amplitude=11_000))
+            path.chmod(0o600)
+            bridge = self.module.VoiceBridge(
+                self.settings(thinking_cue_wav=str(path))
+            )
+            original = bridge._thinking_cue
+            with mock.patch.object(self.module, "synthesize") as synthesize:
+                bridge._load_configured_thinking_cue()
+
+        synthesize.assert_not_called()
+        self.assertNotEqual(bridge._thinking_cue, original)
+
+    def test_invalid_private_cue_falls_back_without_logging_path_or_content(
+        self,
+    ) -> None:
+        private_marker = "PRIVATE-COMMUNICATOR-CONTENT-f7b3"
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "private-communicator-f7b3.wav"
+            path.write_bytes(private_marker.encode().ljust(128, b"x"))
+            path.chmod(0o600)
+            bridge = self.module.VoiceBridge(
+                self.settings(thinking_cue_wav=str(path))
+            )
+            fallback = bridge._thinking_cue
+            output = io.StringIO()
+            with (
+                mock.patch.object(self.module, "synthesize") as synthesize,
+                contextlib.redirect_stdout(output),
+            ):
+                bridge._load_configured_thinking_cue()
+
+        synthesize.assert_not_called()
+        self.assertEqual(bridge._thinking_cue, fallback)
+        self.assertIn("Thinking cue load failed: RuntimeError", output.getvalue())
+        self.assertNotIn(str(path), output.getvalue())
+        self.assertNotIn(private_marker, output.getvalue())
+
+    def test_unconfigured_thinking_cue_uses_hum_without_tts(self) -> None:
+        bridge = self.module.VoiceBridge(self.settings(thinking_cue_wav=None))
+        fallback = bridge._thinking_cue
+        with mock.patch.object(self.module, "synthesize") as synthesize:
+            bridge._load_configured_thinking_cue()
+        synthesize.assert_not_called()
+        self.assertEqual(bridge._thinking_cue, fallback)
+
+    def test_thinking_cue_environment_path_must_be_normalized_absolute(self) -> None:
+        self.assertEqual(
+            self.module.optional_private_wav_path(
+                "VOICE_THINKING_CUE_WAV", "/private/cue.wav"
+            ),
+            "/private/cue.wav",
+        )
+        self.assertIsNone(
+            self.module.optional_private_wav_path("VOICE_THINKING_CUE_WAV", "")
+        )
+        for invalid in (
+            "relative.wav",
+            "/private/../cue.wav",
+            "//private/cue.wav",
+            "/private/cue\n.wav",
+            "/",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                RuntimeError, "normalized bounded absolute path"
+            ):
+                self.module.optional_private_wav_path(
+                    "VOICE_THINKING_CUE_WAV", invalid
+                )
+
+        with mock.patch.dict(
+            os.environ,
+            {"VOICE_THINKING_CUE_WAV": "/private/cue.wav"},
+            clear=True,
+        ):
+            self.assertEqual(
+                self.module.Settings.from_environment().thinking_cue_wav,
+                "/private/cue.wav",
+            )
 
 
 class StatusPublisherTests(BridgeTestCase):

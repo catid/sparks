@@ -15,6 +15,7 @@ import re
 import signal
 import email.utils
 import socket
+import stat
 import struct
 import subprocess
 import threading
@@ -41,9 +42,28 @@ WAKE_WORDS = frozenset({"cerberus", "cerebrus"})
 TRIM_AFTER_WAKE = " \t\r\n,.:;!?—–-"
 MAX_SPOKEN_CHARACTERS = 2_000
 MAX_TTS_CHUNKS = 16
-TTS_CHUNK_CHARACTERS = 140
-THINKING_CUE_TEXT = "Mm."
+# The production Audio8 gateway rejects inputs above 300 characters. Keep the
+# first request smaller so speech starts promptly, then use the whole reviewed
+# request envelope when preceding speech gives synthesis time to run ahead.
+TTS_CHUNK_CHARACTERS = 300
+TTS_FIRST_CHUNK_CHARACTERS = 140
+TTS_FIRST_MIN_SECONDS = 3.0
+TTS_FIRST_TARGET_SECONDS = 4.5
+TTS_FIRST_MAX_SECONDS = 7.0
+TTS_FOLLOWUP_MAX_SECONDS = 16.0
+TTS_ESTIMATED_WORDS_PER_SECOND = 2.7
+TTS_ESTIMATED_CHARACTERS_PER_SECOND = 16.0
+TTS_ESTIMATED_SYNTHESIS_RTF = 0.35
+TTS_ESTIMATED_SYNTHESIS_OVERHEAD_SECONDS = 0.35
+TTS_PREFETCH_MARGIN_SECONDS = 0.35
+TTS_MINIMUM_PREFETCH_SECONDS = (
+    TTS_ESTIMATED_SYNTHESIS_OVERHEAD_SECONDS
+    + TTS_ESTIMATED_SYNTHESIS_RTF * TTS_FIRST_TARGET_SECONDS
+    + TTS_PREFETCH_MARGIN_SECONDS
+)
 THINKING_CUE_MAX_SECONDS = 0.65
+THINKING_CUE_MAX_SOURCE_SECONDS = 10.0
+THINKING_CUE_MAX_SOURCE_BYTES = 4 * 1024 * 1024
 THINKING_CUE_TARGET_PEAK = 0.07
 THINKING_CUE_FADE_SECONDS = 0.035
 STATUS_FILENAME = "status.json"
@@ -130,6 +150,23 @@ def require_loopback_http_url(name: str, value: str) -> str:
     return value
 
 
+def optional_private_wav_path(name: str, value: str) -> str | None:
+    """Validate the syntax of an optional private asset path without opening it."""
+    path = value.strip()
+    if not path:
+        return None
+    if (
+        not os.path.isabs(path)
+        or path == "/"
+        or path.startswith("//")
+        or len(path) > 512
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+        or os.path.normpath(path) != path
+    ):
+        raise RuntimeError(f"{name} must be a normalized bounded absolute path")
+    return path
+
+
 @dataclass(frozen=True)
 class Settings:
     asr_url: str
@@ -139,6 +176,7 @@ class Settings:
     openclaw_user: str
     tts_url: str
     tts_model: str
+    thinking_cue_wav: str | None
     capture_device: str
     playback_device: str
     playback_lock_path: str | None
@@ -192,6 +230,10 @@ class Settings:
             openclaw_user=user,
             tts_url=tts_url,
             tts_model=os.environ.get("VOICE_TTS_MODEL", "audio8/tts-0.6b").strip(),
+            thinking_cue_wav=optional_private_wav_path(
+                "VOICE_THINKING_CUE_WAV",
+                os.environ.get("VOICE_THINKING_CUE_WAV", ""),
+            ),
             capture_device=os.environ.get(
                 "VOICE_CAPTURE_DEVICE", "plughw:CARD=CP900,DEV=0"
             ),
@@ -1467,11 +1509,206 @@ def chunk_for_tts(text: str, maximum: int = 140) -> list[str]:
     return chunks
 
 
+def estimate_spoken_seconds(text: str) -> float:
+    """Estimate narration time without sending private answer text elsewhere."""
+    words = len(WORD_RE.findall(text))
+    spoken_characters = sum(character.isalnum() for character in text)
+    if not words and not spoken_characters:
+        return 0.0
+    sentence_pauses = len(re.findall(r"[.!?]+(?:[\"')\]]|$|\s)", text))
+    clause_pauses = len(re.findall(r"[,;:]+(?:[\"')\]]|$|\s)", text))
+    return (
+        max(
+            words / TTS_ESTIMATED_WORDS_PER_SECOND,
+            spoken_characters / TTS_ESTIMATED_CHARACTERS_PER_SECOND,
+        )
+        + sentence_pauses * 0.25
+        + clause_pauses * 0.10
+    )
+
+
+def _is_abbreviation_boundary(text: str, index: int) -> bool:
+    prefix = text[:index]
+    return bool(
+        re.search(
+            r"(?:\b(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|etc)\."
+            r"|(?:\b[a-z]\.){2,})$",
+            prefix,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _tts_boundary_indices(text: str, maximum: int) -> tuple[list[int], list[int]]:
+    """Return sentence/clause ends that fit one reviewed Audio8 request."""
+    window = text[: maximum + 1]
+    sentence = [
+        match.end()
+        for match in re.finditer(r"[.!?]+[\"')\]]*(?=\s|$)", window)
+        if (
+            0 < match.end() <= maximum
+            and not _is_abbreviation_boundary(window, match.end())
+        )
+    ]
+    clause = [
+        match.end()
+        for match in re.finditer(r"[,;:]+[\"')\]]*(?=\s|$)", window)
+        if 0 < match.end() <= maximum
+    ]
+    return sentence, clause
+
+
+def _last_boundary_within_duration(
+    text: str,
+    indices: list[int],
+    target_seconds: float,
+    minimum_seconds: float = 0.0,
+) -> int | None:
+    selected: int | None = None
+    for index in indices:
+        duration = estimate_spoken_seconds(text[:index])
+        if duration > target_seconds:
+            break
+        if duration >= minimum_seconds:
+            selected = index
+    return selected
+
+
+def _duration_bounded_prefix(
+    text: str,
+    *,
+    target_seconds: float,
+    maximum_characters: int,
+    first: bool,
+) -> tuple[str, str]:
+    """Take one natural, duration-bounded prefix and return its remainder."""
+    if (
+        len(text) <= maximum_characters
+        and estimate_spoken_seconds(text) <= target_seconds
+    ):
+        return text, ""
+
+    sentence, clause = _tts_boundary_indices(text, maximum_characters)
+    split_at: int | None = None
+    if first:
+        # The first complete sentence normally starts playback. Very short
+        # sentences are accumulated until they carry enough audio to hide most
+        # of the next request; an overlong first sentence is split near target.
+        last_short_sentence: int | None = None
+        last_short_duration = 0.0
+        for index in sentence:
+            duration = estimate_spoken_seconds(text[:index])
+            if duration < TTS_FIRST_MIN_SECONDS:
+                last_short_sentence = index
+                last_short_duration = duration
+                continue
+            if duration >= TTS_FIRST_MIN_SECONDS:
+                if duration <= TTS_FIRST_MAX_SECONDS:
+                    split_at = index
+                elif (
+                    last_short_sentence is not None
+                    and last_short_duration >= TTS_MINIMUM_PREFETCH_SECONDS
+                ):
+                    split_at = last_short_sentence
+                break
+        if (
+            split_at is None
+            and last_short_sentence is not None
+            and last_short_duration >= TTS_MINIMUM_PREFETCH_SECONDS
+        ):
+            split_at = last_short_sentence
+    else:
+        # Later requests prefer a sentence ending in the latter half of their
+        # budget, which deliberately combines adjacent short sentences.
+        split_at = _last_boundary_within_duration(
+            text,
+            sentence,
+            target_seconds,
+            target_seconds * 0.55,
+        )
+
+    if split_at is None:
+        split_at = _last_boundary_within_duration(
+            text,
+            clause,
+            target_seconds,
+            target_seconds * (0.45 if first else 0.55),
+        )
+
+    # Fall back to the last word boundary inside both the duration budget and
+    # the hard character envelope. This also handles prose without punctuation.
+    if split_at is None:
+        for match in re.finditer(r"\s+", text[: maximum_characters + 1]):
+            candidate = match.start()
+            if candidate < 1:
+                continue
+            if estimate_spoken_seconds(text[:candidate]) > target_seconds:
+                break
+            split_at = candidate
+
+    # A URL or identifier can exceed the duration estimate before the first
+    # whitespace. Prefer an over-budget whole-word chunk to cutting a later
+    # token or separating its punctuation from the word.
+    if split_at is None:
+        last_whitespace = text.rfind(" ", 1, maximum_characters + 1)
+        if last_whitespace > 0:
+            split_at = last_whitespace
+
+    if split_at is None:
+        split_at = min(len(text), maximum_characters)
+    chunk = text[:split_at].strip()
+    if not chunk:
+        split_at = min(len(text), maximum_characters)
+        chunk = text[:split_at]
+    return chunk, text[split_at:].strip()
+
+
+def plan_tts_chunks(text: str) -> list[str]:
+    """Plan a low-latency first request and voice-consistent later requests."""
+    remaining = re.sub(r"\s+", " ", text).strip()
+    # Never split an otherwise valid single request just because its estimated
+    # narration is long; that would add a voice reset without reducing the
+    # already bounded time to first audio.
+    if len(remaining) <= TTS_FIRST_CHUNK_CHARACTERS:
+        return [remaining] if remaining else []
+    chunks: list[str] = []
+    previous_duration = TTS_FIRST_TARGET_SECONDS
+    while remaining:
+        first = not chunks
+        if first:
+            target_seconds = TTS_FIRST_TARGET_SECONDS
+            maximum_characters = TTS_FIRST_CHUNK_CHARACTERS
+        else:
+            # SGLang Audio8 runs at roughly 0.28 RTF in the pinned benchmark.
+            # The more conservative 0.35 RTF plus fixed overhead and a playback
+            # margin keeps exactly-one-ahead synthesis hidden in normal use.
+            hidden_seconds = max(
+                TTS_FIRST_TARGET_SECONDS,
+                (
+                    previous_duration
+                    - TTS_ESTIMATED_SYNTHESIS_OVERHEAD_SECONDS
+                    - TTS_PREFETCH_MARGIN_SECONDS
+                )
+                / TTS_ESTIMATED_SYNTHESIS_RTF,
+            )
+            target_seconds = min(TTS_FOLLOWUP_MAX_SECONDS, hidden_seconds)
+            maximum_characters = TTS_CHUNK_CHARACTERS
+        chunk, remaining = _duration_bounded_prefix(
+            remaining,
+            target_seconds=target_seconds,
+            maximum_characters=maximum_characters,
+            first=first,
+        )
+        chunks.append(chunk)
+        previous_duration = estimate_spoken_seconds(chunk)
+    return chunks
+
+
 def bounded_spoken_chunks(text: str) -> tuple[list[str], bool]:
     """Apply immutable speech caps before asking Audio8 to synthesize anything."""
     normalized = re.sub(r"\s+", " ", text).strip()
     character_limited = normalized[:MAX_SPOKEN_CHARACTERS].rstrip()
-    all_chunks = chunk_for_tts(character_limited, TTS_CHUNK_CHARACTERS)
+    all_chunks = plan_tts_chunks(character_limited)
     chunks = all_chunks[:MAX_TTS_CHUNKS]
     truncated = (
         len(normalized) > len(character_limited)
@@ -1583,9 +1820,152 @@ def retry_after_delay(value: str | None) -> float:
     return 0.25
 
 
+def _trusted_thinking_cue_owner(info: os.stat_result) -> bool:
+    return info.st_uid in {0, os.geteuid()}
+
+
+def _safe_thinking_cue_directory(info: os.stat_result) -> bool:
+    if not stat.S_ISDIR(info.st_mode) or not _trusted_thinking_cue_owner(info):
+        return False
+    writable_by_others = stat.S_IMODE(info.st_mode) & 0o022
+    # Root-owned sticky directories such as /tmp are safe to traverse with
+    # openat/O_NOFOLLOW; an unprivileged peer cannot replace another owner's
+    # private child entry there.
+    return not writable_by_others or bool(
+        info.st_uid == 0 and info.st_mode & stat.S_ISVTX
+    )
+
+
+def open_private_thinking_cue(path: str) -> int:
+    """Open an owner-controlled absolute path without following any symlink."""
+    normalized = optional_private_wav_path("VOICE_THINKING_CUE_WAV", path)
+    if normalized is None:
+        raise RuntimeError("thinking cue path is empty")
+    required_flags = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, name) for name in required_flags):
+        raise RuntimeError("safe thinking cue file access is unavailable")
+
+    components = [component for component in normalized.split("/") if component]
+    directory_fd = os.open(
+        "/",
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+    )
+    try:
+        if not _safe_thinking_cue_directory(os.fstat(directory_fd)):
+            raise RuntimeError("thinking cue directory is unsafe")
+        for component in components[:-1]:
+            try:
+                child_fd = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+            except OSError as error:
+                raise RuntimeError("thinking cue directory is unavailable") from error
+            os.close(directory_fd)
+            directory_fd = child_fd
+            if not _safe_thinking_cue_directory(os.fstat(directory_fd)):
+                raise RuntimeError("thinking cue directory is unsafe")
+
+        try:
+            descriptor = os.open(
+                components[-1],
+                os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+        except OSError as error:
+            raise RuntimeError("thinking cue file is unavailable") from error
+        try:
+            info = os.fstat(descriptor)
+            file_mode = stat.S_IMODE(info.st_mode)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or not _trusted_thinking_cue_owner(info)
+                # Allow owner read/write and optional group read only. In
+                # particular, a private clip must never be world-readable.
+                or file_mode not in {0o400, 0o440, 0o600, 0o640}
+                or info.st_nlink != 1
+                or not 44 <= info.st_size <= THINKING_CUE_MAX_SOURCE_BYTES
+            ):
+                raise RuntimeError("thinking cue file is unsafe")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+    finally:
+        os.close(directory_fd)
+
+
+def validate_thinking_cue_source(payload: bytes) -> float:
+    """Validate the stricter prerecorded-cue WAV contract."""
+    if not 44 <= len(payload) <= THINKING_CUE_MAX_SOURCE_BYTES:
+        raise RuntimeError("thinking cue WAV has an invalid size")
+    if payload[:4] != b"RIFF" or payload[8:12] != b"WAVE":
+        raise RuntimeError("thinking cue asset is not a WAV")
+    if struct.unpack("<I", payload[4:8])[0] != len(payload) - 8:
+        raise RuntimeError("thinking cue WAV has trailing or missing data")
+    try:
+        with wave.open(io.BytesIO(payload), "rb") as source:
+            if (
+                source.getcomptype() != "NONE"
+                or source.getsampwidth() != SAMPLE_WIDTH
+                or source.getnchannels() != 1
+            ):
+                raise RuntimeError("thinking cue WAV must be mono PCM16")
+            rate = source.getframerate()
+            frames = source.getnframes()
+            if not 8_000 <= rate <= 192_000 or not frames:
+                raise RuntimeError("thinking cue WAV has invalid timing metadata")
+            duration = frames / rate
+            if duration > THINKING_CUE_MAX_SOURCE_SECONDS:
+                raise RuntimeError("thinking cue WAV is unexpectedly long")
+            expected = frames * SAMPLE_WIDTH
+            if len(source.readframes(frames)) != expected:
+                raise RuntimeError("thinking cue WAV is truncated")
+    except (EOFError, wave.Error) as error:
+        raise RuntimeError("thinking cue WAV is malformed") from error
+    return duration
+
+
+def load_private_thinking_cue(path: str) -> bytes:
+    """Load, validate, and soften one private cue without logging its path."""
+    descriptor = open_private_thinking_cue(path)
+    try:
+        before = os.fstat(descriptor)
+        expected_size = before.st_size
+        chunks: list[bytes] = []
+        remaining = expected_size
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if remaining or os.read(descriptor, 1):
+            raise RuntimeError("thinking cue file changed while being read")
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev != before.st_dev
+            or after.st_ino != before.st_ino
+            or after.st_size != expected_size
+            or after.st_mtime_ns != before.st_mtime_ns
+            or after.st_ctime_ns != before.st_ctime_ns
+        ):
+            raise RuntimeError("thinking cue file changed while being read")
+    finally:
+        os.close(descriptor)
+
+    validate_thinking_cue_source(payload)
+    cue = soften_thinking_cue(payload)
+    if validate_tts_wav(cue) > THINKING_CUE_MAX_SECONDS:
+        raise RuntimeError("softened thinking cue is too long")
+    return cue
+
+
 def soften_thinking_cue(payload: bytes) -> bytes:
     """Bound, attenuate, and fade the cached acknowledgement entirely in RAM."""
-    validate_tts_wav(payload)
+    validate_thinking_cue_source(payload)
     with wave.open(io.BytesIO(payload), "rb") as source:
         channels = source.getnchannels()
         rate = source.getframerate()
@@ -1628,7 +2008,7 @@ def soften_thinking_cue(payload: bytes) -> bytes:
 
 
 def fallback_thinking_cue() -> bytes:
-    """Return a quiet, speech-free nasal hum until Audio8's cue is warm."""
+    """Return a quiet speech-free hum when no safe private cue is available."""
     rate = SAMPLE_RATE
     frame_count = int(rate * 0.48)
     fade_frames = int(rate * THINKING_CUE_FADE_SECONDS)
@@ -2099,18 +2479,15 @@ class VoiceBridge:
                     flush=True,
                 )
 
-    def _warm_thinking_cue(self) -> None:
-        """Try once at startup; failure leaves the always-ready safe hum."""
+    def _load_configured_thinking_cue(self) -> None:
+        """Load one optional private WAV; failure leaves the safe local hum."""
+        if self.settings.thinking_cue_wav is None:
+            return
         try:
-            synthesized = synthesize(
-                self.settings,
-                THINKING_CUE_TEXT,
-                timeout_seconds=min(self.settings.tts_timeout_seconds, 5),
-            )
-            cue = soften_thinking_cue(synthesized)
+            cue = load_private_thinking_cue(self.settings.thinking_cue_wav)
         except Exception as error:
             print(
-                "Thinking cue warmup failed: "
+                "Thinking cue load failed: "
                 f"{StatusPublisher._safe_error_type(error)}; using local hum",
                 flush=True,
             )
@@ -2419,7 +2796,7 @@ class VoiceBridge:
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         self.status.start()
-        self._warm_thinking_cue()
+        self._load_configured_thinking_cue()
         if self.stop_event.is_set():
             self.status.stop()
             return

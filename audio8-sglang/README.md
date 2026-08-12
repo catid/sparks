@@ -92,7 +92,7 @@ On C3, with the existing pinned model and private reference directory:
 export AUDIO8_SGLANG_EXPERIMENTAL=1
 ./audio8-sglang/build-image.sh
 
-export AUDIO8_REFERENCE_DIR="$HOME/.local/share/audio8/authorized-voice"
+export AUDIO8_REFERENCE_DIR="$HOME/.local/share/audio8/computer-voice-20260812"
 ./audio8-sglang/run-backend.sh
 ```
 
@@ -100,6 +100,10 @@ export AUDIO8_REFERENCE_DIR="$HOME/.local/share/audio8/authorized-voice"
 `reference.wav`, and `transcript.txt` must all be owned by the invoking service
 UID/GID and have no group or other permission bits (normally directory 0700 and
 files 0600). Symlinks and empty files are rejected before Docker starts.
+Production uses a dated, versioned private reference directory so changing the
+voice never overwrites the prior reference or weakens rollback. Copyrighted
+reference audio and its transcript remain private runtime assets and must not be
+added to this public repository.
 
 The first process stays in the foreground and exposes only
 `127.0.0.1:18010`. The experimental launcher rejects every other port. In a

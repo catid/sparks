@@ -72,6 +72,12 @@ if grep -Fq 'urllib.request.urlopen' \
 fi
 grep -Fq 'urllib.request.ProxyHandler({})' \
   "${repo_root}/voice_assistant/voice_bridge.py"
+if grep -Fq 'Mm.' "${repo_root}/voice_assistant/voice_bridge.py"; then
+  echo "Voice bridge must not synthesize the thinking cue through Audio8." >&2
+  exit 1
+fi
+grep -Fq 'load_private_thinking_cue(self.settings.thinking_cue_wav)' \
+  "${repo_root}/voice_assistant/voice_bridge.py"
 if grep -Eq 'tempfile|mkstemp|NamedTemporaryFile' \
   "${repo_root}/voice_assistant/voice_bridge.py"; then
   echo "Voice bridge must keep audio in memory." >&2

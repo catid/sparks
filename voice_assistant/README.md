@@ -28,13 +28,15 @@ requests and complete replies are not copied into journald.
   The watch word is only recognized in the first two words.
 - Capture is stopped before OpenClaw/TTS work and remains stopped through a
   short playback cooldown, preventing the speaker from waking the microphone.
-- After an accepted command, a quiet roughly 0.6-second `Mm.` cue begins while
-  OpenClaw is thinking. The bridge asks Audio8 for that cue once during its
-  bounded startup warmup, attenuates/fades it, and keeps it only in RAM. A
-  generated quiet hum is always available if the five-second warmup fails. Cue
-  failure is non-fatal, never changes the CLAW/TTS/PLAY progress bands, and the
-  cue is drained or cancelled before answer audio starts.
-- Spoken output is hard-limited to 2,000 characters and 16 Audio8 chunks. If a
+- After an accepted command, a quiet prerecorded communicator cue can begin
+  while OpenClaw is thinking. The bridge loads that optional private WAV once,
+  attenuates, fades, and limits it to 0.65 seconds in RAM. It never asks Audio8
+  to generate the thinking cue. If the asset is unset or unsafe, a speech-free
+  synthetic hum generated in-process is always ready. Cue failure is non-fatal,
+  never changes the CLAW/TTS/PLAY progress bands, and the cue is drained or
+  cancelled before answer audio starts. Neither its path nor content is logged.
+- Spoken output is hard-limited to 2,000 characters, 16 Audio8 chunks, and 300
+  characters per request (the production gateway's reviewed input limit). If a
   longer OpenClaw answer is returned, the log records truncation without logging
   its content.
 
@@ -49,11 +51,35 @@ While `aplay` speaks chunk N in its own process, the client synthesizes exactly
 chunk N+1. The coordinator polls both processes, so playback failure and
 shutdown cancel synthesis promptly rather than waiting for a long HTTP timeout.
 
+Chunk sizes are based on estimated spoken time rather than a single character
+threshold. A complete answer of at most 140 characters remains one request. For
+a longer answer, the first request aims for roughly 4.5 seconds of speech and
+remains under 140 characters, normally ending at the first complete sentence
+between three and seven seconds. This preserves fast time-to-first-audio; a tiny
+opening sentence is combined with its successor instead of creating an extra
+voice reset. For each later request, the planner estimates how much synthesis
+the preceding playback can hide using 162 words/minute, a 16-alphanumeric-
+character-per-second floor for URLs and identifiers, punctuation pauses, a conservative
+0.35 Audio8 real-time factor, 0.35-second fixed overhead, and a 0.35-second
+safety margin. Later chunks prefer the last sentence boundary in that budget,
+up to 16 seconds and 300 characters, so they commonly contain several
+sentences. The estimator is local and deterministic and never exposes answer
+text. These fixed conservative defaults can be adjusted in `voice_bridge.py`
+after measuring a materially different TTS runtime.
+
+Audio8 upstream recommends keeping each generation below roughly 150
+characters for best quality. The first generation and every complete answer
+that fits it honor that guidance. Later generations deliberately trade that
+strict recommendation for within-generation voice consistency: they can use up
+to the gateway's hard accepted 300-character input cap when preceding playback
+can hide the work. The 300-character bound is a service limit, not upstream
+quality guidance, and paired listening tests should accompany future changes.
+
 There is never more than one synthesis request, one active playback process,
 and one future answer WAV. WAVs are passed to `aplay` through anonymous Linux
 `memfd` objects; no named file, temporary directory, recording, or synthesized
 answer is persisted. Playback order cannot overtake synthesis order. A failed
-future synthesis lets the current sentence end cleanly, then stops. A failed
+future synthesis lets the current chunk end cleanly, then stops. A failed
 current playback discards its single prefetched successor. The persistent
 client is reused between turns and terminated on bridge shutdown.
 Transient Audio8 overload responses (`429` and `503`) are retried at most twice
@@ -138,6 +164,7 @@ The defaults match the C3 deployment:
 | `VOICE_OPENCLAW_MODEL` | `openclaw/voice` |
 | `VOICE_OPENCLAW_USER` | `cerberus3-voice` |
 | `VOICE_TTS_URL` | `http://127.0.0.1:8010/v1/audio/speech` |
+| `VOICE_THINKING_CUE_WAV` | unset; use the local synthetic hum |
 | `VOICE_CAPTURE_DEVICE` | `plughw:CARD=CP900,DEV=0` |
 | `VOICE_PLAYBACK_DEVICE` | `plughw:CARD=CP900,DEV=0` |
 | `VOICE_PLAYBACK_LOCK_PATH` | `/var/lib/cerberus3-alarms/playback.lock` |
@@ -147,6 +174,25 @@ Set `VOICE_OPENCLAW_TOKEN` through the root-owned deployment environment file;
 never put it in this public repository. VAD timing, thresholds, dependency
 timeouts, and the armed/cooldown windows are also environment-configurable; see
 `Settings.from_environment()` for their bounded defaults.
+
+To use a prerecorded cue, obtain permission for the clip and keep it outside
+this public repository. The C3 deployment uses the service-account-private
+location `~/.local/share/cerberus-voice/communicator.wav`. Create its parent as
+the service account mode `0700`, install the WAV for that account mode `0600`,
+and add its expanded absolute path to the root-owned mode-`0600` bridge override:
+
+```dotenv
+VOICE_THINKING_CUE_WAV=/home/USER/.local/share/cerberus-voice/communicator.wav
+```
+
+The path must be normalized and absolute. Every path component is opened with
+`O_NOFOLLOW`; directories must be owned by root or the service account and not
+be writable by other users. The file must be a single regular non-symlink and
+single-hardlink object owned by root or the service account, with no access for
+other users and at most group-read permission. It must be a complete mono PCM16
+WAV of 4 MiB or less, at 8-192 kHz, and no longer than ten seconds. The bridge
+uses only its first 0.65 seconds after applying the quiet peak cap and fades.
+Restart `cerberus3-voice-bridge.service` after changing the asset or override.
 
 ## Privacy-safe dashboard status
 

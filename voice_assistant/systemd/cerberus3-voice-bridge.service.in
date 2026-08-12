@@ -22,6 +22,9 @@ Environment=VOICE_OPENCLAW_URL=http://127.0.0.1:18789/v1/chat/completions
 Environment=VOICE_OPENCLAW_MODEL=openclaw/voice
 Environment=VOICE_OPENCLAW_USER=cerberus3-voice
 Environment=VOICE_TTS_URL=http://127.0.0.1:8010/v1/audio/speech
+# Optional private prerecorded cue; override with an absolute path in the
+# root-owned bridge EnvironmentFile. Empty means the in-process synthetic hum.
+Environment=VOICE_THINKING_CUE_WAV=
 Environment=VOICE_CAPTURE_DEVICE=plughw:CARD=CP900,DEV=0
 Environment=VOICE_PLAYBACK_DEVICE=plughw:CARD=CP900,DEV=0
 Environment=VOICE_PLAYBACK_LOCK_PATH=/var/lib/cerberus3-alarms/playback.lock
