@@ -1,7 +1,8 @@
 [Unit]
 Description=DGX Spark C3 1424x280 Xorg dashboard kiosk
 Documentation=file:@PROJECT_DIR@/c3_dashboard/README.md
-Wants=network-online.target dgx-spark-c3-dashboard.service
+Wants=network-online.target
+Requires=dgx-spark-c3-dashboard.service
 After=network-online.target
 After=systemd-user-sessions.service systemd-logind.service plymouth-quit-wait.service
 After=dgx-spark-c3-dashboard.service
@@ -42,10 +43,6 @@ ExecStart=@PROJECT_DIR@/c3_dashboard/scripts/launch-kiosk.sh
 # terminating it, both for an ordinary stop and after an unexpected exit.
 ExecStop=+@CLEANUP_HELPER@ --user @USER@ --uid @UID@ --tty tty7 --main-pid $MAINPID
 ExecStopPost=+@CLEANUP_HELPER@ --user @USER@ --uid @UID@ --tty tty7
-# startx exits 1 after logind deliberately terminates its session during an
-# explicit stop. Treat that known cleanup result as clean; Restart=always still
-# recovers from the same status when it happens outside an operator stop.
-SuccessExitStatus=1
 Restart=always
 RestartSec=15s
 TimeoutStopSec=15s

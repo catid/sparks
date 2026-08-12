@@ -95,6 +95,25 @@ class EnvironmentValidationTests(unittest.TestCase):
         self.assertIn("Restart=always\n", unit)
         self.assertNotIn("Restart=on-failure", unit)
 
+    def test_collector_readiness_and_private_ssh_master_lifecycle(self) -> None:
+        collector = (
+            DASHBOARD_DIR / "systemd" / "dgx-spark-c3-dashboard.service.in"
+        ).read_text()
+        kiosk = (
+            DASHBOARD_DIR / "systemd" / "dgx-spark-c3-kiosk.service.in"
+        ).read_text()
+        self.assertIn("Type=notify\n", collector)
+        self.assertIn("NotifyAccess=main\n", collector)
+        self.assertIn("RuntimeDirectory=dgx-spark-c3-dashboard\n", collector)
+        self.assertIn("RuntimeDirectoryMode=0700\n", collector)
+        self.assertIn("KillMode=control-group\n", collector)
+        self.assertIn(
+            "Environment=C3_DASHBOARD_SSH_CONTROL_DIR=/run/dgx-spark-c3-dashboard\n",
+            collector,
+        )
+        self.assertIn("Requires=dgx-spark-c3-dashboard.service\n", kiosk)
+        self.assertNotIn("SuccessExitStatus=1", kiosk)
+
     def test_parser_rejects_duplicate_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "duplicate.env"

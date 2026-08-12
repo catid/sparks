@@ -11,6 +11,7 @@ set -euo pipefail
 }
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+"${root}/wait-for-docker.sh"
 lock="${root}/RUNTIME.lock.json"
 runtime_uid="$(id -u)"
 runtime_gid="$(id -g)"
@@ -26,7 +27,13 @@ model_dir="${AUDIO8_MODEL_DIR:-${HOME}/models/${values[4]}}"
 model_revision="${values[5]}"
 served_model_name="${values[6]}"
 runtime_fingerprint="${values[7]}"
-cache_dir="${HOME}/.cache/cerberus-audio8-sglang/${runtime_fingerprint}"
+image_fingerprint="$(docker image inspect --format \
+  '{{index .Config.Labels "io.cerberus.audio8-sglang.source-contract-patchset-sha256"}}' \
+  "${image}")" || {
+  echo "Missing ${image}; run audio8-sglang/build-image.sh first." >&2
+  exit 1
+}
+cache_dir="${HOME}/.cache/cerberus-audio8-sglang/${image_fingerprint}"
 
 [[ "${model_dir}" =~ ^/[A-Za-z0-9._/@+-]+$ ]] || {
   echo "Unsafe Audio8 model path: ${model_dir}" >&2
@@ -63,11 +70,19 @@ image_labels="$(docker image inspect --format '{{json .Config.Labels}}' "${image
   echo "Missing ${image}; run audio8-sglang/build-image.sh first." >&2
   exit 1
 }
-printf '%s\n' "${image_labels}" | \
-  python3 "${root}/runtime_identity.py" verify-labels "${lock}" "${root}"
+if [[ "${image_fingerprint}" == "${runtime_fingerprint}" ]]; then
+  printf '%s\n' "${image_labels}" | \
+    python3 "${root}/runtime_identity.py" verify-labels "${lock}" "${root}"
+else
+  [[ "${AUDIO8_SGLANG_ALLOW_GATEWAY_ONLY_UPDATE:-0}" == 1 &&
+     "${image_fingerprint}" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "Image identity differs from this runtime." >&2
+    exit 1
+  }
+fi
 
 python3 "${root}/prepare_cache.py" \
-  "${cache_dir}" "${runtime_fingerprint}" "${runtime_uid}" "${runtime_gid}"
+  "${cache_dir}" "${image_fingerprint}" "${runtime_uid}" "${runtime_gid}"
 mount_options="$(findmnt -n -o OPTIONS -T "${cache_dir}")"
 [[ ",${mount_options}," != *,noexec,* ]] || {
   echo "Audio8 SGLang cache must permit executable mappings." >&2
@@ -77,7 +92,7 @@ mount_options="$(findmnt -n -o OPTIONS -T "${cache_dir}")"
 exec docker run --rm --pull never \
   --name cerberus3-audio8-sglang-backend \
   --label io.cerberus.audio8-sglang.role=backend \
-  --label "io.cerberus.audio8-sglang.runtime-fingerprint=${runtime_fingerprint}" \
+  --label "io.cerberus.audio8-sglang.runtime-fingerprint=${image_fingerprint}" \
   --user "${runtime_uid}:${runtime_gid}" \
   --gpus device=0 \
   --network "name=${backend_network},ip=${backend_ip}" \
@@ -88,6 +103,8 @@ exec docker run --rm --pull never \
   --cap-drop ALL \
   --security-opt no-new-privileges \
   --pids-limit 2048 \
+  --log-opt max-size=10m \
+  --log-opt max-file=3 \
   --tmpfs "/tmp:rw,exec,nosuid,nodev,size=4g,uid=${runtime_uid},gid=${runtime_gid},mode=1777" \
   --health-cmd 'python3 /opt/cerberus/check_health.py backend' \
   --health-interval 5s \

@@ -286,8 +286,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--wait-seconds",
         type=float,
-        default=330,
-        help="wait this long for the next sweep to begin (default: 330)",
+        default=1860,
+        help="wait this long for the next sweep to begin (default: 1860)",
     )
     parser.add_argument(
         "--sample-seconds",

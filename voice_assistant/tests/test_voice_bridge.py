@@ -8,8 +8,10 @@ import pathlib
 import struct
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 
@@ -368,6 +370,171 @@ class ResponseTests(BridgeTestCase):
         logged = output.getvalue()
         self.assertIn("response truncated for speech", logged)
         self.assertNotIn("private-model-output", logged)
+
+
+class HttpDeadlineAndRetryTests(BridgeTestCase):
+    def serve(self, handler_class):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def test_total_deadline_stops_a_trickled_json_response(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                for _ in range(100):
+                    try:
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+                    except OSError:
+                        return
+                    time.sleep(0.04)
+
+        server = self.serve(Handler)
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            self.module.post_json(
+                f"http://127.0.0.1:{server.server_port}/slow",
+                {},
+                timeout=0.15,
+            )
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_cancel_event_aborts_a_blocked_response_read(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.flush()
+                time.sleep(1)
+
+        server = self.serve(Handler)
+        cancelled = threading.Event()
+        timer = threading.Timer(0.1, cancelled.set)
+        timer.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(InterruptedError):
+                self.module.post_json(
+                    f"http://127.0.0.1:{server.server_port}/blocked",
+                    {},
+                    timeout=5,
+                    cancel_event=cancelled,
+                )
+        finally:
+            timer.cancel()
+        self.assertLess(time.monotonic() - started, 0.6)
+
+    def test_tts_retries_429_and_503_with_capped_retry_after(self) -> None:
+        wav = self.module.fallback_thinking_cue()
+
+        class Handler(BaseHTTPRequestHandler):
+            attempts = 0
+
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                type(self).attempts += 1
+                if type(self).attempts <= 2:
+                    self.send_response(429 if type(self).attempts == 1 else 503)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "2")
+                    self.send_header("Retry-After", "999")
+                    self.end_headers()
+                    self.wfile.write(b"{}")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(wav)))
+                self.end_headers()
+                self.wfile.write(wav)
+
+        server = self.serve(Handler)
+        settings = self.settings(
+            tts_url=f"http://127.0.0.1:{server.server_port}/v1/audio/speech"
+        )
+        with mock.patch.object(self.module.time, "sleep") as sleep:
+            self.assertEqual(self.module.synthesize(settings, "hello"), wav)
+        self.assertEqual(Handler.attempts, 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(2.0), mock.call(2.0)])
+
+    def test_tts_does_not_retry_a_non_transient_status(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            attempts = 0
+
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                type(self).attempts += 1
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+        server = self.serve(Handler)
+        settings = self.settings(
+            tts_url=f"http://127.0.0.1:{server.server_port}/v1/audio/speech"
+        )
+        with self.assertRaises(self.module.LocalHttpStatusError) as raised:
+            self.module.synthesize(settings, "hello")
+        self.assertEqual(raised.exception.code, 500)
+        self.assertEqual(Handler.attempts, 1)
+
+    def test_retry_after_http_date_and_invalid_values_are_bounded(self) -> None:
+        future = self.module.email.utils.format_datetime(
+            self.module.datetime.now(self.module.timezone.utc)
+            + self.module.datetime.resolution * 10_000_000
+        )
+        self.assertEqual(
+            self.module.retry_after_delay(future),
+            self.module.TTS_RETRY_MAX_DELAY_SECONDS,
+        )
+        self.assertEqual(self.module.retry_after_delay("not a date"), 0.25)
+
+    def test_dependency_probe_requires_semantic_readiness(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            ready = False
+
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):  # noqa: N802
+                payload = json.dumps({"ready": type(self).ready}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        server = self.serve(Handler)
+        settings = self.settings(
+            openclaw_url=(
+                f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "not ready"):
+            self.module.probe_dependency(settings, "openclaw")
+        Handler.ready = True
+        self.module.probe_dependency(settings, "openclaw")
 
 
 class PlaybackPrimitiveTests(BridgeTestCase):
@@ -1014,7 +1181,7 @@ class PlaybackPipelineTests(BridgeTestCase):
                 events.append("cue-start")
                 return CuePlayback()
 
-            def fake_openclaw(*_args):
+            def fake_openclaw(*_args, **_kwargs):
                 status, _ = StatusPublisherTests.read_status(directory)
                 self.assertEqual(status["overall"]["stage"], "openclaw")
                 self.assertEqual(status["pipeline"]["steps"]["openclaw"], "active")
@@ -1125,6 +1292,37 @@ class StatusPublisherTests(BridgeTestCase):
             self.assertEqual(stopped["overall"]["stage"], "stopped")
             self.assertEqual(stopped["wake_word"]["state"], "stopped")
             self.assertIsNotNone(stopped["stopped_at"])
+
+    def test_dependency_health_is_content_free_and_recovers(self) -> None:
+        private_error = "private dependency response payload"
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = self.module.StatusPublisher(directory, heartbeat_seconds=30)
+            publisher.start()
+            publisher.ready()
+            for name in ("asr", "openclaw", "tts"):
+                publisher.dependency_result(name)
+            publisher.dependency_result("tts", TimeoutError(private_error))
+            failed, raw = self.read_status(directory)
+            publisher.dependency_result("tts")
+            recovered, _ = self.read_status(directory)
+            publisher.stop()
+
+        self.assertEqual(failed["overall"]["state"], "degraded")
+        self.assertEqual(failed["last_error"], {
+            "stage": "tts_synthesis",
+            "type": "TimeoutError",
+            "at": failed["last_error"]["at"],
+        })
+        self.assertEqual(
+            set(failed["dependencies"]), {"asr", "openclaw", "tts"}
+        )
+        self.assertEqual(failed["dependencies"]["tts"]["state"], "error")
+        self.assertEqual(
+            failed["dependencies"]["tts"]["error_type"], "TimeoutError"
+        )
+        self.assertNotIn(private_error.encode(), raw)
+        self.assertIsNone(recovered["last_error"])
+        self.assertEqual(recovered["overall"]["state"], "ready")
 
     def test_heartbeat_advances_without_resetting_stage_start(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1243,7 +1441,7 @@ class StatusPublisherTests(BridgeTestCase):
 
             observed = []
 
-            def at_asr(*_args):
+            def at_asr(*_args, **_kwargs):
                 current, _ = self.read_status(directory)
                 observed.append(
                     (
@@ -1254,7 +1452,7 @@ class StatusPublisherTests(BridgeTestCase):
                 )
                 return private_transcript
 
-            def at_openclaw(*_args):
+            def at_openclaw(*_args, **_kwargs):
                 current, _ = self.read_status(directory)
                 observed.append(
                     (current["overall"]["stage"], current["openclaw"]["state"])

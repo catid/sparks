@@ -129,6 +129,13 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(result["top_k"], 50)
         self.assertNotIn("references", result)
 
+    def test_log_text_escapes_control_characters(self) -> None:
+        self.assertEqual(
+            gateway.sanitize_log_text("safe\nforged\x1b[31m\x7f"),
+            "safe\\x0aforged\\x1b[31m\\x7f",
+        )
+        self.assertEqual(gateway.sanitize_log_text("plain request"), "plain request")
+
     def test_client_reference_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "client-supplied"):
             self.runtime.normalize_request(

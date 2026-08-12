@@ -3,6 +3,7 @@ Description=Qwen3 ASR 1.7B service for Cerberus on cerberus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
 Wants=network-online.target docker.service
 After=network-online.target docker.service
+PartOf=cerberus3-voice-stack.target
 Conflicts=cerebrus3-qwen3-asr.service
 StartLimitIntervalSec=0
 
@@ -22,11 +23,12 @@ Environment=TORCH_HOME=@ASR_CACHE_DIR@/torch
 EnvironmentFile=-/etc/default/cerberus3-qwen3-asr
 ExecStartPre=-/usr/bin/docker rm -f cerberus3-qwen-asr
 ExecStart=@PROJECT_DIR@/voice_assistant/run-asr.sh
-ExecStop=-/usr/bin/docker stop --time 30 cerberus3-qwen-asr
+ExecStartPost=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/wait-dependency-ready.py asr --timeout 180
+ExecStop=-/usr/bin/docker stop --timeout 20 cerberus3-qwen-asr
 Restart=always
 RestartSec=5s
-TimeoutStartSec=0
-TimeoutStopSec=30s
+TimeoutStartSec=210s
+TimeoutStopSec=35s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

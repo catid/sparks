@@ -19,7 +19,7 @@ SPEC.loader.exec_module(runtime_identity)
 
 
 EXPECTED_REPOSITORY_FINGERPRINT = (
-    "2cf49c3ec3433f53e46c016813885dbaedc212d2b7b93e872f1e87070008b7b4"
+    "21d5136c14d390ec6736bae173f059a732e34b3533061a04b09f9bcda3699557"
 )
 
 

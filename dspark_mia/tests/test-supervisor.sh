@@ -289,4 +289,21 @@ if grep -Fq 'UNEXPECTED:' "${case_dir}/events.log"; then
   exit 1
 fi
 
+grep -Fq 'poll_seconds="${MIA_SUPERVISOR_POLL_SECONDS:-30}"' \
+  "${root}/bin/supervise.sh"
+grep -Fq 'ControlMaster=auto' "${root}/bin/probe.sh"
+grep -Fq 'ControlPersist=90' "${root}/bin/probe.sh"
+grep -Fq 'MIA_SUPERVISOR_POLL_SECONDS=30' \
+  "${root}/../systemd/dgx-spark-dspark-mia.service.in"
+grep -Fq 'MIA_HEALTH_FULL_PROBE_INTERVAL_SECONDS=30' \
+  "${root}/../systemd/dgx-spark-dspark-mia.service.in"
+grep -Fq 'MIA_SSH_CONTROL_DIR=/run/dgx-spark-dspark-mia/ssh' \
+  "${root}/../systemd/dgx-spark-dspark-mia.service.in"
+grep -Fq 'ssh_control_dir="${MIA_SUPERVISOR_RUNTIME_DIR}/ssh"' \
+  "${root}/bin/probe.sh"
+grep -Fq 'MIA_HEALTH_FULL_PROBE_INTERVAL_SECONDS:-30' \
+  "${root}/bin/probe.sh"
+grep -Fq 'rm -f -- "${MIA_SUPERVISOR_RUNTIME_DIR}/last-full-probe"' \
+  "${root}/bin/stop.sh"
+
 echo "Supervisor tests passed: adoption, coordinated recovery, epoch identity, soft-failure accumulation, probe timeout, retry backoff, and lifecycle locking."

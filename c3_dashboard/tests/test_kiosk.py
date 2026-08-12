@@ -91,6 +91,20 @@ class RenderingPolicyTests(unittest.TestCase):
         source = pathlib.Path(kiosk.__file__).read_text(encoding="utf-8")
         self.assertIn("set_background_color(Gdk.RGBA(0, 0, 0, 1.0))", source)
 
+    def test_load_failure_is_handled_with_self_contained_exact_black_fallback(self) -> None:
+        source = pathlib.Path(kiosk.__file__).read_text(encoding="utf-8")
+        compact = "".join(kiosk.BLACK_FALLBACK_HTML.split()).lower()
+        self.assertIn("background:#000!important", compact)
+        self.assertNotIn("http:", compact)
+        self.assertNotIn("https:", compact)
+        self.assertIn("self.webview.load_html(BLACK_FALLBACK_HTML", source)
+        self.assertIn("GLib.idle_add(self._show_black_fallback)", source)
+        failure_body = source.split("def _on_load_failed", 1)[1].split(
+            "def _on_web_process_terminated", 1
+        )[0]
+        self.assertIn("return True", failure_body)
+        self.assertNotIn("return False", failure_body)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,6 +61,13 @@ dashboard/run-dashboard.sh
 The server refuses a non-loopback bind without credentials. See
 `dashboard.env.example` for endpoint overrides.
 
+The systemd service keeps per-host OpenSSH control sockets in its private
+runtime directory, avoiding a fresh handshake for each telemetry sample.
+Multiplexed commands still create PAM sessions, so remote hardware defaults to
+a separate 30-second cadence while local/token data retains its faster refresh
+(`DASHBOARD_REMOTE_INTERVAL`). Systemd removes the sockets and their master
+processes when the service stops.
+
 ## Inference topology
 
 These are the TP2 settings used by `dashboard.env.example`:

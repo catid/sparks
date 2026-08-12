@@ -2,7 +2,8 @@
 
 This directory contains the dedicated 1424×280 status display for Cerberus C3.
 It is independent of the larger two-node operator dashboard in `dashboard/`.
-The HTTP collector samples Cerberus C1, C2, and C3 every five seconds; the local
+The HTTP collector updates every five seconds, sampling local C3 each cycle and
+remote C1/C2 on an independent 30-second cadence; the local
 screen shows separate current and rolling C1/C2/C3 CPU, GPU, and unified-RAM
 utilization traces with companion thermal plots. CPU temperature is the
 hottest named GB10 cluster sensor and GPU temperature comes from NVIDIA SMI.
@@ -32,8 +33,10 @@ minutes a topmost, exact-black 48-pixel band crosses the 1424x280 panel in 3.2
 seconds, then repeats no more than once per 30 minutes. At that speed every row
 stays black for about 0.47 seconds—over nine times the DP-0101's specified 50
 ms response time. A recognized voice command, model/TTS work, changed health,
-recovery, or local input postpones the next pass; ignored background speech
-that merely invokes ASR does not. The dashboard remains visible outside the band.
+recovery, or local input postpones a quiet-time pass; ignored background speech
+that merely invokes ASR does not. An independent 30-minute panel-care deadline
+still forces a complete pass during continuous work, and activity cannot cancel
+that forced pass. The dashboard remains visible outside the band.
 DeskPi publishes no image-retention recovery duration or cadence for this
 panel. The response-time figure is used only to ensure the band is not moving
 faster than the liquid crystals can visibly transition; the 30-minute cadence
@@ -142,10 +145,25 @@ existing `known_hosts`, the voice heartbeat under `/run`, and the native panel
 mode. Host-key entries still need to be verified through a trusted channel
 before unattended use.
 
+Remote C1/C2 samples use OpenSSH connection sharing and, more importantly, one
+remote command per node every 30 seconds rather than a new PAM session every
+five seconds. Cached samples retain their original timestamp, expose
+`sample_cached=true`, accumulate an honest `age_seconds`, and become `stale`
+after 65 seconds instead of masquerading as fresh. `systemd` owns a mode-0700
+`/run/dgx-spark-c3-dashboard` directory; `ControlMaster=auto`, OpenSSH's `%C`
+destination hash, strict host-key checking, and a 40-second `ControlPersist`
+bound reuse to the same destination tuple and a short time window. The master
+processes stay in the service cgroup and its runtime directory is removed on
+stop, so a service restart cannot inherit stale sockets. The metrics scrape
+uses curl's total `--max-time` plus an independent process-group watchdog; DNS,
+headers, and a body that trickles forever all share the same scrape deadline.
+
 ## Boot and failure behavior
 
-The collector listens only on loopback and has unlimited systemd restart
-attempts, including after an unexpected clean exit. The kiosk likewise has
+The collector binds its loopback listener before starting the first scrape and
+uses `Type=notify`; the kiosk's required dependency is released only after that
+listener can serve a valid `starting` snapshot. The collector has unlimited
+systemd restart attempts, including after an unexpected clean exit. The kiosk likewise has
 unlimited restart attempts with a 15-second delay. On every start
 it launches rootless Xorg with TCP listening disabled, discovers a connected
 XRandR output, disables other active outputs, and requires the selected output
@@ -173,7 +191,9 @@ usable.
 
 The WebKit client is restricted to the configured loopback origin, denies web
 permissions, hides the pointer, disables screen blanking when supported, and
-retries initial page-load failures every five seconds. Its home, caches, and
+retries initial page-load failures every five seconds. A failed navigation is
+handled instead of showing WebKit's stock error page: the kiosk displays a
+self-contained exact-black fallback until retry succeeds. Its home, caches, and
 transient D-Bus session live under a systemd-owned runtime directory rather
 than the operator's home. WebKit's nested bubblewrap/FUSE sandbox is disabled
 because it cannot mount inside the already hardened systemd namespace; the
@@ -207,10 +227,12 @@ has remained exact RGB black for at least three samples spanning 100 ms:
 sudo -u catid c3_dashboard/scripts/verify-black-sweep.py \
   --display :0 \
   --xauthority /run/dgx-spark-c3-kiosk/.Xauthority \
-  --wait-seconds 330
+  --wait-seconds 1860
 ```
 
-The check samples the real X root, not the DOM. It verifies digital scanout
+The 1,860-second default covers the independent 30-minute maximum deferral plus
+a one-minute scheduling margin, so the verifier can observe a healthy sweep
+even during continuous work. The check samples the real X root, not the DOM. It verifies digital scanout
 content; an LCD still has uniform backlight glow while the requested row is
 black. This TFT has no OLED-style pixel-refresh cycle: the sweep and existing
 nine-position one-pixel nudge simply avoid leaving identical liquid-crystal
@@ -229,6 +251,10 @@ KiB, accepts only schema version 1 for `cerberus-voice`, and exposes only a
 fixed operational-field allowlist. Transcripts, requests, replies, API tokens,
 and raw exception messages are neither read into nor returned by the dashboard.
 Three missed two-second heartbeats mark the voice state stale after six seconds.
+If a future schema-1 producer adds `dependencies` or `readiness.dependencies`
+for ASR, OpenClaw, and TTS, the reader exposes only those fixed names and their
+readiness. Explicitly unready dependencies degrade voice health; an absent or
+unknown extension remains neutral for today's producer.
 The background voice progress ribbon polls its dedicated endpoint every 750 ms, independently of
 the five-second SSH/metrics collector. A voice heartbeat or endpoint failure
 therefore cannot mark the cluster telemetry offline.

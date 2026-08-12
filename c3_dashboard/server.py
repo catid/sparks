@@ -22,6 +22,7 @@ import signal
 import socket
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -36,6 +37,8 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parent
 DEFAULT_NODES = ("cerberus1", "cerberus2", "cerberus3")
 DEFAULT_INTERVAL_SECONDS = 5.0
+DEFAULT_REMOTE_PROBE_INTERVAL_SECONDS = 30.0
+DEFAULT_REMOTE_PROBE_STALE_SECONDS = 65.0
 DEFAULT_HISTORY_POINTS = 60
 MAX_HISTORY_POINTS = 60
 DEFAULT_PORT = 9763
@@ -44,6 +47,8 @@ MAX_VOICE_STATUS_BYTES = 32 * 1024
 MAX_PUBLIC_ERROR_LENGTH = 160
 DEFAULT_VOICE_STATUS_PATH = "/run/cerberus3-voice-bridge/status.json"
 DEFAULT_VOICE_STALE_SECONDS = 6.0
+DEFAULT_SSH_CONTROL_PERSIST_SECONDS = 40
+MAX_SSH_CONTROL_PATH_BYTES = 100
 MAX_STATUS_TIMESTAMP = 253_402_300_799.0  # 9999-12-31T23:59:59Z
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 STATUS_TOKEN_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
@@ -386,15 +391,66 @@ def process_start_marker(text: str) -> tuple[float, ...] | None:
 
 
 def fetch_text(url: str, timeout: float) -> str:
-    request = urllib.request.Request(
+    """Fetch one bounded scrape under a wall-clock deadline.
+
+    Python's urllib/socket timeout is an inactivity timeout: a peer can keep a
+    collector thread alive forever by trickling one byte before each timeout.
+    curl's --max-time covers DNS, connect, headers, and body.  The independent
+    process-group watchdog includes process startup and remains the final
+    total-deadline authority.
+    """
+    deadline_seconds = finite_float(timeout)
+    if deadline_seconds is None or deadline_seconds <= 0:
+        raise ValueError("metrics timeout must be positive")
+    deadline = time.monotonic() + deadline_seconds
+    command = [
+        "curl",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--proto",
+        "=http",
+        "--connect-timeout",
+        f"{min(deadline_seconds, 2.0):.3f}",
+        "--max-time",
+        f"{deadline_seconds:.3f}",
+        "--max-filesize",
+        str(MAX_METRICS_BYTES),
+        "--header",
+        "Accept: text/plain",
+        "--user-agent",
+        "c3-cluster-dashboard/1.0",
         url,
-        headers={"Accept": "text/plain", "User-Agent": "c3-cluster-dashboard/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        status = getattr(response, "status", 200)
-        if status != 200:
-            raise OSError(f"metrics endpoint returned HTTP {status}")
-        body = response.read(MAX_METRICS_BYTES + 1)
+    ]
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            _stdout, stderr = process.communicate(
+                timeout=max(0.001, deadline - time.monotonic())
+            )
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            raise TimeoutError("metrics endpoint timed out") from exc
+        if process.returncode == 28:
+            raise TimeoutError("metrics endpoint timed out")
+        if process.returncode:
+            # Never reflect the URL, response body, or curl diagnostic into
+            # the public API. Exit 63 is curl's maximum-filesize failure.
+            if process.returncode == 63:
+                raise OSError("metrics response exceeded size limit")
+            raise OSError("metrics endpoint unavailable")
+        output.seek(0)
+        body = output.read(MAX_METRICS_BYTES + 1)
     if len(body) > MAX_METRICS_BYTES:
         raise OSError("metrics response exceeded size limit")
     return body.decode("utf-8", "replace")
@@ -501,6 +557,24 @@ class VoiceStatusReader:
             "unknown",
         }
     )
+    DEPENDENCY_NAMES = ("asr", "openclaw", "tts")
+    DEPENDENCY_READY_STATES = frozenset(
+        {"ready", "healthy", "ok", "up", "online", "available", "active"}
+    )
+    DEPENDENCY_UNREADY_STATES = frozenset(
+        {
+            "down",
+            "error",
+            "failed",
+            "unhealthy",
+            "unavailable",
+            "offline",
+            "starting",
+            "stopped",
+            "disabled",
+            "not_ready",
+        }
+    )
 
     def __init__(self, path: str, stale_after_seconds: float) -> None:
         candidate = Path(path)
@@ -546,6 +620,14 @@ class VoiceStatusReader:
                 "active": False,
                 "mode": "unknown",
                 "steps": {step: "unknown" for step in self.PIPELINE_STEPS},
+            },
+            "dependencies": {
+                "reported": False,
+                "healthy": None,
+                "services": {
+                    name: {"reported": False, "ready": None, "state": "unknown"}
+                    for name in self.DEPENDENCY_NAMES
+                },
             },
             "last_error": None,
             "status_error": error_code,
@@ -631,6 +713,66 @@ class VoiceStatusReader:
                 else None
             )
         return result
+
+    def _dependencies(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Normalize an optional future dependency-readiness extension.
+
+        The deployed schema-1 producer does not currently emit this block.
+        Absence and unknown values are therefore neutral; only an explicit,
+        recognized unready value may degrade the dashboard's voice health.
+        """
+        source = status_mapping(raw.get("dependencies"))
+        if not source:
+            readiness = status_mapping(raw.get("readiness"))
+            source = status_mapping(readiness.get("dependencies"))
+            if not source and any(name in readiness for name in self.DEPENDENCY_NAMES):
+                source = readiness
+        services: dict[str, dict[str, Any]] = {}
+        any_reported = False
+        any_unready = False
+        known_values = 0
+        for name in self.DEPENDENCY_NAMES:
+            present = name in source
+            value = source.get(name)
+            ready: bool | None = None
+            state = "unknown"
+            if isinstance(value, bool):
+                ready = value
+                state = "ready" if value else "unready"
+            elif isinstance(value, str):
+                state = status_token(value)
+                if state in self.DEPENDENCY_READY_STATES:
+                    ready = True
+                elif state in self.DEPENDENCY_UNREADY_STATES:
+                    ready = False
+            elif isinstance(value, dict):
+                raw_state = status_token(value.get("state"))
+                state = raw_state
+                if isinstance(value.get("ready"), bool):
+                    ready = value["ready"]
+                elif isinstance(value.get("healthy"), bool):
+                    ready = value["healthy"]
+                elif state in self.DEPENDENCY_READY_STATES:
+                    ready = True
+                elif state in self.DEPENDENCY_UNREADY_STATES:
+                    ready = False
+            if present:
+                any_reported = True
+            if ready is not None:
+                known_values += 1
+                any_unready = any_unready or not ready
+            services[name] = {
+                "reported": present,
+                "ready": ready,
+                "state": state,
+            }
+        return {
+            "reported": any_reported,
+            "healthy": (
+                False if any_unready else True if known_values else None
+            ),
+            "services": services,
+        }
 
     def _derived_pipeline(
         self,
@@ -828,6 +970,7 @@ class VoiceStatusReader:
             overall.get("stage_started_at"), status_clock
         )
         healthy = state in {"ready", "busy", "armed"} and not stale
+        dependencies = self._dependencies(raw)
 
         armed_until = timestamp_epoch(wake_word.get("armed_until"))
         last_triggered = past_event_timestamp(
@@ -862,11 +1005,15 @@ class VoiceStatusReader:
             status_clock=status_clock,
             stale=stale,
         )
+        public_state = "stale" if stale else state
+        if not stale and dependencies["healthy"] is False:
+            public_state = "degraded"
+            healthy = False
         return {
             "schema": 1,
             "service": "cerberus-voice",
             "device": "Cerberus",
-            "state": "stale" if stale else state,
+            "state": public_state,
             "healthy": healthy,
             "stage": stage,
             "stage_started_at": (
@@ -912,6 +1059,7 @@ class VoiceStatusReader:
             "openclaw": openclaw,
             "tts": tts,
             "pipeline": pipeline,
+            "dependencies": dependencies,
             "last_error": last_error,
             "status_error": "stale" if stale else None,
         }
@@ -1111,6 +1259,31 @@ def probe_failure(result: subprocess.CompletedProcess[str], remote: bool) -> str
     return fallback
 
 
+def validate_ssh_control_dir(path: str | None) -> str | None:
+    """Validate the systemd-owned private directory used for SSH masters."""
+    if path is None or not path.strip():
+        return None
+    candidate = Path(path)
+    if not candidate.is_absolute() or not str(candidate).startswith("/run/"):
+        raise ValueError("SSH control directory must be an absolute path under /run")
+    try:
+        metadata = os.lstat(candidate)
+    except OSError as exc:
+        raise ValueError("SSH control directory is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("SSH control directory must be a real directory")
+    if Path(os.path.realpath(candidate)) != candidate:
+        raise ValueError("SSH control directory must use its canonical path")
+    if metadata.st_uid != os.geteuid() or metadata.st_gid != os.getegid():
+        raise ValueError("SSH control directory must be owned by the service user")
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise ValueError("SSH control directory must have mode 0700")
+    control_path = str(candidate / "ssh-%C")
+    if len(os.fsencode(control_path)) > MAX_SSH_CONTROL_PATH_BYTES:
+        raise ValueError("SSH control path is too long")
+    return str(candidate)
+
+
 class HostProber:
     def __init__(
         self,
@@ -1118,11 +1291,13 @@ class HostProber:
         known_hosts: str | None,
         local_hostname: str | None = None,
         timeout: float = 4.0,
+        control_dir: str | None = None,
     ) -> None:
         self.ssh_key = ssh_key
         self.known_hosts = known_hosts
         self.local_hostname = canonical_host(local_hostname or socket.gethostname())
         self.timeout = timeout
+        self.control_dir = validate_ssh_control_dir(control_dir)
 
     def command(self, host: str) -> list[str]:
         if canonical_host(host) == self.local_hostname:
@@ -1142,6 +1317,19 @@ class HostProber:
             "-o",
             "ConnectionAttempts=1",
         ]
+        if self.control_dir:
+            command.extend(
+                [
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    f"ControlPersist={DEFAULT_SSH_CONTROL_PERSIST_SECONDS}s",
+                    "-o",
+                    f"ControlPath={self.control_dir}/ssh-%C",
+                    "-o",
+                    "StreamLocalBindUnlink=yes",
+                ]
+            )
         if self.ssh_key:
             command.extend(["-i", self.ssh_key])
         if self.known_hosts:
@@ -1190,6 +1378,7 @@ class Collector:
         metrics_fetcher: Callable[[str, float], str] = fetch_text,
         ssh_key: str | None = None,
         known_hosts: str | None = None,
+        ssh_control_dir: str | None = None,
         voice_status_path: str = DEFAULT_VOICE_STATUS_PATH,
         voice_stale_after_seconds: float = DEFAULT_VOICE_STALE_SECONDS,
     ) -> None:
@@ -1200,7 +1389,9 @@ class Collector:
         # Clamp stale/custom environments here too so an old 720-point setting
         # cannot recreate a large public response after a code-only upgrade.
         self.history_points = min(MAX_HISTORY_POINTS, max(2, history_points))
-        self.host_prober = host_prober or HostProber(ssh_key, known_hosts)
+        self.host_prober = host_prober or HostProber(
+            ssh_key, known_hosts, control_dir=ssh_control_dir
+        )
         self.metrics_fetcher = metrics_fetcher
         self.voice_status_reader = VoiceStatusReader(
             voice_status_path, voice_stale_after_seconds
@@ -1213,6 +1404,12 @@ class Collector:
         )
         self.previous_cpu: dict[str, tuple[float, float]] = {}
         self.last_host_success: dict[str, float] = {}
+        self.local_hostname = canonical_host(socket.gethostname())
+        self.remote_probe_interval = DEFAULT_REMOTE_PROBE_INTERVAL_SECONDS
+        self.remote_probe_stale_after = DEFAULT_REMOTE_PROBE_STALE_SECONDS
+        self.raw_host_cache: dict[str, tuple[dict[str, Any], float]] = {}
+        self.host_status_cache: dict[str, dict[str, Any]] = {}
+        self.next_remote_probe_clock: dict[str, float] = {}
         self.history: list[dict[str, Any]] = []
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -1237,6 +1434,7 @@ class Collector:
                 "ram_total_bytes": None,
                 "sampled_at": None,
                 "age_seconds": None,
+                "sample_cached": False,
                 "error": None,
             }
             for name in self.nodes
@@ -1306,7 +1504,14 @@ class Collector:
             raw = {"error": "probe returned an invalid result"}
         return raw, time.time()
 
-    def _host_status(self, name: str, raw: dict[str, Any], now: float) -> dict[str, Any]:
+    def _host_status(
+        self,
+        name: str,
+        raw: dict[str, Any],
+        observed_at: float,
+        completed_at: float | None = None,
+    ) -> dict[str, Any]:
+        completed_at = observed_at if completed_at is None else completed_at
         error = raw.get("error")
         reported_hostname = raw.get("reported_hostname")
         if not error:
@@ -1342,10 +1547,11 @@ class Collector:
                 "ram_total_bytes": None,
                 "sampled_at": None,
                 "age_seconds": (
-                    round(max(0.0, now - last_seen), 1)
+                    round(max(0.0, completed_at - last_seen), 1)
                     if last_seen is not None
                     else None
                 ),
+                "sample_cached": False,
                 "error": bounded_public_error(error, "host probe failed"),
             }
 
@@ -1368,7 +1574,7 @@ class Collector:
             ram_used = ram_total - ram_available
             ram = percent(ram_used / ram_total * 100)
 
-        self.last_host_success[name] = now
+        self.last_host_success[name] = observed_at
         memory_temperature = celsius(raw.get("memory_temperature_c"))
         ram_temperature = celsius(raw.get("ram_temperature_c"))
         if memory_temperature is None:
@@ -1390,22 +1596,51 @@ class Collector:
             "memory_temperature_sensor_available": memory_temperature is not None,
             "ram_used_bytes": ram_used,
             "ram_total_bytes": ram_total if isinstance(ram_total, int) else None,
-            "sampled_at": utc_timestamp(now),
-            "age_seconds": 0.0,
+            "sampled_at": utc_timestamp(observed_at),
+            "age_seconds": round(max(0.0, completed_at - observed_at), 1),
+            "sample_cached": False,
             "error": None,
         }
+
+    def _cached_host_status(self, name: str, completed_at: float) -> dict[str, Any]:
+        status = copy.deepcopy(self.host_status_cache[name])
+        status["sample_cached"] = True
+        last_seen = self.last_host_success.get(name)
+        if last_seen is not None:
+            age = round(max(0.0, completed_at - last_seen), 1)
+            status["age_seconds"] = age
+            if status["state"] == "up" and age > self.remote_probe_stale_after:
+                status["state"] = "stale"
+                status["error"] = "remote telemetry sample is stale"
+        return status
 
     def collect(self, now: float | None = None) -> None:
         fixed_test_time = now is not None
         cycle_time = time.time() if now is None else now
+        cycle_clock = time.monotonic()
         raw_hosts: dict[str, dict[str, Any]] = {}
         host_observed_at: dict[str, float] = {}
+        fresh_host_sample: dict[str, bool] = {}
+        due_names = []
+        for name in self.nodes:
+            remote = canonical_host(name) != self.local_hostname
+            due = (
+                fixed_test_time
+                or not remote
+                or name not in self.raw_host_cache
+                or cycle_clock >= self.next_remote_probe_clock.get(name, 0.0)
+            )
+            if due:
+                due_names.append(name)
+            else:
+                raw_hosts[name], host_observed_at[name] = self.raw_host_cache[name]
+                fresh_host_sample[name] = False
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(self.nodes) + 1,
+            max_workers=max(1, len(due_names) + 1),
             thread_name_prefix="c3-metric",
         ) as executor:
             host_futures = {
-                name: executor.submit(self._probe_host, name) for name in self.nodes
+                name: executor.submit(self._probe_host, name) for name in due_names
             }
             counter_future = executor.submit(self._scrape_counter)
             for name, future in host_futures.items():
@@ -1420,6 +1655,15 @@ class Collector:
                     host_observed_at[name] = (
                         cycle_time if fixed_test_time else time.time()
                     )
+                fresh_host_sample[name] = True
+                if not fixed_test_time and canonical_host(name) != self.local_hostname:
+                    self.raw_host_cache[name] = (
+                        raw_hosts[name],
+                        host_observed_at[name],
+                    )
+                    self.next_remote_probe_clock[name] = (
+                        time.monotonic() + self.remote_probe_interval
+                    )
             try:
                 counter_sample = counter_future.result()
             except Exception as exc:
@@ -1429,12 +1673,21 @@ class Collector:
                     "observed_clock": time.monotonic(),
                 }
 
-        hosts = {
-            name: self._host_status(
-                name, raw_hosts[name], host_observed_at[name]
+        host_completed_at = cycle_time if fixed_test_time else time.time()
+        hosts: dict[str, dict[str, Any]] = {}
+        for name in self.nodes:
+            if not fresh_host_sample[name] and name in self.host_status_cache:
+                hosts[name] = self._cached_host_status(name, host_completed_at)
+                continue
+            status = self._host_status(
+                name,
+                raw_hosts[name],
+                host_observed_at[name],
+                host_completed_at,
             )
-            for name in self.nodes
-        }
+            hosts[name] = status
+            if canonical_host(name) != self.local_hostname:
+                self.host_status_cache[name] = copy.deepcopy(status)
         cpu, cpu_count = average_field(hosts, "cpu_percent")
         gpu, gpu_count = average_field(hosts, "gpu_percent")
         ram, ram_count = average_field(hosts, "ram_percent")
@@ -1572,7 +1825,10 @@ class Collector:
             }
 
     def run(self) -> None:
-        deadline = time.monotonic() + self.interval
+        # The HTTP listener is already bound when this thread starts. Collect
+        # immediately, while the starting snapshot remains available to the
+        # kiosk, then preserve a monotonic interval thereafter.
+        deadline = time.monotonic()
         while True:
             delay = max(0.0, deadline - time.monotonic())
             if self.stop_event.wait(delay):
@@ -1694,6 +1950,24 @@ def optional_path(environment_name: str, default: Path) -> str | None:
     return value.strip() or None
 
 
+def systemd_notify(message: str) -> bool:
+    """Send a best-effort sd_notify datagram without a runtime dependency."""
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return False
+    if address.startswith("@"):  # systemd's abstract UNIX socket notation
+        address = "\0" + address[1:]
+    notifier = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC)
+    try:
+        notifier.connect(address)
+        notifier.sendall(message.encode("utf-8"))
+    except OSError:
+        return False
+    finally:
+        notifier.close()
+    return True
+
+
 def main() -> None:
     args = parse_args()
     if not 1 <= args.port <= 65535:
@@ -1738,6 +2012,7 @@ def main() -> None:
             "C3_DASHBOARD_SSH_KNOWN_HOSTS",
             user_ssh / "dgx_cluster_known_hosts",
         ),
+        ssh_control_dir=os.environ.get("C3_DASHBOARD_SSH_CONTROL_DIR"),
         voice_status_path=os.environ.get(
             "C3_DASHBOARD_VOICE_STATUS_PATH", DEFAULT_VOICE_STATUS_PATH
         ),
@@ -1748,22 +2023,26 @@ def main() -> None:
             )
         ),
     )
-    collector.collect()
+    # Bind and expose the explicit "starting" snapshot before any remote
+    # collection.  A stalled/down dependency can no longer prevent the kiosk
+    # from receiving a valid black-backed page at boot.
+    server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
+    server.collector = collector  # type: ignore[attr-defined]
     collector_thread = threading.Thread(
         target=collector.run, name="c3-collector", daemon=True
     )
     collector_thread.start()
-    server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
-    server.collector = collector  # type: ignore[attr-defined]
     print(
         f"C3 cluster dashboard listening on http://{args.host}:{args.port}",
         flush=True,
     )
+    systemd_notify("READY=1\nSTATUS=dashboard bound; first collection started")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        systemd_notify("STOPPING=1\nSTATUS=dashboard stopping")
         collector.stop_event.set()
         server.server_close()
         collector_thread.join(timeout=max(5.0, collector.interval + 1.0))

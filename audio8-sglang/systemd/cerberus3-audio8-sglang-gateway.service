@@ -4,28 +4,28 @@ Documentation=file:/home/catid/sparks/audio8-sglang/README.md
 Wants=network-online.target docker.service cerberus3-audio8-sglang-network.service cerberus3-audio8-sglang-backend.service
 Requires=cerberus3-audio8-sglang-network.service
 After=network-online.target docker.service cerberus3-audio8-sglang-network.service cerberus3-audio8-sglang-backend.service
-StartLimitIntervalSec=300
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
 User=catid
 Group=catid
 WorkingDirectory=/usr/local/lib/cerberus3-audio8-sglang
 Environment=HOME=/home/catid
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 Environment=AUDIO8_SGLANG_PRODUCTION=1
+Environment=AUDIO8_SGLANG_ALLOW_GATEWAY_ONLY_UPDATE=1
 ExecStartPre=+/usr/local/lib/cerberus3-audio8-sglang/ensure-production-networks.sh
 ExecStartPre=-/usr/bin/docker rm -f cerberus3-audio8-sglang-gateway
-ExecStart=/usr/local/lib/cerberus3-audio8-sglang/run-production-gateway.sh
-ExecStartPost=/usr/local/lib/cerberus3-audio8-sglang/wait-production-gateway.sh
+ExecStart=/usr/local/lib/cerberus3-audio8-sglang/supervise-production-gateway.sh
 ExecStop=-/usr/bin/docker stop --time 15 cerberus3-audio8-sglang-gateway
-Restart=always
+Restart=on-failure
 RestartSec=5s
 RestartPreventExitStatus=2
-SuccessExitStatus=143
-TimeoutStartSec=120s
+TimeoutStartSec=0
 TimeoutStopSec=30s
+WatchdogSec=30s
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only

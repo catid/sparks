@@ -64,6 +64,7 @@ pin_file="${model_dir}/.pinned-revision"
 }
 
 exec docker run --rm \
+  --init \
   --name cerberus3-qwen-asr \
   --user "${runtime_uid}:${runtime_gid}" \
   --gpus all \
@@ -73,7 +74,7 @@ exec docker run --rm \
   --cap-drop ALL \
   --security-opt no-new-privileges \
   --pids-limit 1024 \
-  --stop-timeout 30 \
+  --stop-timeout 20 \
   --tmpfs "/tmp:rw,nosuid,nodev,size=1g,uid=${runtime_uid},gid=${runtime_gid}" \
   --tmpfs "/cache:rw,nosuid,nodev,size=1g,uid=${runtime_uid},gid=${runtime_gid}" \
   --env HOME=/tmp \
@@ -90,5 +91,10 @@ exec docker run --rm \
   --env "QWEN_ASR_VOCABULARY_PROMPT=${QWEN_ASR_VOCABULARY_PROMPT:-Vocabulary: Cerberus, Cerberus One, Cerberus Two, Cerberus Three, cerberus1, cerberus2, cerberus3.}" \
   --env "QWEN_ASR_MAX_AUDIO_SECONDS=${QWEN_ASR_MAX_AUDIO_SECONDS:-35}" \
   --env "QWEN_ASR_MAX_NEW_TOKENS=${QWEN_ASR_MAX_NEW_TOKENS:-256}" \
+  --env "QWEN_ASR_MAX_CONNECTIONS=${QWEN_ASR_MAX_CONNECTIONS:-8}" \
+  --env "QWEN_ASR_HEADER_TIMEOUT_SECONDS=${QWEN_ASR_HEADER_TIMEOUT_SECONDS:-5}" \
+  --env "QWEN_ASR_BODY_TIMEOUT_SECONDS=${QWEN_ASR_BODY_TIMEOUT_SECONDS:-10}" \
+  --env "QWEN_ASR_INFERENCE_TIMEOUT_SECONDS=${QWEN_ASR_INFERENCE_TIMEOUT_SECONDS:-120}" \
+  --env "QWEN_ASR_WRITE_TIMEOUT_SECONDS=${QWEN_ASR_WRITE_TIMEOUT_SECONDS:-5}" \
   --volume "${model_dir}:/models/qwen-asr:ro" \
   "${image}"

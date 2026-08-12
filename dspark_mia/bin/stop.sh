@@ -8,6 +8,11 @@ source "${script_dir}/common.sh"
 
 need_command timeout
 acquire_lifecycle_locks
+if [[ -n "${MIA_SUPERVISOR_RUNTIME_DIR:-}" &&
+      "${MIA_SUPERVISOR_RUNTIME_DIR}" =~ ^/[A-Za-z0-9._/@+-]+$ &&
+      ! -L "${MIA_SUPERVISOR_RUNTIME_DIR}" ]]; then
+  rm -f -- "${MIA_SUPERVISOR_RUNTIME_DIR}/last-full-probe"
+fi
 helper_dir="${MIA_STOP_HELPER_DIR:-${MIA_ROOT}/bin}"
 load_nonlaunch_compose_addresses 0
 remote_nonlaunch_env="$(remote_nonlaunch_assignment)"

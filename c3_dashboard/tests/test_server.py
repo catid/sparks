@@ -5,6 +5,8 @@ import json
 import os
 import pathlib
 import shlex
+import socket
+import socketserver
 import subprocess
 import tempfile
 import threading
@@ -182,6 +184,44 @@ class ServerTests(unittest.TestCase):
         serialized = json.dumps(status)
         self.assertNotIn("private_request", serialized)
         self.assertNotIn("private voice content", serialized)
+
+    def test_voice_status_reader_tolerates_optional_dependency_readiness(self):
+        payload = self.voice_payload(now=100)
+        payload["readiness"] = {
+            "dependencies": {
+                "asr": {"state": "ready", "ready": True, "private": "secret"},
+                "openclaw": "unavailable",
+                "tts": {"state": "future-state", "detail": "do not expose"},
+                "unknown_service": {"ready": False},
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "status.json"
+            path.write_text(json.dumps(payload))
+            status = dashboard.VoiceStatusReader(str(path), 15).read(now=105)
+
+        self.assertEqual(status["state"], "degraded")
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["dependencies"]["reported"])
+        self.assertFalse(status["dependencies"]["healthy"])
+        self.assertTrue(status["dependencies"]["services"]["asr"]["ready"])
+        self.assertFalse(status["dependencies"]["services"]["openclaw"]["ready"])
+        self.assertIsNone(status["dependencies"]["services"]["tts"]["ready"])
+        serialized = json.dumps(status)
+        self.assertNotIn("unknown_service", serialized)
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("do not expose", serialized)
+
+    def test_voice_status_reader_missing_dependency_extension_is_neutral(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "status.json"
+            path.write_text(json.dumps(self.voice_payload()))
+            status = dashboard.VoiceStatusReader(str(path), 15).read(now=105)
+
+        self.assertEqual(status["state"], "busy")
+        self.assertTrue(status["healthy"])
+        self.assertFalse(status["dependencies"]["reported"])
+        self.assertIsNone(status["dependencies"]["healthy"])
 
     def test_voice_status_pipeline_does_not_report_stale_progress_as_active(self):
         payload = self.voice_payload(now=50)
@@ -621,7 +661,7 @@ process_start_time_seconds 100
         collector = dashboard.Collector(
             interval=5,
             host_prober=FakeProbe(),
-            metrics_fetcher=FakeMetrics([100, 100, 100]),
+            metrics_fetcher=FakeMetrics([100, 100, 100, 100]),
             history_points=2,
         )
         collector.collect(now=100)
@@ -662,6 +702,160 @@ process_start_time_seconds 100
         self.assertEqual(remote[0], "ssh")
         self.assertIn("StrictHostKeyChecking=yes", remote)
         self.assertIn("UserKnownHostsFile=/known-hosts", remote)
+
+    def test_private_runtime_ssh_control_socket_is_bounded_and_reused(self):
+        runtime_parent = pathlib.Path(f"/run/user/{os.getuid()}")
+        with tempfile.TemporaryDirectory(dir=runtime_parent) as directory:
+            os.chmod(directory, 0o700)
+            prober = dashboard.HostProber(
+                "/cluster-key",
+                "/known-hosts",
+                local_hostname="cerberus3",
+                control_dir=directory,
+            )
+            remote = prober.command("cerberus1")
+
+        self.assertIn("ControlMaster=auto", remote)
+        self.assertIn(
+            f"ControlPersist={dashboard.DEFAULT_SSH_CONTROL_PERSIST_SECONDS}s",
+            remote,
+        )
+        self.assertIn(f"ControlPath={directory}/ssh-%C", remote)
+        self.assertLessEqual(
+            len(os.fsencode(f"{directory}/ssh-%C")),
+            dashboard.MAX_SSH_CONTROL_PATH_BYTES,
+        )
+        self.assertNotIn("ControlMaster=auto", prober.command("cerberus3"))
+
+    def test_ssh_control_dir_rejects_nonprivate_symlink_and_nonruntime_paths(self):
+        runtime_parent = pathlib.Path(f"/run/user/{os.getuid()}")
+        with tempfile.TemporaryDirectory(dir=runtime_parent) as directory:
+            os.chmod(directory, 0o755)
+            with self.assertRaises(ValueError):
+                dashboard.validate_ssh_control_dir(directory)
+            os.chmod(directory, 0o700)
+            link = runtime_parent / f"c3-dashboard-link-{os.getpid()}"
+            try:
+                os.symlink(directory, link)
+                with self.assertRaises(ValueError):
+                    dashboard.validate_ssh_control_dir(str(link))
+            finally:
+                link.unlink(missing_ok=True)
+        with self.assertRaises(ValueError):
+            dashboard.validate_ssh_control_dir("/tmp/c3-dashboard")
+
+    def test_metrics_scrape_total_deadline_defeats_body_trickle(self):
+        class TrickleHandler(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.recv(4096)
+                try:
+                    self.request.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                        b"Connection: close\r\n\r\n"
+                    )
+                    for _ in range(100):
+                        self.request.sendall(b"x")
+                        time.sleep(0.04)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        class Server(socketserver.ThreadingTCPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
+        server = Server(("127.0.0.1", 0), TrickleHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(TimeoutError):
+                dashboard.fetch_text(
+                    f"http://127.0.0.1:{server.server_address[1]}/metrics", 0.2
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+        self.assertLess(time.monotonic() - started, 0.75)
+
+    def test_collector_thread_collects_immediately(self):
+        collector = dashboard.Collector(
+            interval=5,
+            host_prober=FakeProbe(),
+            metrics_fetcher=FakeMetrics([100]),
+        )
+        called = threading.Event()
+
+        def collect_once():
+            called.set()
+            collector.stop_event.set()
+
+        collector.collect = collect_once
+        thread = threading.Thread(target=collector.run)
+        thread.start()
+        self.assertTrue(called.wait(0.2))
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+
+    def test_remote_hosts_are_cached_for_thirty_seconds_with_honest_age(self):
+        probe = FakeProbe()
+        collector = dashboard.Collector(
+            interval=5,
+            host_prober=probe,
+            metrics_fetcher=FakeMetrics([100, 100, 100]),
+        )
+        collector.local_hostname = "cerberus3"
+        collector.collect()
+        first = collector.get_snapshot()
+        collector.collect()
+        cached = collector.get_snapshot()
+
+        self.assertEqual(probe.calls["cerberus1"], 1)
+        self.assertEqual(probe.calls["cerberus2"], 1)
+        self.assertEqual(probe.calls["cerberus3"], 2)
+        self.assertFalse(first["hosts"]["cerberus1"]["sample_cached"])
+        self.assertTrue(cached["hosts"]["cerberus1"]["sample_cached"])
+        self.assertEqual(
+            cached["hosts"]["cerberus1"]["sampled_at"],
+            first["hosts"]["cerberus1"]["sampled_at"],
+        )
+        self.assertGreaterEqual(cached["hosts"]["cerberus1"]["age_seconds"], 0)
+
+        collector.last_host_success["cerberus1"] -= (
+            dashboard.DEFAULT_REMOTE_PROBE_STALE_SECONDS + 1
+        )
+        collector.collect()
+        stale = collector.get_snapshot()
+        self.assertEqual(stale["hosts"]["cerberus1"]["state"], "stale")
+        self.assertEqual(
+            stale["hosts"]["cerberus1"]["error"],
+            "remote telemetry sample is stale",
+        )
+        self.assertEqual(stale["cluster"]["state"], "degraded")
+
+        collector.next_remote_probe_clock["cerberus1"] = 0
+        collector.next_remote_probe_clock["cerberus2"] = 0
+        collector.collect()
+        self.assertEqual(probe.calls["cerberus1"], 2)
+        self.assertEqual(probe.calls["cerberus2"], 2)
+
+    def test_systemd_notify_sends_readiness_datagram(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(pathlib.Path(directory) / "notify.sock")
+            receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            receiver.bind(path)
+            receiver.settimeout(1)
+            previous = os.environ.get("NOTIFY_SOCKET")
+            os.environ["NOTIFY_SOCKET"] = path
+            try:
+                self.assertTrue(dashboard.systemd_notify("READY=1"))
+                self.assertEqual(receiver.recv(128), b"READY=1")
+            finally:
+                receiver.close()
+                if previous is None:
+                    os.environ.pop("NOTIFY_SOCKET", None)
+                else:
+                    os.environ["NOTIFY_SOCKET"] = previous
 
     def test_probe_timeout_terminates_background_process_group(self):
         with tempfile.TemporaryDirectory() as directory:

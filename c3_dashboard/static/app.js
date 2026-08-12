@@ -23,6 +23,9 @@
   // cadence is a low-disruption heuristic, not an OLED pixel-refresh cycle.
   const SAVER_BAND_PX = 48;
   const SAVER_REPEAT_MS = 30 * 60 * 1000;
+  // Even continuous inference or voice activity cannot postpone an exact-
+  // black maintenance pass beyond this independent panel-care deadline.
+  const SAVER_MAX_DEFERRAL_MS = 30 * 60 * 1000;
   const SAVER_SWEEP_MS = 3200;
   const VOICE_PROGRESS_ORDER = ["heard_name", "asr", "openclaw", "tts", "play"];
   const VOICE_PROGRESS_LABELS = {
@@ -45,7 +48,9 @@
   let saverFinishTimer = null;
   let saverLastAttentionMs = null;
   let saverLastSweepMs = null;
+  let saverLastCareMs = null;
   let saverActive = false;
+  let saverForced = false;
   let saverLifecycleBound = false;
   const saverAttentionSignatures = { cluster: null, voice: null };
 
@@ -1011,11 +1016,19 @@
     observeSaverHealth("cluster", "error:transport", Date.now());
   }
 
-  function saverStateAt(nowMs, lastAttentionMs, attentionActive, lastSweepMs = null) {
-    if (attentionActive) return "awake";
+  function saverStateAt(
+    nowMs,
+    lastAttentionMs,
+    attentionActive,
+    lastSweepMs = null,
+    lastCareMs = null,
+  ) {
     const now = finiteNumber(nowMs);
     const last = finiteNumber(lastAttentionMs);
     if (now === null || last === null || now < last) return "awake";
+    const lastCare = finiteNumber(lastCareMs);
+    if (lastCare !== null && now >= lastCare + SAVER_MAX_DEFERRAL_MS) return "sweep";
+    if (attentionActive) return "awake";
     const previousSweep = finiteNumber(lastSweepMs);
     const firstDue = last + SAVER_IDLE_MS;
     const repeatDue = previousSweep === null ? firstDue : previousSweep + SAVER_REPEAT_MS;
@@ -1052,6 +1065,7 @@
       saverLastAttentionMs,
       false,
       saverLastSweepMs,
+      saverLastCareMs,
     );
     if (state === "sweep" && !saverActive) startSaverSweep(nowMs);
     return saverActive ? "sweep" : "awake";
@@ -1067,6 +1081,8 @@
     // Only a sweep that stayed visible through completion earns the 30-minute
     // interval. A hidden/cancelled pass must remain due when the panel returns.
     saverLastSweepMs = finiteNumber(nowMs) ?? Date.now();
+    saverLastCareMs = saverLastSweepMs;
+    saverForced = false;
     setSaverActive(false);
     scheduleSaver(nowMs);
   }
@@ -1074,6 +1090,8 @@
   function startSaverSweep(nowMs) {
     if (saverActive || (typeof document !== "undefined" && document.hidden)) return false;
     const now = finiteNumber(nowMs) ?? Date.now();
+    saverForced = saverLastCareMs !== null
+      && now >= saverLastCareMs + SAVER_MAX_DEFERRAL_MS;
     setSaverActive(true);
     saverFinishTimer = setTimeout(
       () => finishSaverSweep(Date.now()),
@@ -1088,11 +1106,14 @@
     if (saverActive || (typeof document !== "undefined" && document.hidden)) return;
     const now = finiteNumber(nowMs) ?? Date.now();
     if (saverLastAttentionMs === null) saverLastAttentionMs = now;
+    if (saverLastCareMs === null) saverLastCareMs = now;
     const firstDue = saverLastAttentionMs + SAVER_IDLE_MS;
     const repeatDue = saverLastSweepMs === null
       ? firstDue
       : saverLastSweepMs + SAVER_REPEAT_MS;
-    const remaining = Math.max(0, Math.max(firstDue, repeatDue) - now);
+    const quietDue = Math.max(firstDue, repeatDue);
+    const hardDue = saverLastCareMs + SAVER_MAX_DEFERRAL_MS;
+    const remaining = Math.max(0, Math.min(quietDue, hardDue) - now);
     if (remaining === 0) {
       startSaverSweep(now);
       return;
@@ -1110,8 +1131,12 @@
     saverLastAttentionMs = now;
     const dashboard = byId("dashboard");
     if (dashboard) dashboard.dataset.saverWake = safeStatusToken(reason, "activity");
+    // Once the independent max-deferral pass begins, model/voice activity may
+    // update the wake reason but must not cancel the three-second black band.
+    if (saverActive && saverForced) return true;
     if (saverFinishTimer !== null) clearTimeout(saverFinishTimer);
     saverFinishTimer = null;
+    saverForced = false;
     setSaverActive(false);
     scheduleSaver(now);
     return true;
@@ -1191,6 +1216,8 @@
     const now = Date.now();
     saverLastAttentionMs = now;
     saverLastSweepMs = null;
+    saverLastCareMs = now;
+    saverForced = false;
     setSaverActive(false);
     if (!saverLifecycleBound && typeof document.addEventListener === "function") {
       saverLifecycleBound = true;
@@ -1208,6 +1235,7 @@
           if (saverFinishTimer !== null) clearTimeout(saverFinishTimer);
           saverFinishTimer = null;
           // Do not mark an off-screen or interrupted pass as completed.
+          saverForced = false;
           setSaverActive(false);
           return;
         }
@@ -1546,6 +1574,7 @@
     SAVER_IDLE_MS,
     SAVER_BAND_PX,
     SAVER_REPEAT_MS,
+    SAVER_MAX_DEFERRAL_MS,
     SAVER_SWEEP_MS,
     VOICE_PROGRESS_ORDER,
     finiteNumber,

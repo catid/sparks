@@ -589,6 +589,7 @@ test("infrequent TFT black sweep timing and overlay state are deterministic", ()
   assert.equal(ui.SAVER_IDLE_MS, 300000);
   assert.equal(ui.SAVER_BAND_PX, 48);
   assert.equal(ui.SAVER_REPEAT_MS, 1800000);
+  assert.equal(ui.SAVER_MAX_DEFERRAL_MS, 1800000);
   assert.equal(ui.SAVER_SWEEP_MS, 3200);
   const rowBlackSeconds = ui.SAVER_BAND_PX
     / ((280 + ui.SAVER_BAND_PX) / (ui.SAVER_SWEEP_MS / 1000));
@@ -600,6 +601,21 @@ test("infrequent TFT black sweep timing and overlay state are deterministic", ()
   assert.equal(ui.saverStateAt(2100999, 1000, false, 301000), "awake");
   assert.equal(ui.saverStateAt(2101000, 1000, false, 301000), "sweep");
   assert.equal(ui.saverStateAt(999999, 1000, true), "awake");
+  assert.equal(
+    ui.saverStateAt(1800999, 1800999, true, null, 1000),
+    "awake",
+    "continuous work may defer the panel-care sweep only to the hard cap",
+  );
+  assert.equal(
+    ui.saverStateAt(1801000, 1801000, true, null, 1000),
+    "sweep",
+    "continuous model/voice activity cannot starve the black sweep",
+  );
+  assert.equal(
+    ui.saverStateAt(3601000, 3601000, true, 1801000, 1801000),
+    "sweep",
+    "each completed sweep starts one new bounded deferral window",
+  );
   assert.equal(ui.saverStateAt(900, 1000, false), "awake");
   assert.equal(ui.saverTroubleTransition(null, null), false);
   assert.equal(ui.saverTroubleTransition(null, "offline:0"), true, "failure onset wakes");

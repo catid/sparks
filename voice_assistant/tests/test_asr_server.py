@@ -4,12 +4,13 @@ import importlib.util
 import io
 import json
 import pathlib
+import socket
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 import wave
-from http.server import ThreadingHTTPServer
 from unittest import mock
 
 
@@ -117,7 +118,9 @@ class HttpTests(unittest.TestCase):
         self.runtime = DummyRuntime()
         self.module.RUNTIME = self.runtime
         self.module.Handler.log_message = lambda *args: None
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self.module.Handler)
+        self.httpd = self.module.BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0), self.module.Handler
+        )
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
 
@@ -147,6 +150,133 @@ class HttpTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self.post("application/octet-stream")
         self.assertEqual(raised.exception.code, 415)
+
+    def test_inference_slot_rejects_a_second_request_before_preprocessing(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        original_decode = self.module.decode_pcm16_wav
+        slot_was_held: list[bool] = []
+
+        class BlockingRuntime(DummyRuntime):
+            def transcribe(self, pcm: bytes):
+                entered.set()
+                if not release.wait(2):
+                    raise RuntimeError("test release timed out")
+                return super().transcribe(pcm)
+
+        def checked_decode(payload: bytes):
+            acquired = self.module.INFERENCE_SLOT.acquire(blocking=False)
+            slot_was_held.append(not acquired)
+            if acquired:
+                self.module.INFERENCE_SLOT.release()
+            return original_decode(payload)
+
+        self.module.RUNTIME = BlockingRuntime()
+        first_error: list[BaseException] = []
+
+        def first_request() -> None:
+            try:
+                with self.post() as response:
+                    response.read()
+            except BaseException as error:
+                first_error.append(error)
+
+        with mock.patch.object(
+            self.module, "decode_pcm16_wav", side_effect=checked_decode
+        ):
+            thread = threading.Thread(target=first_request)
+            thread.start()
+            self.assertTrue(entered.wait(1))
+            try:
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    self.post()
+                self.assertEqual(raised.exception.code, 429)
+                self.assertEqual(raised.exception.headers["Retry-After"], "1")
+            finally:
+                release.set()
+                thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(first_error)
+        self.assertEqual(slot_was_held, [True])
+
+    def test_trickled_request_body_has_a_total_deadline(self) -> None:
+        payload = wav_fixture()
+        self.module.BODY_TIMEOUT_SECONDS = 0.15
+        client = socket.create_connection(
+            ("127.0.0.1", self.httpd.server_port), timeout=1
+        )
+        self.addCleanup(client.close)
+        client.sendall(
+            (
+                "POST /transcribe HTTP/1.0\r\n"
+                "Content-Type: audio/wav\r\n"
+                f"Content-Length: {len(payload)}\r\n\r\n"
+            ).encode("ascii")
+            + payload[:1]
+        )
+        started = time.monotonic()
+        time.sleep(0.3)
+        client.settimeout(0.5)
+        self.assertEqual(client.recv(1), b"")
+        self.assertLess(time.monotonic() - started, 0.7)
+        self.assertEqual(self.runtime.last_pcm, b"")
+
+    def test_body_deadline_is_replaced_before_gpu_inference(self) -> None:
+        class SlowRuntime(DummyRuntime):
+            def transcribe(self, pcm: bytes):
+                time.sleep(0.35)
+                return super().transcribe(pcm)
+
+        self.module.BODY_TIMEOUT_SECONDS = 0.1
+        self.module.INFERENCE_TIMEOUT_SECONDS = 1.0
+        self.module.RUNTIME = SlowRuntime()
+        started = time.monotonic()
+        with self.post() as response:
+            payload = json.load(response)
+        self.assertGreater(time.monotonic() - started, 0.3)
+        self.assertEqual(payload["text"], "Cerberus, report cluster health.")
+
+    def test_trickled_headers_have_a_total_deadline(self) -> None:
+        self.module.HEADER_TIMEOUT_SECONDS = 0.15
+        client = socket.create_connection(
+            ("127.0.0.1", self.httpd.server_port), timeout=1
+        )
+        self.addCleanup(client.close)
+        client.sendall(b"POST /transcribe HTTP/1.0\r\nX-Slow: ")
+        started = time.monotonic()
+        for _ in range(8):
+            time.sleep(0.04)
+            try:
+                client.sendall(b"x")
+            except OSError:
+                break
+        client.settimeout(0.5)
+        self.assertEqual(client.recv(1), b"")
+        self.assertLess(time.monotonic() - started, 0.7)
+
+    def test_connection_count_is_bounded_before_a_handler_thread_is_started(self) -> None:
+        self.module.MAX_CONNECTIONS = 1
+        server = self.module.BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0), self.module.Handler
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        blocker = socket.create_connection(("127.0.0.1", server.server_port), timeout=1)
+        blocker.sendall(b"GET /health HTTP/1.0\r\nX-Slow: ")
+        time.sleep(0.05)
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_port}/health", timeout=1
+                )
+            self.assertEqual(raised.exception.code, 503)
+            self.assertEqual(raised.exception.headers["Retry-After"], "1")
+        finally:
+            blocker.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":

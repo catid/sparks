@@ -3,11 +3,15 @@ Description=Verified private networks for Cerberus 3 Audio8 SGLang
 Wants=docker.service
 After=docker.service
 Before=cerberus3-audio8-sglang-backend.service cerberus3-audio8-sglang-gateway.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/lib/cerberus3-audio8-sglang/ensure-production-networks.sh
 RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=0
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

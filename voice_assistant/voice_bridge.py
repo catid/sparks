@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import http.client
 import ipaddress
 import json
 import math
@@ -11,6 +12,8 @@ import multiprocessing
 import os
 import re
 import signal
+import email.utils
+import socket
 import struct
 import subprocess
 import threading
@@ -45,6 +48,9 @@ THINKING_CUE_FADE_SECONDS = 0.035
 STATUS_FILENAME = "status.json"
 STATUS_MAX_BYTES = 16 * 1024
 STATUS_HEARTBEAT_SECONDS = 2.0
+DEPENDENCY_POLL_SECONDS = 5.0
+TTS_RETRY_ATTEMPTS = 3
+TTS_RETRY_MAX_DELAY_SECONDS = 2.0
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -60,6 +66,14 @@ _LOCAL_HTTP_OPENER = urllib.request.build_opener(
     _EMPTY_PROXY_HANDLER,
     _NoRedirectHandler(),
 )
+
+
+class LocalHttpStatusError(urllib.error.HTTPError):
+    """A content-free loopback HTTP failure with bounded retry metadata."""
+
+    def __init__(self, url: str, status: int, retry_after: str | None = None) -> None:
+        super().__init__(url, status, f"local HTTP {status}", {}, None)
+        self.retry_after = retry_after
 
 
 def env_float(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -106,7 +120,9 @@ def require_loopback_http_url(name: str, value: str) -> str:
         port = parsed.port
     except ValueError as error:
         raise RuntimeError(f"{name} has an invalid port") from error
-    if port is not None and not 1 <= port <= 65_535:
+    if port is None:
+        raise RuntimeError(f"{name} must include an explicit port")
+    if not 1 <= port <= 65_535:
         raise RuntimeError(f"{name} has an invalid port")
     if not parsed.path.startswith("/"):
         raise RuntimeError(f"{name} must include an absolute path")
@@ -291,6 +307,8 @@ class StatusPublisher:
     )
     PIPELINE_STEPS = ("heard_name", "asr", "openclaw", "tts", "play")
     PIPELINE_STEP_STATES = frozenset({"idle", "active", "complete", "error"})
+    DEPENDENCY_NAMES = ("asr", "openclaw", "tts")
+    DEPENDENCY_STATES = frozenset({"unknown", "ok", "error"})
 
     def __init__(
         self,
@@ -314,6 +332,7 @@ class StatusPublisher:
         self._temporary_sequence = 0
         self._component_started: dict[str, float] = {}
         self._tts_started_monotonic: float | None = None
+        self._dependency_error_stage: str | None = None
         self._last_write_error_type: str | None = None
         now_epoch = time.time()
         now_text = utc_timestamp(now_epoch)
@@ -354,6 +373,15 @@ class StatusPublisher:
             # request for progress on the current request.  Schema-1 readers
             # safely ignore this backwards-compatible addition.
             "pipeline": self._new_pipeline(),
+            "dependencies": {
+                name: {
+                    "state": "unknown",
+                    "checked_at": None,
+                    "last_ok_at": None,
+                    "error_type": None,
+                }
+                for name in self.DEPENDENCY_NAMES
+            },
             "last_error": None,
         }
 
@@ -593,6 +621,8 @@ class StatusPublisher:
         """Clear a retained failure only after that same operation recovers."""
         last_error = self._document.get("last_error")
         if isinstance(last_error, dict) and last_error.get("stage") in stages:
+            if self._dependency_error_stage == last_error.get("stage"):
+                self._dependency_error_stage = None
             self._document["last_error"] = None
 
     def _transition(self, state: str, stage: str) -> None:
@@ -876,8 +906,79 @@ class StatusPublisher:
                 "type": self._safe_error_type(error),
                 "at": now,
             }
+            self._dependency_error_stage = None
             self._pipeline_error_locked(stage)
             self._set_overall_locked("degraded", "retry_wait")
+            self._publish_locked()
+
+    def dependency_result(
+        self,
+        dependency: str,
+        error: BaseException | None = None,
+    ) -> None:
+        """Publish a content-free dependency probe without disrupting a turn."""
+        if dependency not in self.DEPENDENCY_NAMES:
+            raise ValueError("invalid dependency")
+        stage = {
+            "asr": "asr",
+            "openclaw": "openclaw",
+            "tts": "tts_synthesis",
+        }[dependency]
+        with self._lock:
+            now = utc_timestamp()
+            details = self._document["dependencies"][dependency]
+            details["checked_at"] = now
+            details["state"] = "error" if error is not None else "ok"
+            details["error_type"] = (
+                self._safe_error_type(error) if error is not None else None
+            )
+            if error is None:
+                details["last_ok_at"] = now
+
+            pipeline_active = bool(self._document["pipeline"]["active"])
+            current_error = self._document.get("last_error")
+            request_error_retained = (
+                isinstance(current_error, dict)
+                and self._dependency_error_stage is None
+            )
+            if error is not None:
+                if not pipeline_active and not request_error_retained:
+                    self._document["last_error"] = {
+                        "stage": stage,
+                        "type": self._safe_error_type(error),
+                        "at": now,
+                    }
+                    self._dependency_error_stage = stage
+                    self._pipeline_error_locked(stage)
+                    self._set_overall_locked("degraded", "retry_wait")
+            elif self._dependency_error_stage is not None:
+                failures = [
+                    name
+                    for name in self.DEPENDENCY_NAMES
+                    if self._document["dependencies"][name]["state"] == "error"
+                ]
+                if failures:
+                    failed_name = failures[0]
+                    failed_stage = {
+                        "asr": "asr",
+                        "openclaw": "openclaw",
+                        "tts": "tts_synthesis",
+                    }[failed_name]
+                    failed = self._document["dependencies"][failed_name]
+                    self._document["last_error"] = {
+                        "stage": failed_stage,
+                        "type": failed["error_type"] or "Exception",
+                        "at": failed["checked_at"] or now,
+                    }
+                    self._dependency_error_stage = failed_stage
+                    if not pipeline_active:
+                        self._pipeline_error_locked(failed_stage)
+                        self._set_overall_locked("degraded", "retry_wait")
+                elif not pipeline_active:
+                    self._document["last_error"] = None
+                    self._dependency_error_stage = None
+                    self._pipeline_idle_locked()
+                    self._set_overall_locked("ready", "listening")
             self._publish_locked()
 
     def stop(self) -> None:
@@ -1028,14 +1129,152 @@ class WakeWordRouter:
         return None, "armed"
 
 
-def bounded_read(response: Any, limit: int) -> bytes:
-    data = response.read(limit + 1)
+def _abort_http_connection(
+    connection: http.client.HTTPConnection,
+    transport_socket: socket.socket | None = None,
+) -> None:
+    # HTTPConnection transfers ownership of a HTTP/1.0 socket to HTTPResponse
+    # and clears connection.sock. Keep the pre-response reference so deadline
+    # cancellation can still interrupt a blocked body read.
+    sock = transport_socket if transport_socket is not None else connection.sock
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
+    connection.close()
+
+
+def _read_http_body(
+    response: http.client.HTTPResponse,
+    connection: http.client.HTTPConnection,
+    limit: int,
+    deadline: float,
+) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("local HTTP response exceeded its total deadline")
+        if connection.sock is not None:
+            connection.sock.settimeout(remaining)
+        chunk = response.read1(min(65_536, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    data = b"".join(chunks)
     if len(data) > limit:
         raise RuntimeError("HTTP response exceeded its size limit")
     return data
 
 
-def post_json(url: str, payload: dict[str, Any], timeout: float, token: str = "") -> Any:
+def local_http_request(
+    url: str,
+    *,
+    method: str,
+    body: bytes | None,
+    headers: dict[str, str],
+    maximum_bytes: int,
+    timeout: float,
+    cancel_event: threading.Event | None = None,
+) -> tuple[int, http.client.HTTPMessage, bytes]:
+    """Perform one loopback request under a true end-to-end deadline."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("local HTTP timeout must be positive")
+    if cancel_event is not None and cancel_event.is_set():
+        raise InterruptedError("local HTTP request cancelled")
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname is None
+        or parsed.port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise RuntimeError("local HTTP URL is invalid")
+    hostname = parsed.hostname
+    if hostname == "localhost":
+        hostname = "127.0.0.1"
+    else:
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError as error:
+            raise RuntimeError("local HTTP hostname must be loopback") from error
+        if not address.is_loopback:
+            raise RuntimeError("local HTTP hostname must be loopback")
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    started = time.monotonic()
+    deadline = started + timeout
+    connection = http.client.HTTPConnection(
+        hostname,
+        parsed.port,
+        timeout=timeout,
+    )
+    expired = threading.Event()
+    cancelled = threading.Event()
+    finished = threading.Event()
+    transport_socket: socket.socket | None = None
+
+    def watchdog() -> None:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled.set()
+                _abort_http_connection(connection, transport_socket)
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                expired.set()
+                _abort_http_connection(connection, transport_socket)
+                return
+            if finished.wait(min(remaining, 0.05)):
+                return
+
+    watcher = threading.Thread(
+        target=watchdog,
+        name="voice-local-http-deadline",
+        daemon=True,
+    )
+    watcher.start()
+    try:
+        connection.request(method, path, body=body, headers=headers)
+        transport_socket = connection.sock
+        response = connection.getresponse()
+        data = _read_http_body(response, connection, maximum_bytes, deadline)
+        status = response.status
+        response_headers = response.headers
+    except (OSError, TimeoutError, http.client.HTTPException) as error:
+        if cancelled.is_set():
+            raise InterruptedError("local HTTP request cancelled") from error
+        if expired.is_set() or time.monotonic() >= deadline:
+            raise TimeoutError("local HTTP request exceeded its total deadline") from error
+        raise urllib.error.URLError("local HTTP request failed") from error
+    finally:
+        finished.set()
+        _abort_http_connection(connection, transport_socket)
+        watcher.join(timeout=0.2)
+    if cancelled.is_set():
+        raise InterruptedError("local HTTP request cancelled")
+    if expired.is_set() or time.monotonic() > deadline:
+        raise TimeoutError("local HTTP request exceeded its total deadline")
+    if not 200 <= status < 300:
+        raise LocalHttpStatusError(url, status, response_headers.get("Retry-After"))
+    return status, response_headers, data
+
+
+def post_json(
+    url: str,
+    payload: dict[str, Any],
+    timeout: float,
+    token: str = "",
+    *,
+    cancel_event: threading.Event | None = None,
+) -> Any:
     encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
@@ -1044,35 +1283,44 @@ def post_json(url: str, payload: dict[str, Any], timeout: float, token: str = ""
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, data=encoded, headers=headers, method="POST")
-    with _LOCAL_HTTP_OPENER.open(request, timeout=timeout) as response:
-        content_type = response.headers.get_content_type()
-        if content_type != "application/json":
-            raise RuntimeError("local API returned a non-JSON response")
-        raw = bounded_read(response, 4 * 1024 * 1024)
+    _status, response_headers, raw = local_http_request(
+        url,
+        method="POST",
+        body=encoded,
+        headers=headers,
+        maximum_bytes=4 * 1024 * 1024,
+        timeout=timeout,
+        cancel_event=cancel_event,
+    )
+    if response_headers.get_content_type() != "application/json":
+        raise RuntimeError("local API returned a non-JSON response")
     try:
         return json.loads(raw)
     except json.JSONDecodeError as error:
         raise RuntimeError("local API returned invalid JSON") from error
 
 
-def transcribe_wav(settings: Settings, wav_bytes: bytes) -> str:
-    request = urllib.request.Request(
+def transcribe_wav(
+    settings: Settings,
+    wav_bytes: bytes,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> str:
+    _status, response_headers, raw = local_http_request(
         settings.asr_url,
-        data=wav_bytes,
+        method="POST",
+        body=wav_bytes,
         headers={
             "Content-Type": "audio/wav",
             "Accept": "application/json",
             "User-Agent": "CerberusVoiceBridge/1",
         },
-        method="POST",
+        maximum_bytes=1024 * 1024,
+        timeout=settings.asr_timeout_seconds,
+        cancel_event=cancel_event,
     )
-    with _LOCAL_HTTP_OPENER.open(
-        request, timeout=settings.asr_timeout_seconds
-    ) as response:
-        if response.headers.get_content_type() != "application/json":
-            raise RuntimeError("ASR returned a non-JSON response")
-        raw = bounded_read(response, 1024 * 1024)
+    if response_headers.get_content_type() != "application/json":
+        raise RuntimeError("ASR returned a non-JSON response")
     try:
         payload = json.loads(raw)
         text = payload["text"]
@@ -1107,7 +1355,12 @@ def extract_final_text(payload: Any) -> str:
     return text
 
 
-def ask_openclaw(settings: Settings, command: str) -> str:
+def ask_openclaw(
+    settings: Settings,
+    command: str,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> str:
     payload = post_json(
         settings.openclaw_url,
         {
@@ -1118,8 +1371,64 @@ def ask_openclaw(settings: Settings, command: str) -> str:
         },
         settings.openclaw_timeout_seconds,
         settings.openclaw_token,
+        cancel_event=cancel_event,
     )
     return extract_final_text(payload)
+
+
+def dependency_health_url(settings: Settings, dependency: str) -> str:
+    source = {
+        "asr": settings.asr_url,
+        "openclaw": settings.openclaw_url,
+        "tts": settings.tts_url,
+    }.get(dependency)
+    if source is None:
+        raise ValueError("invalid dependency")
+    parsed = urllib.parse.urlsplit(source)
+    return urllib.parse.urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            "/ready" if dependency == "openclaw" else "/health",
+            "",
+            "",
+        )
+    )
+
+
+def probe_dependency(
+    settings: Settings,
+    dependency: str,
+    *,
+    timeout: float = 2.0,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    """Validate one dependency's bounded loopback readiness response."""
+    _status, headers, raw = local_http_request(
+        dependency_health_url(settings, dependency),
+        method="GET",
+        body=None,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "CerberusVoiceBridge/1",
+        },
+        maximum_bytes=64 * 1024,
+        timeout=timeout,
+        cancel_event=cancel_event,
+    )
+    if headers.get_content_type() != "application/json":
+        raise RuntimeError("dependency health response is not JSON")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("dependency health response is invalid") from error
+    healthy = (
+        payload.get("ready") is True
+        if dependency == "openclaw"
+        else payload.get("status") == "ok"
+    ) if isinstance(payload, dict) else False
+    if not healthy:
+        raise RuntimeError("dependency is not ready")
 
 
 def chunk_for_tts(text: str, maximum: int = 140) -> list[str]:
@@ -1203,29 +1512,66 @@ def synthesize(
         },
         separators=(",", ":"),
     ).encode("utf-8")
-    request = urllib.request.Request(
-        settings.tts_url,
-        data=encoded,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "audio/wav",
-            "User-Agent": "CerberusVoiceBridge/1",
-        },
-        method="POST",
+    total_timeout = (
+        settings.tts_timeout_seconds if timeout_seconds is None else timeout_seconds
     )
-    with _LOCAL_HTTP_OPENER.open(
-        request,
-        timeout=(
-            settings.tts_timeout_seconds
-            if timeout_seconds is None
-            else timeout_seconds
-        ),
-    ) as response:
-        if response.headers.get_content_type() not in {"audio/wav", "audio/x-wav"}:
+    if not math.isfinite(total_timeout) or total_timeout <= 0:
+        raise ValueError("Audio8 timeout must be positive")
+    deadline = time.monotonic() + total_timeout
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "audio/wav",
+        "User-Agent": "CerberusVoiceBridge/1",
+    }
+    wav_bytes: bytes | None = None
+    for attempt in range(TTS_RETRY_ATTEMPTS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Audio8 request exceeded its total deadline")
+        try:
+            _status, response_headers, wav_bytes = local_http_request(
+                settings.tts_url,
+                method="POST",
+                body=encoded,
+                headers=headers,
+                maximum_bytes=32 * 1024 * 1024,
+                timeout=remaining,
+            )
+        except LocalHttpStatusError as error:
+            if error.code not in {429, 503} or attempt + 1 >= TTS_RETRY_ATTEMPTS:
+                raise
+            delay = retry_after_delay(error.retry_after)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Audio8 request exceeded its total deadline") from error
+            time.sleep(min(delay, remaining))
+            continue
+        if response_headers.get_content_type() not in {"audio/wav", "audio/x-wav"}:
             raise RuntimeError("Audio8 returned an unexpected content type")
-        wav_bytes = bounded_read(response, 32 * 1024 * 1024)
+        break
+    if wav_bytes is None:
+        raise RuntimeError("Audio8 returned no audio")
     validate_tts_wav(wav_bytes)
     return wav_bytes
+
+
+def retry_after_delay(value: str | None) -> float:
+    """Return a short, capped retry delay without trusting server metadata."""
+    if value:
+        stripped = value.strip()
+        try:
+            delay = float(stripped)
+        except ValueError:
+            try:
+                retry_at = email.utils.parsedate_to_datetime(stripped)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = retry_at.timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                delay = 0.25
+        if math.isfinite(delay):
+            return min(TTS_RETRY_MAX_DELAY_SECONDS, max(0.0, delay))
+    return 0.25
 
 
 def soften_thinking_cue(payload: bytes) -> bytes:
@@ -1613,6 +1959,7 @@ class VoiceBridge:
         self._synthesis_worker_lock = threading.RLock()
         self._thinking_cue_lock = threading.Lock()
         self._thinking_cue = fallback_thinking_cue()
+        self._dependency_thread: threading.Thread | None = None
 
     def log_text(self, label: str, text: str) -> None:
         if self.settings.log_transcripts:
@@ -1626,6 +1973,30 @@ class VoiceBridge:
             self.recorder.stop()
         self._cancel_playback()
         self._cancel_synthesis_worker()
+
+    def _probe_dependencies(self) -> bool:
+        healthy = True
+        for dependency in self.status.DEPENDENCY_NAMES:
+            try:
+                probe_dependency(
+                    self.settings,
+                    dependency,
+                    cancel_event=self.stop_event,
+                )
+            except InterruptedError:
+                if self.stop_event.is_set():
+                    return False
+                raise
+            except Exception as error:
+                healthy = False
+                self.status.dependency_result(dependency, error)
+            else:
+                self.status.dependency_result(dependency)
+        return healthy
+
+    def _dependency_monitor_loop(self) -> None:
+        while not self.stop_event.wait(DEPENDENCY_POLL_SECONDS):
+            self._probe_dependencies()
 
     def _get_synthesis_worker(self) -> SynthesisWorker:
         with self._synthesis_worker_lock:
@@ -1774,7 +2145,11 @@ class VoiceBridge:
     def handle_utterance(self, pcm: bytes) -> bool:
         self.status.begin_asr()
         try:
-            transcript = transcribe_wav(self.settings, pcm16_to_wav(pcm))
+            transcript = transcribe_wav(
+                self.settings,
+                pcm16_to_wav(pcm),
+                cancel_event=self.stop_event,
+            )
         except Exception as error:
             self.status.fail("asr", error)
             raise
@@ -1802,7 +2177,11 @@ class VoiceBridge:
         self.status.begin_openclaw()
         thinking_cue = self._start_thinking_cue()
         try:
-            answer = ask_openclaw(self.settings, command)
+            answer = ask_openclaw(
+                self.settings,
+                command,
+                cancel_event=self.stop_event,
+            )
         except Exception as error:
             self._cancel_playback(thinking_cue)
             self.status.fail("openclaw", error)
@@ -1986,6 +2365,9 @@ class VoiceBridge:
         if self.stop_event.is_set():
             self.status.stop()
             return
+        if not self._probe_dependencies():
+            self.status.stop()
+            raise RuntimeError("one or more voice dependencies are unavailable")
         try:
             self._get_synthesis_worker()
         except Exception as error:
@@ -1997,6 +2379,12 @@ class VoiceBridge:
                 flush=True,
             )
         self.status.ready()
+        self._dependency_thread = threading.Thread(
+            target=self._dependency_monitor_loop,
+            name="voice-dependency-monitor",
+            daemon=True,
+        )
+        self._dependency_thread.start()
         print(
             "Voice bridge ready; raw microphone audio and transcripts are not persisted",
             flush=True,
@@ -2034,6 +2422,11 @@ class VoiceBridge:
                             self.status.resume_listening()
         finally:
             self._close_synthesis_worker()
+            if (
+                self._dependency_thread is not None
+                and self._dependency_thread is not threading.current_thread()
+            ):
+                self._dependency_thread.join(timeout=3)
             self.status.stop()
 
 

@@ -50,6 +50,18 @@ FORBIDDEN_REFERENCE_FIELDS = {
     "reference_text_file",
     "references",
 }
+CONTROL_CHARACTER_TRANSLATION = str.maketrans(
+    {
+        codepoint: f"\\x{codepoint:02x}"
+        for codepoint in (*range(0x20), *range(0x7F, 0xA0))
+    }
+)
+
+
+def sanitize_log_text(value: str) -> str:
+    """Escape terminal controls so an HTTP request cannot forge log lines."""
+
+    return value.translate(CONTROL_CHARACTER_TRANSLATION)
 
 
 def bounded_integer(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -602,7 +614,9 @@ class Handler(BaseHTTPRequestHandler):
         return b"".join(chunks)
 
     def log_message(self, format_string: str, *args: Any) -> None:
-        print(f"{self.client_address[0]} {format_string % args}", flush=True)
+        client = sanitize_log_text(str(self.client_address[0]))
+        message = sanitize_log_text(format_string % args)
+        print(f"{client} {message}", flush=True)
 
     def json_response(self, status: int, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload, separators=(",", ":")).encode()

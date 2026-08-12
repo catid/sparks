@@ -6,6 +6,9 @@ set -euo pipefail
   exit 2
 }
 
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+"${root}/wait-for-docker.sh"
+
 backend_network=cerberus3-audio8-sglang-backend
 backend_subnet=172.30.82.0/29
 frontend_network=cerberus3-audio8-sglang-frontend
@@ -72,10 +75,19 @@ ensure_firewall() {
     -j "${firewall_chain}" 2>/dev/null || \
     iptables -I DOCKER-USER 1 -s "${gateway_frontend_ip}/32" \
       -j "${firewall_chain}"
+  # The dual-homed gateway can explicitly bind its backend address while the
+  # kernel routes the packet through the frontend bridge. Filter both source
+  # addresses so source selection cannot bypass the fail-closed egress policy.
+  iptables -C DOCKER-USER -s "${gateway_backend_ip}/32" \
+    -j "${firewall_chain}" 2>/dev/null || \
+    iptables -I DOCKER-USER 1 -s "${gateway_backend_ip}/32" \
+      -j "${firewall_chain}"
   mapfile -t docker_user_rules < <(iptables -S DOCKER-USER)
   [[ "${docker_user_rules[1]:-}" == \
+    "-A DOCKER-USER -s ${gateway_backend_ip}/32 -j ${firewall_chain}" &&
+     "${docker_user_rules[2]:-}" == \
     "-A DOCKER-USER -s ${gateway_frontend_ip}/32 -j ${firewall_chain}" ]] || {
-    echo "Gateway egress firewall jump is not first in DOCKER-USER." >&2
+    echo "Gateway egress firewall jumps are not first in DOCKER-USER." >&2
     exit 1
   }
 

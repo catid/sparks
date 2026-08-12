@@ -156,10 +156,20 @@ grep -Fq 'ExecStop=+@CLEANUP_HELPER@' \
 grep -Fq 'ExecStopPost=+@CLEANUP_HELPER@' \
   "${kiosk_unit}"
 grep -Fq -- '--uid @UID@ --tty tty7' "${kiosk_unit}"
+# shellcheck disable=SC2016
 grep -Fq -- '--main-pid $MAINPID' "${kiosk_unit}"
 grep -Fq 'Environment=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1' \
   "${kiosk_unit}"
-grep -Fq 'SuccessExitStatus=1' "${kiosk_unit}"
+if grep -Fq 'SuccessExitStatus=1' "${kiosk_unit}"; then
+  echo "kiosk unit must not hide an unexpected startx exit 1" >&2
+  exit 1
+fi
+grep -Fq 'Requires=dgx-spark-c3-dashboard.service' "${kiosk_unit}"
+collector_unit="${dashboard_dir}/systemd/dgx-spark-c3-dashboard.service.in"
+grep -Fq 'Type=notify' "${collector_unit}"
+grep -Fq 'RuntimeDirectory=dgx-spark-c3-dashboard' "${collector_unit}"
+grep -Fq 'Environment=C3_DASHBOARD_SSH_CONTROL_DIR=/run/dgx-spark-c3-dashboard' \
+  "${collector_unit}"
 grep -Fq 'export GSK_RENDERER=cairo' \
   "${dashboard_dir}/scripts/launch-kiosk.sh"
 

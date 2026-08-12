@@ -6,18 +6,24 @@ After=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=@USER@
 Group=@GROUP@
 WorkingDirectory=@PROJECT_DIR@
 Environment=HOME=@HOME@
 Environment=PATH=/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
+Environment=C3_DASHBOARD_SSH_CONTROL_DIR=/run/dgx-spark-c3-dashboard
 EnvironmentFile=/etc/default/dgx-spark-c3-dashboard
+RuntimeDirectory=dgx-spark-c3-dashboard
+RuntimeDirectoryMode=0700
 ExecStart=/usr/bin/python3 @PROJECT_DIR@/c3_dashboard/server.py
 Restart=always
 RestartSec=5s
+TimeoutStartSec=30s
 TimeoutStopSec=10s
+KillMode=control-group
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

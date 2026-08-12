@@ -192,8 +192,10 @@ trusted. The gateway is the required boundary, not an optional convenience.
 Production uses two fixed Docker networks. The backend network is internal,
 has no host-published port, and contains the reference-bearing GPU process plus
 the gateway. A separate frontend bridge lets only the reference-free gateway
-publish `0.0.0.0:8010`; a dedicated `DOCKER-USER` chain rejects new egress from
-its fixed frontend address while allowing replies to established clients. The
+publish host-loopback `127.0.0.1:8010`; the API is not exposed on Ethernet,
+Wi-Fi, or ConnectX interfaces. A dedicated `DOCKER-USER` chain rejects new
+egress from both fixed gateway addresses while allowing replies to established
+clients. The
 gateway cannot read the model, reference, cache, Docker socket, SSH keys, or
 shell profiles. Host OUTPUT rules also prevent ordinary local processes from
 routing directly to either private backend-network address. Root or a
@@ -201,12 +203,15 @@ Docker-capable process remains inside the trusted host boundary and can change
 these controls.
 
 The installer copies the runtime into root-owned
-`/usr/local/lib/cerberus3-audio8-sglang`, saves the exact stock unit, optional
-environment, enabled state, and image ID under mode-0700
-`/var/lib/cerberus3-audio8-sglang/stock-rollback`, then installs the private
-network and backend units. It enables only that private prewarmed backend;
-stock remains the canonical `cerberus3-audio8.service`, and a reboot before
-cutover continues using stock.
+`/usr/local/lib/cerberus3-audio8-sglang`. It atomically saves the stock unit,
+optional environment, enabled state, and image ID under mode-0700
+`/var/lib/cerberus3-audio8-sglang/stock-rollback-v2`. It also copies the stock
+launcher and model lock into root-owned
+`/usr/local/lib/cerberus3-audio8-stock-rollback-v2`; SHA-256 manifests cover
+both pieces of the rollback snapshot. It then installs the private network and
+backend units. It enables only that private prewarmed backend; stock remains
+the canonical `cerberus3-audio8.service`, and a reboot before cutover continues
+using stock.
 
 ```bash
 export AUDIO8_SGLANG_EXPERIMENTAL=1
@@ -234,18 +239,21 @@ sudo env AUDIO8_SGLANG_CUTOVER=1 \
 ```
 
 The voice API remains `http://127.0.0.1:8010/v1/audio/speech`; no client setting
-changes. The gateway deliberately stays available and returns 503 while the
-backend restarts. Stock remains installed and can be restored with:
+changes. A watchdog supervisor restarts a persistently unhealthy gateway when
+the backend is healthy. The gateway deliberately stays available and returns
+503 while the backend restarts. Both launchers wait through Docker daemon
+outages without exhausting a systemd start limit, and container logs rotate at
+three 10 MiB files. Stock remains installed and can be restored with:
 
 ```bash
 sudo env AUDIO8_SGLANG_ROLLBACK=1 \
   /usr/local/lib/cerberus3-audio8-sglang/rollback-to-stock.sh
 ```
 
-Rollback verifies the snapshotted stock image ID, atomically restores the saved
-stock unit and environment verbatim without opening a boot-disabled window,
-then requires its exact unit implementation and optimized health contract
-before resuming the bridge.
+Rollback validates every snapshot manifest and the stock image ID before it
+mutates services, atomically restores the saved unit and environment, restores
+the saved enabled or disabled state, then requires its exact root-owned launcher
+and optimized health contract before resuming the bridge.
 
 Run the source-only checks with:
 

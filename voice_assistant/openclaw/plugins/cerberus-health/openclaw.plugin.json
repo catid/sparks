@@ -1,0 +1,24 @@
+{
+  "id": "cerberus-health",
+  "name": "Cerberus Health",
+  "description": "Read-only access to the local Cerberus cluster telemetry snapshot.",
+  "version": "1.0.0",
+  "contracts": {
+    "tools": [
+      "cerberus_health"
+    ]
+  },
+  "toolMetadata": {
+    "cerberus_health": {
+      "optional": true
+    }
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

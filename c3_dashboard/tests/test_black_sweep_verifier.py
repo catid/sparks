@@ -34,6 +34,10 @@ class SizeTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 verify_black_sweep.parse_size(value)
 
+    def test_default_wait_covers_the_thirty_minute_max_deferral(self) -> None:
+        args = verify_black_sweep.parse_args([])
+        self.assertEqual(args.wait_seconds, 1860)
+
 
 class PixelAnalysisTests(unittest.TestCase):
     def test_exact_rgb_black_rows_with_padding(self) -> None:

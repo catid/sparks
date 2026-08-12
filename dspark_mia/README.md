@@ -283,6 +283,17 @@ SSH failures use consecutive-failure thresholds to tolerate short stalls; an
 SSH-only outage is given a longer grace period while the model API is still
 healthy. Probes, Docker cleanup, and cold starts all have hard wall-clock
 limits, so a wedged Docker daemon cannot wedge the supervisor indefinitely.
+The installed service polls every 30 seconds and reuses one private OpenSSH
+control connection to C2 for 90 seconds. This keeps failure detection bounded
+without creating thousands of PAM/login sessions per hour; the runtime socket
+is service-owned and disappears with the unit. During an upgrade, probes derive
+the socket path from the already-running supervisor's runtime directory, so
+connection reuse starts without recycling the loaded model. The new polling
+cadence applies after the next normal supervisor restart.
+For an in-place upgrade of an already-running supervisor, the external probe
+also caches only the last complete generation fingerprint for 30 seconds while
+continuing to check the model HTTP API on every old-loop invocation. Planned
+stops invalidate that cache before either rank can change.
 Failed cold starts retry forever with bounded exponential backoff. C2 must not
 run an autonomous copy of this unit; C1 is the sole orchestrator
 and Compose continues to use `restart: "no"`.

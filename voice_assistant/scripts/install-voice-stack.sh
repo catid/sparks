@@ -128,6 +128,7 @@ unit_names=(
 required_files=(
   "${voice_dir}/asr_server.py"
   "${voice_dir}/voice_bridge.py"
+  "${voice_dir}/wait-dependency-ready.py"
   "${voice_dir}/run-asr.sh"
   "${voice_dir}/download-model.sh"
   "${voice_dir}/Dockerfile"
@@ -135,6 +136,9 @@ required_files=(
   "${voice_dir}/openclaw/openclaw.json.in"
   "${voice_dir}/openclaw/AGENTS.md"
   "${voice_dir}/openclaw/gateway-wrapper.sh"
+  "${voice_dir}/openclaw/plugins/cerberus-health/index.js"
+  "${voice_dir}/openclaw/plugins/cerberus-health/openclaw.plugin.json"
+  "${voice_dir}/openclaw/plugins/cerberus-health/package.json"
   "${voice_dir}/scripts/install-openclaw-runtime.sh"
   "${voice_dir}/scripts/migrate-legacy-state.py"
   "${voice_dir}/tests/fixtures/fake-node"
@@ -168,6 +172,7 @@ python3 -m json.tool "${voice_dir}/openclaw/runtime.lock.json" >/dev/null
 python3 - \
   "${voice_dir}/asr_server.py" \
   "${voice_dir}/voice_bridge.py" \
+  "${voice_dir}/wait-dependency-ready.py" \
   "${voice_dir}/scripts/migrate-legacy-state.py" <<'PY'
 import pathlib
 import sys
@@ -181,16 +186,19 @@ PY
 temporary_dir="$(mktemp -d)"
 canonical_openclaw_was_active=0
 canonical_bridge_was_active=0
+canonical_target_was_active=0
 restore_canonical_on_failure=0
 cleanup() {
   local status=$?
   trap - EXIT
   rm -rf -- "${temporary_dir}"
   if ((restore_canonical_on_failure != 0 && status != 0)); then
-    if ((canonical_openclaw_was_active != 0)); then
+    if ((canonical_target_was_active != 0)); then
+      "${elevate[@]}" systemctl start cerberus3-voice-stack.target || true
+    elif ((canonical_openclaw_was_active != 0)); then
       "${elevate[@]}" systemctl start cerberus3-openclaw-voice.service || true
     fi
-    if ((canonical_bridge_was_active != 0)); then
+    if ((canonical_target_was_active == 0 && canonical_bridge_was_active != 0)); then
       "${elevate[@]}" systemctl start cerberus3-voice-bridge.service || true
     fi
   fi
@@ -219,14 +227,14 @@ fi
 
 python3 - \
   "${voice_dir}/openclaw/openclaw.json.in" \
-  "${rendered_config}" "${workspace}" <<'PY'
+  "${rendered_config}" "${workspace}" "${project_dir}" <<'PY'
 import json
 import pathlib
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-rendered = source.replace("@WORKSPACE@", sys.argv[3])
-if "@WORKSPACE@" in rendered or "@" in json.dumps(json.loads(rendered)):
+rendered = source.replace("@WORKSPACE@", sys.argv[3]).replace("@PROJECT_DIR@", sys.argv[4])
+if "@WORKSPACE@" in rendered or "@PROJECT_DIR@" in rendered:
     raise SystemExit("unresolved OpenClaw config placeholder")
 data = json.loads(rendered)
 pathlib.Path(sys.argv[2]).write_text(
@@ -302,6 +310,13 @@ run_as_service_user() {
   fi
 }
 
+user_systemctl() {
+  run_as_service_user env \
+    XDG_RUNTIME_DIR="/run/user/${service_uid}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${service_uid}/bus" \
+    systemctl --user "$@"
+}
+
 if [[ "${action}" == "prepare" ]]; then
   VOICE_OPENCLAW_RUNTIME_ROOT="${runtime_root}" \
   VOICE_OPENCLAW_LEGACY_RUNTIME_ROOT="${legacy_runtime_root}" \
@@ -327,9 +342,46 @@ VOICE_OPENCLAW_RUNTIME_ROOT="${runtime_root}" \
 docker image inspect cerberus/qwen3-asr:1.7b-bcd2b5b7 >/dev/null 2>&1 ||
   fail "pinned Qwen3 ASR image is missing; run prepare first"
 
+# A separately enabled per-user OpenClaw gateway can connect the same Slack app
+# and produce duplicate replies. Stop and disable only this known unit; retain
+# its unit file, config, and state for an intentional manual rollback.
+duplicate_user_unit="openclaw-gateway.service"
+duplicate_user_unit_present=0
+for duplicate_candidate in \
+  "${service_home}/.config/systemd/user/${duplicate_user_unit}" \
+  "${service_home}/.config/systemd/user/default.target.wants/${duplicate_user_unit}" \
+  "/etc/systemd/user/${duplicate_user_unit}" \
+  "/usr/local/lib/systemd/user/${duplicate_user_unit}" \
+  "/usr/lib/systemd/user/${duplicate_user_unit}"; do
+  if [[ -e "${duplicate_candidate}" || -L "${duplicate_candidate}" ]]; then
+    duplicate_user_unit_present=1
+  fi
+done
+if user_systemctl cat "${duplicate_user_unit}" >/dev/null 2>&1; then
+  duplicate_user_unit_present=1
+fi
+if ((duplicate_user_unit_present != 0)); then
+  [[ -S "/run/user/${service_uid}/bus" ]] ||
+    fail "cannot safely stop ${duplicate_user_unit}: user manager bus is unavailable"
+  user_systemctl disable --now "${duplicate_user_unit}"
+  user_systemctl reset-failed "${duplicate_user_unit}" >/dev/null 2>&1 || true
+  if user_systemctl is-active --quiet "${duplicate_user_unit}"; then
+    fail "conflicting user OpenClaw gateway remained active"
+  fi
+  duplicate_enablement="$(user_systemctl is-enabled "${duplicate_user_unit}" 2>/dev/null || true)"
+  case "${duplicate_enablement}" in
+    disabled|masked|static|indirect|generated|transient|not-found) ;;
+    *) fail "conflicting user OpenClaw gateway remained enabled" ;;
+  esac
+fi
+
 # OpenClaw persists resolved session paths in JSON metadata. Quiesce both the
 # writer and its voice client before the migrator atomically repairs those
 # paths, then preserve their prior running state for install/enable actions.
+if "${systemctl_command}" is-active --quiet cerberus3-voice-stack.target; then
+  canonical_target_was_active=1
+  restore_canonical_on_failure=1
+fi
 if "${systemctl_command}" is-active --quiet cerberus3-voice-bridge.service; then
   canonical_bridge_was_active=1
   restore_canonical_on_failure=1
@@ -471,8 +523,26 @@ if "${elevate[@]}" test -e "${config_path}" && ((replace_config == 0)); then
   "${elevate[@]}" test -f "${config_path}" &&
     ! "${elevate[@]}" test -L "${config_path}" ||
     fail "existing config must be a regular non-symlink file"
-  config_to_validate="${config_path}"
-  echo "Preserving existing private OpenClaw config."
+  preserved_config="${temporary_dir}/preserved-openclaw.json"
+  python3 - "${config_path}" "${rendered_config}" "${preserved_config}" <<'PY'
+import json
+import pathlib
+import sys
+
+existing_path, rendered_path, destination_path = map(pathlib.Path, sys.argv[1:])
+existing = json.loads(existing_path.read_text(encoding="utf-8"))
+rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
+if not isinstance(existing, dict) or not isinstance(rendered.get("logging"), dict):
+    raise SystemExit("OpenClaw config or managed logging policy is invalid")
+existing["logging"] = rendered["logging"]
+destination_path.write_text(
+    json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
+    encoding="utf-8",
+)
+PY
+  chmod 0600 "${preserved_config}"
+  config_to_validate="${preserved_config}"
+  echo "Preserving the private OpenClaw config and reconciling managed logging."
 fi
 
 validation_state="${temporary_dir}/validation-state"
@@ -487,10 +557,54 @@ HOME="${validation_home}" \
 PATH="${node_dir}/bin:${openclaw_release}/bin:/usr/bin:/bin" \
   "${openclaw_release}/bin/openclaw" config validate >/dev/null
 
-if [[ "${config_to_validate}" == "${rendered_config}" ]]; then
-  "${elevate[@]}" install -o "${service_user}" -g "${service_group}" -m 0600 \
-    "${rendered_config}" "${config_path}"
-fi
+"${elevate[@]}" python3 - \
+    "${config_to_validate}" "${config_path}" "${service_uid}" "${service_gid}" <<'PY'
+import os
+import pathlib
+import secrets
+import stat
+import sys
+
+source = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2])
+uid = int(sys.argv[3])
+gid = int(sys.argv[4])
+source_info = source.lstat()
+if not stat.S_ISREG(source_info.st_mode) or source.is_symlink():
+    raise SystemExit("validated OpenClaw config must be a regular non-symlink file")
+payload = source.read_bytes()
+if not payload or len(payload) > 16 * 1024 * 1024:
+    raise SystemExit("validated OpenClaw config has an invalid size")
+directory = destination.parent
+if directory.is_symlink():
+    raise SystemExit("OpenClaw state directory must not be a symlink")
+temporary = directory / f".{destination.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(temporary, flags, 0o600)
+try:
+    with os.fdopen(fd, "wb", closefd=True) as stream:
+        fd = -1
+        stream.write(payload)
+        stream.flush()
+        os.fchown(stream.fileno(), uid, gid)
+        os.fchmod(stream.fileno(), 0o600)
+        os.fsync(stream.fileno())
+    os.replace(temporary, destination)
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    if fd >= 0:
+        os.close(fd)
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        pass
+PY
 
 for plugin_spec in "${pinned_openclaw_plugins[@]}"; do
   run_as_service_user env \
@@ -499,7 +613,7 @@ for plugin_spec in "${pinned_openclaw_plugins[@]}"; do
     OPENCLAW_WORKSPACE_DIR="${workspace}" \
     XDG_CACHE_HOME="${cache_dir}" \
     PATH="${node_dir}/bin:${openclaw_release}/bin:/usr/bin:/bin" \
-    "${openclaw_release}/bin/openclaw" plugins install "${plugin_spec}"
+    "${openclaw_release}/bin/openclaw" plugins install --force "${plugin_spec}"
 done
 
 agents_target="${workspace}/AGENTS.md"
@@ -535,10 +649,12 @@ if [[ "${action}" == "start" ]]; then
   "${elevate[@]}" systemctl restart cerberus3-voice-bridge.service
   "${elevate[@]}" systemctl start cerberus3-voice-stack.target
 else
-  if ((canonical_openclaw_was_active != 0)); then
+  if ((canonical_target_was_active != 0)); then
+    "${elevate[@]}" systemctl start cerberus3-voice-stack.target
+  elif ((canonical_openclaw_was_active != 0)); then
     "${elevate[@]}" systemctl start cerberus3-openclaw-voice.service
   fi
-  if ((canonical_bridge_was_active != 0)); then
+  if ((canonical_target_was_active == 0 && canonical_bridge_was_active != 0)); then
     "${elevate[@]}" systemctl start cerberus3-voice-bridge.service
   fi
 fi

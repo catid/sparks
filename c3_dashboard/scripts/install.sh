@@ -120,7 +120,7 @@ for executable_file in \
   [[ -x "${executable_file}" ]] || fail "${executable_file} is not executable"
 done
 for required_command in \
-  Xorg chvt dbus-run-session loginctl mcookie python3 sed ssh startx systemctl systemd-analyze \
+  Xorg chvt curl dbus-run-session loginctl mcookie python3 sed ssh startx systemctl systemd-analyze \
   xauth xinit xrandr xset xsetroot; do
   command -v "${required_command}" >/dev/null 2>&1 ||
     fail "missing required command ${required_command}"

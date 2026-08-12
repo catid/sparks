@@ -14,6 +14,10 @@ from urllib.parse import urlsplit
 
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+BLACK_FALLBACK_HTML = """<!doctype html>
+<html><head><meta name="color-scheme" content="dark"><style>
+html,body{width:100%;height:100%;margin:0;background:#000!important;overflow:hidden}
+</style></head><body></body></html>"""
 
 
 def dashboard_origin(url: str) -> tuple[str, str, int]:
@@ -85,6 +89,7 @@ def run_kiosk(url: str, size: tuple[int, int], retry_seconds: int) -> int:
         def __init__(self, application: object) -> None:
             super().__init__(application=application)
             self._failed = False
+            self._loading_fallback = False
             self._retry_source = 0
             self.set_title("DGX Spark cluster dashboard")
             self.set_decorated(False)
@@ -125,7 +130,10 @@ def run_kiosk(url: str, size: tuple[int, int], retry_seconds: int) -> int:
 
         def _on_load_changed(self, _view: object, event: object) -> None:
             if event == WebKit.LoadEvent.STARTED:
-                self._failed = False
+                if not self._loading_fallback:
+                    self._failed = False
+            elif event == WebKit.LoadEvent.FINISHED and self._loading_fallback:
+                self._loading_fallback = False
             elif event == WebKit.LoadEvent.FINISHED and not self._failed:
                 if self._retry_source:
                     GLib.source_remove(self._retry_source)
@@ -142,7 +150,12 @@ def run_kiosk(url: str, size: tuple[int, int], retry_seconds: int) -> int:
                 flush=True,
             )
             self._schedule_retry()
-            return False
+            # Returning True suppresses WebKit's stock error page. Load a
+            # self-contained exact-black document while the loopback server
+            # recovers, without treating that fallback load as a success.
+            self._loading_fallback = True
+            GLib.idle_add(self._show_black_fallback)
+            return True
 
         def _on_web_process_terminated(
             self, _view: object, reason: object
@@ -154,6 +167,12 @@ def run_kiosk(url: str, size: tuple[int, int], retry_seconds: int) -> int:
                 flush=True,
             )
             self._schedule_retry()
+            self._loading_fallback = True
+            GLib.idle_add(self._show_black_fallback)
+
+        def _show_black_fallback(self) -> bool:
+            self.webview.load_html(BLACK_FALLBACK_HTML, "about:blank")
+            return GLib.SOURCE_REMOVE
 
         def _schedule_retry(self) -> None:
             if not self._retry_source:
@@ -163,6 +182,7 @@ def run_kiosk(url: str, size: tuple[int, int], retry_seconds: int) -> int:
 
         def _retry(self) -> bool:
             self._retry_source = 0
+            self._loading_fallback = False
             self.webview.load_uri(url)
             return GLib.SOURCE_REMOVE
 

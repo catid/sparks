@@ -9,11 +9,15 @@ Type=simple
 User=catid
 Group=catid
 WorkingDirectory=/home/catid/dgx-spark-laguna
+Environment=HOME=/home/catid
+Environment=DASHBOARD_SSH_CONTROL_DIR=/run/dgx-spark-laguna-dashboard/ssh
 EnvironmentFile=-/etc/default/dgx-spark-laguna-dashboard
 ExecStart=/home/catid/dgx-spark-laguna/dashboard/run-dashboard.sh
 Restart=on-failure
 RestartSec=3s
 TimeoutStopSec=10s
+RuntimeDirectory=dgx-spark-laguna-dashboard
+RuntimeDirectoryMode=0700
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

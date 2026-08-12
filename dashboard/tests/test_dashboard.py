@@ -1,6 +1,8 @@
 import importlib.util
+import http.server
 import pathlib
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -33,6 +35,90 @@ def make_collector(**overrides):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_http_fetch_uses_total_deadline_against_trickle(self):
+        class TrickleHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Length", "40")
+                self.end_headers()
+                try:
+                    for _ in range(40):
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                        time.sleep(0.03)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), TrickleHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises((OSError, TimeoutError)):
+                make_collector().fetch_url(
+                    f"http://127.0.0.1:{server.server_port}/metrics", timeout=0.1
+                )
+            request_elapsed = time.monotonic() - started
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+        self.assertLess(request_elapsed, 0.3)
+
+    def test_ssh_probe_reuses_private_control_socket(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            control = pathlib.Path(temporary) / "ssh"
+            collector = make_collector(ssh_control_dir=str(control))
+            completed = mock.Mock(returncode=0, stdout="", stderr="")
+            with mock.patch.object(dashboard.subprocess, "run", return_value=completed) as run:
+                collector.ssh_system("cerberus2.local", "/cluster-key")
+            command = run.call_args.args[0]
+
+            self.assertEqual(control.stat().st_mode & 0o777, 0o700)
+            self.assertIn("ControlMaster=auto", command)
+            self.assertIn("ControlPersist=60", command)
+            paths = [item for item in command if item.startswith("ControlPath=")]
+            self.assertEqual(len(paths), 1)
+            self.assertTrue(paths[0].startswith(f"ControlPath={control}/ssh-"))
+
+    def test_remote_system_probe_has_an_independent_cadence(self):
+        collector = make_collector(remote_interval=30)
+        local = {
+            "hostname": "cerberus1",
+            "network": {},
+            "gpu": {},
+            "thermals": {},
+            "memory": {},
+            "vllm_rss_bytes": 1,
+        }
+        remote = {
+            "hostname": "cerberus2",
+            "network": {},
+            "gpu": {},
+            "thermals": {},
+            "memory": {},
+            "vllm_rss_bytes": 1,
+        }
+        metrics = {"healthy": True, "state": "serving", "rates": {}}
+        with (
+            mock.patch.object(collector, "local_system", return_value=local) as local_probe,
+            mock.patch.object(collector, "remote_system", return_value=remote) as remote_probe,
+            mock.patch.object(collector, "vllm_metrics", return_value=metrics),
+        ):
+            collector.collect()
+            collector.collect()
+
+        self.assertEqual(local_probe.call_count, 2)
+        self.assertEqual(remote_probe.call_count, 1)
+        snapshot = collector.get_snapshot()
+        self.assertEqual(snapshot["collector"]["remote_interval_seconds"], 30)
+        self.assertIn(
+            "sample_age_seconds", snapshot["nodes"]["cerberus2"]["system"]
+        )
+
     def test_legacy_node_maps_are_accepted_but_normalized_to_cerberus(self):
         collector = make_collector(
             node_urls={
@@ -63,6 +149,24 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(status["affected_nodes"], [])
         self.assertEqual(status["outage_elapsed_seconds"], 0.0)
         self.assertIn("endpoint", status)
+
+    def test_main_does_not_block_http_bind_on_initial_collection(self):
+        source = SERVER.read_text()
+        self.assertNotIn("    collector.collect()\n    thread =", source)
+        self.assertIn(
+            'thread = threading.Thread(target=collector.run, name="collector", daemon=True)',
+            source,
+        )
+
+    def test_routine_api_poll_log_is_suppressed_but_errors_remain(self):
+        handler = object.__new__(dashboard.DashboardHandler)
+        handler.path = "/api/status"
+        handler.client_address = ("127.0.0.1", 1234)
+        with mock.patch("builtins.print") as printer:
+            handler.log_message('%s %s', "GET /api/status", "200")
+            printer.assert_not_called()
+            handler.log_message('%s %s', "GET /api/status", "503")
+            printer.assert_called_once()
 
     def test_thermal_stats_uses_named_gb10_zones_and_hwmon(self):
         with tempfile.TemporaryDirectory() as temporary:

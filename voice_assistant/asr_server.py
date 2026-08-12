@@ -8,6 +8,8 @@ import ipaddress
 import json
 import math
 import os
+import signal
+import socket
 import threading
 import time
 import wave
@@ -28,10 +30,19 @@ VOCABULARY_PROMPT = os.environ.get(
 MAX_AUDIO_SECONDS = float(os.environ.get("QWEN_ASR_MAX_AUDIO_SECONDS", "35"))
 MIN_AUDIO_SECONDS = float(os.environ.get("QWEN_ASR_MIN_AUDIO_SECONDS", "0.15"))
 MAX_NEW_TOKENS = int(os.environ.get("QWEN_ASR_MAX_NEW_TOKENS", "256"))
+MAX_CONNECTIONS = int(os.environ.get("QWEN_ASR_MAX_CONNECTIONS", "8"))
+HEADER_TIMEOUT_SECONDS = float(
+    os.environ.get("QWEN_ASR_HEADER_TIMEOUT_SECONDS", "5")
+)
+BODY_TIMEOUT_SECONDS = float(os.environ.get("QWEN_ASR_BODY_TIMEOUT_SECONDS", "10"))
+INFERENCE_TIMEOUT_SECONDS = float(
+    os.environ.get("QWEN_ASR_INFERENCE_TIMEOUT_SECONDS", "120")
+)
+WRITE_TIMEOUT_SECONDS = float(os.environ.get("QWEN_ASR_WRITE_TIMEOUT_SECONDS", "5"))
 SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
-INFERENCE_LOCK = threading.Lock()
+INFERENCE_SLOT = threading.BoundedSemaphore(1)
 RUNTIME: "QwenAsrRuntime | None" = None
 
 
@@ -55,6 +66,16 @@ def validate_configuration() -> None:
         raise RuntimeError("QWEN_ASR_MAX_AUDIO_SECONDS must be between 1 and 300")
     if not 16 <= MAX_NEW_TOKENS <= 2048:
         raise RuntimeError("QWEN_ASR_MAX_NEW_TOKENS must be between 16 and 2048")
+    if not 1 <= MAX_CONNECTIONS <= 64:
+        raise RuntimeError("QWEN_ASR_MAX_CONNECTIONS must be between 1 and 64")
+    for name, value in (
+        ("QWEN_ASR_HEADER_TIMEOUT_SECONDS", HEADER_TIMEOUT_SECONDS),
+        ("QWEN_ASR_BODY_TIMEOUT_SECONDS", BODY_TIMEOUT_SECONDS),
+        ("QWEN_ASR_INFERENCE_TIMEOUT_SECONDS", INFERENCE_TIMEOUT_SECONDS),
+        ("QWEN_ASR_WRITE_TIMEOUT_SECONDS", WRITE_TIMEOUT_SECONDS),
+    ):
+        if not math.isfinite(value) or not 0.1 <= value <= 120:
+            raise RuntimeError(f"{name} must be between 0.1 and 120")
     validate_vocabulary_prompt(VOCABULARY_PROMPT)
 
 
@@ -140,7 +161,7 @@ class QwenAsrRuntime:
             self.device, self.dtype
         )
         started = time.monotonic()
-        with INFERENCE_LOCK, self.torch.inference_mode():
+        with self.torch.inference_mode():
             output_ids = self.model.generate(
                 **inputs,
                 max_new_tokens=MAX_NEW_TOKENS,
@@ -161,8 +182,115 @@ class QwenAsrRuntime:
         return text.strip(), language, elapsed
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Bound concurrent slow clients without allocating unbounded threads."""
+
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler: type[BaseHTTPRequestHandler],
+    ) -> None:
+        self._connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(server_address, handler)
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        if not self._connection_slots.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.0 503 Service Unavailable\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 24\r\n"
+                    b"Cache-Control: no-store\r\n"
+                    b"Retry-After: 1\r\n"
+                    b"Connection: close\r\n\r\n"
+                    b'{"error":"server busy"}\n'
+                )
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(
+        self,
+        request: socket.socket,
+        client_address: Any,
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CerberusQwenASR/1"
+
+    def setup(self) -> None:
+        super().setup()
+        self._deadline_lock = threading.Lock()
+        self._deadline_done = threading.Event()
+        self._phase_deadline = time.monotonic() + HEADER_TIMEOUT_SECONDS
+        self._deadline_thread = threading.Thread(
+            target=self._deadline_watchdog,
+            name="asr-request-deadline",
+            daemon=True,
+        )
+        self._deadline_thread.start()
+
+    def finish(self) -> None:
+        self._deadline_done.set()
+        try:
+            super().finish()
+        finally:
+            self._deadline_thread.join(timeout=0.2)
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.close_connection = True
+
+    def _set_phase_deadline(self, seconds: float) -> float:
+        deadline = time.monotonic() + seconds
+        with self._deadline_lock:
+            self._phase_deadline = deadline
+        return deadline
+
+    def _deadline_watchdog(self) -> None:
+        while not self._deadline_done.is_set():
+            with self._deadline_lock:
+                remaining = self._phase_deadline - time.monotonic()
+            if remaining <= 0:
+                try:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                self.connection.close()
+                return
+            self._deadline_done.wait(min(remaining, 0.05))
+
+    def _read_body(self, length: int) -> bytes:
+        deadline = self._set_phase_deadline(BODY_TIMEOUT_SECONDS)
+        chunks: list[bytes] = []
+        remaining_bytes = length
+        while remaining_bytes:
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                raise TimeoutError("request body exceeded its total deadline")
+            self.connection.settimeout(remaining_time)
+            chunk = self.rfile.read1(min(65_536, remaining_bytes))
+            if not chunk:
+                raise ConnectionError("request body ended early")
+            chunks.append(chunk)
+            remaining_bytes -= len(chunk)
+        return b"".join(chunks)
 
     def log_message(self, format_string: str, *args: Any) -> None:
         # Never emit request bodies or transcriptions.
@@ -170,6 +298,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def json_response(self, status: int, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        deadline = self._set_phase_deadline(WRITE_TIMEOUT_SECONDS)
+        self.connection.settimeout(max(0.01, deadline - time.monotonic()))
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
@@ -177,6 +307,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(encoded)
+        self.wfile.flush()
 
     def client_is_loopback(self) -> bool:
         try:
@@ -224,10 +355,30 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(413, {"error": "invalid audio request size"})
             return
         try:
-            pcm16, duration = decode_pcm16_wav(self.rfile.read(content_length))
-            if RUNTIME is None:
-                self.json_response(503, {"error": "ASR model is loading"})
-                return
+            wire_body = self._read_body(content_length)
+        except (ConnectionError, OSError, TimeoutError):
+            self.close_connection = True
+            return
+        # The body deadline must never remain armed while the GPU works. Give
+        # model preprocessing and generation their own bounded phase instead.
+        self._set_phase_deadline(INFERENCE_TIMEOUT_SECONDS)
+        if RUNTIME is None:
+            self.json_response(503, {"error": "ASR model is loading"})
+            return
+        if not INFERENCE_SLOT.acquire(blocking=False):
+            deadline = self._set_phase_deadline(WRITE_TIMEOUT_SECONDS)
+            self.connection.settimeout(max(0.01, deadline - time.monotonic()))
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "27")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Retry-After", "1")
+            self.end_headers()
+            self.wfile.write(b'{"error":"inference busy"}\n')
+            self.wfile.flush()
+            return
+        try:
+            pcm16, duration = decode_pcm16_wav(wire_body)
             text, language, elapsed = RUNTIME.transcribe(pcm16)
         except ValueError as error:
             self.json_response(400, {"error": str(error)})
@@ -236,6 +387,8 @@ class Handler(BaseHTTPRequestHandler):
             print(f"transcription failed: {type(error).__name__}", flush=True)
             self.json_response(500, {"error": "transcription failed"})
             return
+        finally:
+            INFERENCE_SLOT.release()
         self.json_response(
             200,
             {
@@ -252,10 +405,23 @@ def main() -> None:
     validate_configuration()
     print(f"Loading {MODEL_NAME} from {MODEL_PATH}", flush=True)
     RUNTIME = QwenAsrRuntime()
-    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
-    server.daemon_threads = True
+    server = BoundedThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
+    stopping = threading.Event()
+
+    def request_shutdown(*_args: Any) -> None:
+        if stopping.is_set():
+            return
+        stopping.set()
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
     print(f"Qwen3-ASR listening on {LISTEN_HOST}:{LISTEN_PORT}", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever(poll_interval=0.2)
+    finally:
+        server.server_close()
+        RUNTIME = None
 
 
 if __name__ == "__main__":

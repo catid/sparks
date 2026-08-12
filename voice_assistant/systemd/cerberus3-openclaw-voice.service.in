@@ -3,6 +3,7 @@ Description=Cerberus voice OpenClaw gateway on cerberus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
 Wants=network-online.target
 After=network-online.target
+PartOf=cerberus3-voice-stack.target
 Conflicts=cerebrus3-openclaw-voice.service
 StartLimitIntervalSec=0
 
@@ -24,6 +25,12 @@ Environment=XDG_CACHE_HOME=@CACHE_DIR@
 EnvironmentFile=@SECRET_ENV@
 ExecStartPre=@OPENCLAW_RELEASE@/bin/openclaw config validate
 ExecStart=@PROJECT_DIR@/voice_assistant/openclaw/gateway-wrapper.sh
+ExecStartPost=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/wait-dependency-ready.py openclaw --timeout 90
+# OpenClaw's non-delivery HTTP path writes successful assistant payloads
+# directly to stdout, bypassing logging.consoleLevel. Drop stdout at the unit
+# boundary while retaining warnings/errors on stderr and in its bounded log.
+StandardOutput=null
+StandardError=journal
 Restart=always
 RestartSec=5s
 TimeoutStartSec=120s

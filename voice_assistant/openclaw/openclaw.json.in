@@ -1,4 +1,10 @@
 {
+  "logging": {
+    "level": "warn",
+    "consoleLevel": "warn",
+    "redactSensitive": "tools",
+    "maxFileBytes": 10485760
+  },
   "env": {
     "shellEnv": {
       "enabled": false,
@@ -77,11 +83,20 @@
     }
   },
   "plugins": {
+    "load": {
+      "paths": [
+        "@PROJECT_DIR@/voice_assistant/openclaw/plugins/cerberus-health"
+      ]
+    },
     "allow": [
+      "cerberus-health",
       "exa",
       "slack"
     ],
     "entries": {
+      "cerberus-health": {
+        "enabled": true
+      },
       "exa": {
         "enabled": true
       },
@@ -154,7 +169,9 @@
         },
         "thinkingDefault": "xhigh",
         "reasoningDefault": "off",
-        "skills": [],
+        "skills": [
+          "weather"
+        ],
         "subagents": {
           "allowAgents": [],
           "requireAgentId": true
@@ -162,6 +179,7 @@
         "tools": {
           "profile": "minimal",
           "alsoAllow": [
+            "cerberus_health",
             "message",
             "web_fetch",
             "web_search"
@@ -187,6 +205,7 @@
   "tools": {
     "profile": "minimal",
     "alsoAllow": [
+      "cerberus_health",
       "message",
       "web_fetch",
       "web_search"

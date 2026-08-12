@@ -7,15 +7,27 @@ temporary_dir="$(mktemp -d)"
 trap 'rm -rf -- "${temporary_dir}"' EXIT
 
 rendered_config="${temporary_dir}/openclaw.json"
-sed 's|@WORKSPACE@|/home/test/.local/share/cerberus-voice/workspace|g' \
+sed \
+  -e 's|@WORKSPACE@|/home/test/.local/share/cerberus-voice/workspace|g' \
+  -e "s|@PROJECT_DIR@|${voice_dir%/voice_assistant}|g" \
   "${voice_dir}/openclaw/openclaw.json.in" >"${rendered_config}"
-python3 - "${rendered_config}" "${voice_dir}/openclaw/runtime.lock.json" <<'PY'
+python3 - \
+  "${rendered_config}" \
+  "${voice_dir}/openclaw/runtime.lock.json" \
+  "${voice_dir}" <<'PY'
 import json
 import pathlib
 import sys
 
 config = json.loads(pathlib.Path(sys.argv[1]).read_text())
 lock = json.loads(pathlib.Path(sys.argv[2]).read_text())
+
+assert config["logging"] == {
+    "level": "warn",
+    "consoleLevel": "warn",
+    "redactSensitive": "tools",
+    "maxFileBytes": 10485760,
+}
 
 assert lock["node"]["version"] == "24.15.0"
 assert lock["node"]["architecture"] == "arm64"
@@ -63,8 +75,12 @@ assert slack["actions"] == {
     "emojiList": False,
 }
 
-assert config["plugins"]["allow"] == ["exa", "slack"]
+assert config["plugins"]["load"]["paths"] == [
+    str(pathlib.Path(sys.argv[3]) / "openclaw" / "plugins" / "cerberus-health")
+]
+assert config["plugins"]["allow"] == ["cerberus-health", "exa", "slack"]
 assert config["plugins"]["entries"] == {
+    "cerberus-health": {"enabled": True},
     "exa": {"enabled": True},
     "slack": {"enabled": True},
 }
@@ -77,14 +93,18 @@ voice = agents["list"][0]
 assert voice["id"] == "voice" and voice["default"] is True
 assert voice["thinkingDefault"] == "xhigh"
 assert voice["tools"]["profile"] == "minimal"
-assert voice["tools"]["alsoAllow"] == ["message", "web_fetch", "web_search"]
+assert voice["tools"]["alsoAllow"] == [
+    "cerberus_health", "message", "web_fetch", "web_search"
+]
 assert "group:runtime" in voice["tools"]["deny"]
 assert "group:fs" in voice["tools"]["deny"]
 assert "group:messaging" not in voice["tools"]["deny"]
 assert "group:web" not in voice["tools"]["deny"]
-assert voice["skills"] == []
+assert voice["skills"] == ["weather"]
 assert config["tools"]["profile"] == "minimal"
-assert config["tools"]["alsoAllow"] == ["message", "web_fetch", "web_search"]
+assert config["tools"]["alsoAllow"] == [
+    "cerberus_health", "message", "web_fetch", "web_search"
+]
 assert config["tools"]["web"]["search"]["provider"] == "exa"
 assert "exec" not in config["tools"]["alsoAllow"]
 assert "code_execution" not in config["tools"]["alsoAllow"]
@@ -141,16 +161,45 @@ rg -q '^Environment=VOICE_STATE_DIR=%t/cerberus3-voice-bridge$' "${bridge_unit}"
 rg -q '^RuntimeDirectory=cerberus3-voice-bridge$' "${bridge_unit}"
 rg -q '^RuntimeDirectoryMode=0700$' "${bridge_unit}"
 rg -q '^Conflicts=cerebrus3-voice-bridge\.service$' "${bridge_unit}"
+rg -q '^PartOf=cerberus3-voice-stack\.target$' "${bridge_unit}"
+rg -Fq 'ExecStartPre=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/wait-dependency-ready.py all --timeout 180' "${bridge_unit}"
 rg -q '^Conflicts=cerebrus3-openclaw-voice\.service$' \
+  "${voice_dir}/systemd/cerberus3-openclaw-voice.service.in"
+rg -q '^PartOf=cerberus3-voice-stack\.target$' \
+  "${voice_dir}/systemd/cerberus3-openclaw-voice.service.in"
+rg -Fq 'ExecStartPost=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/wait-dependency-ready.py openclaw --timeout 90' \
+  "${voice_dir}/systemd/cerberus3-openclaw-voice.service.in"
+rg -q '^StandardOutput=null$' \
+  "${voice_dir}/systemd/cerberus3-openclaw-voice.service.in"
+rg -q '^StandardError=journal$' \
   "${voice_dir}/systemd/cerberus3-openclaw-voice.service.in"
 rg -q '^Conflicts=cerebrus3-qwen3-asr\.service$' \
   "${voice_dir}/systemd/cerberus3-qwen3-asr.service.in"
+rg -q '^PartOf=cerberus3-voice-stack\.target$' \
+  "${voice_dir}/systemd/cerberus3-qwen3-asr.service.in"
+rg -Fq 'ExecStartPost=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/wait-dependency-ready.py asr --timeout 180' \
+  "${voice_dir}/systemd/cerberus3-qwen3-asr.service.in"
+rg -q '^TimeoutStartSec=210s$' \
+  "${voice_dir}/systemd/cerberus3-qwen3-asr.service.in"
+rg -q '^TimeoutStopSec=35s$' \
+  "${voice_dir}/systemd/cerberus3-qwen3-asr.service.in"
+rg -q '^ExecStop=-/usr/bin/docker stop --timeout 20 cerberus3-qwen-asr$' \
+  "${voice_dir}/systemd/cerberus3-qwen3-asr.service.in"
 rg -q '^Conflicts=cerebrus3-voice-stack\.target$' \
   "${voice_dir}/systemd/cerberus3-voice-stack.target.in"
+rg -q '^After=.*cerberus3-voice-bridge\.service$' \
+  "${voice_dir}/systemd/cerberus3-voice-stack.target.in"
+if rg -q '^Before=.*cerberus3-voice-bridge\.service' \
+  "${voice_dir}/systemd/cerberus3-voice-stack.target.in"; then
+  echo "voice target must not become active before the readiness-gated bridge" >&2
+  exit 1
+fi
 rg -Fq 'if [[ "${action}" == "verify" || "${action}" == "prepare" ]]; then' \
   "${voice_dir}/scripts/install-voice-stack.sh"
 rg -Fq -- '--tag cerberus/qwen3-asr:1.7b-bcd2b5b7' \
   "${voice_dir}/scripts/install-voice-stack.sh"
+rg -q '^  --init \\' "${voice_dir}/run-asr.sh"
+rg -q '^  --stop-timeout 20 \\' "${voice_dir}/run-asr.sh"
 python3 - "${voice_dir}/scripts/install-voice-stack.sh" <<'PY'
 import pathlib
 import sys
@@ -169,6 +218,8 @@ assert bridge_stop < openclaw_stop < migration
 assert 'restore_canonical_on_failure=1' in source
 assert 'canonical_openclaw_was_active' in source
 assert 'canonical_bridge_was_active' in source
+assert 'canonical_target_was_active' in source
+assert 'systemctl start cerberus3-voice-stack.target' in source
 PY
 if rg -q 'cerebrus/qwen3-asr' "${voice_dir}/scripts/install-voice-stack.sh"; then
   echo 'Voice installer still launches the misspelled image namespace.' >&2
@@ -183,6 +234,14 @@ for override in \
 done
 rg -Fq 'systemctl reset-failed "${legacy_unit}"' \
   "${voice_dir}/scripts/install-voice-stack.sh"
+rg -Fq 'duplicate_user_unit="openclaw-gateway.service"' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
+rg -Fq 'user_systemctl disable --now "${duplicate_user_unit}"' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
+rg -Fq 'fail "cannot safely stop ${duplicate_user_unit}: user manager bus is unavailable"' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
+rg -Fq 'Preserving the private OpenClaw config and reconciling managed logging.' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
 if rg -q '^StateDirectory=' "${bridge_unit}"; then
   echo "ephemeral voice status must not use a persistent StateDirectory" >&2
   exit 1
@@ -195,7 +254,7 @@ if rg -n '(OPENCLAW_GATEWAY_TOKEN|VOICE_OPENCLAW_TOKEN|SLACK_BOT_TOKEN|EXA_API_K
   echo "repository contains a materialized gateway token" >&2
   exit 1
 fi
-rg -Fq '"${openclaw_release}/bin/openclaw" plugins install "${plugin_spec}"' \
+rg -Fq '"${openclaw_release}/bin/openclaw" plugins install --force "${plugin_spec}"' \
   "${voice_dir}/scripts/install-voice-stack.sh"
 rg -Fq 'SLACK_BOT_TOKEN must be provisioned in the secret dotenv' \
   "${voice_dir}/scripts/install-voice-stack.sh"

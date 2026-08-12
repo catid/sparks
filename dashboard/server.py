@@ -14,16 +14,19 @@ import argparse
 import base64
 import concurrent.futures
 import copy
+import hashlib
 import hmac
+import http.client
 import json
 import math
 import os
 import re
+import socket
+import stat
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
 from collections import defaultdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -52,6 +55,7 @@ LEGACY_NODE_ALIASES = {
 GB10_CPU_THERMAL_ZONES = frozenset({"TS0E", "TS0P", "TS1E", "TS1P"})
 MEMORY_HWMON_DRIVERS = frozenset({"jc42", "spd5118"})
 RECOVERY_HEALTHY_SAMPLES = 2
+MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
 def canonical_node_name(name: str) -> str:
@@ -517,12 +521,15 @@ class Collector:
         spark1_host: str | None = None,
         spark1_ssh_key: str | None = None,
         ssh_known_hosts: str | None = None,
+        ssh_control_dir: str | None = None,
+        remote_interval: float = 30.0,
     ) -> None:
         self.spark1_host = spark1_host
         self.spark1_ssh_key = spark1_ssh_key or ssh_key
         self.spark2_host = spark2_host
         self.ssh_key = ssh_key
         self.ssh_known_hosts = ssh_known_hosts
+        self.ssh_control_dir = self._prepare_ssh_control_dir(ssh_control_dir)
         self.node_urls = canonical_node_mapping(node_urls)
         self.node_roles = canonical_node_mapping(node_roles)
         missing_urls = set(CANONICAL_NODE_NAMES).difference(self.node_urls)
@@ -537,6 +544,7 @@ class Collector:
         self.router_metrics_url = router_metrics_url.rstrip("/")
         self.interfaces = interfaces
         self.interval = interval
+        self.remote_interval = max(remote_interval, interval)
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.snapshot: dict[str, Any] = {
@@ -570,16 +578,96 @@ class Collector:
         self._outage_affected_nodes: list[str] = []
         self._recovery_started_at: float | None = None
         self._recovery_healthy_samples = 0
+        self._remote_last_attempt: dict[str, float] = {}
+        self._remote_last_sample: dict[str, float] = {}
+        self._remote_counter_baselines: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    @staticmethod
+    def _prepare_ssh_control_dir(value: str | None) -> Path | None:
+        if not value:
+            return None
+        path = Path(value)
+        if not path.is_absolute() or len(str(path)) > 72:
+            raise ValueError("SSH control directory must be a short absolute path")
+        path.mkdir(mode=0o700, parents=False, exist_ok=True)
+        info = path.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_gid != os.getgid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise ValueError("SSH control directory must be private and service-owned")
+        return path
 
     def fetch_url(self, url: str, timeout: float = 1.5) -> tuple[int, str]:
-        request = urllib.request.Request(
-            url, headers={"User-Agent": "dgx-spark-dashboard/1.0"}
+        """Fetch a bounded endpoint under a real wall-clock deadline."""
+        parsed = urllib.parse.urlsplit(url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ValueError("dashboard endpoint URL is invalid")
+        connection_type = (
+            http.client.HTTPSConnection
+            if parsed.scheme == "https"
+            else http.client.HTTPConnection
         )
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        connection = connection_type(parsed.hostname, port, timeout=timeout)
+        started = time.monotonic()
+        timer: threading.Timer | None = None
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.status, response.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", "replace")
+            connection.connect()
+            live_socket = connection.sock
+            if live_socket is None:
+                raise OSError("dashboard endpoint did not create a socket")
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise TimeoutError("dashboard endpoint exceeded its deadline")
+
+            def abort() -> None:
+                try:
+                    live_socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+            timer = threading.Timer(remaining, abort)
+            timer.daemon = True
+            timer.start()
+            target = urllib.parse.urlunsplit(
+                ("", "", parsed.path or "/", parsed.query, "")
+            )
+            connection.request(
+                "GET", target, headers={"User-Agent": "dgx-spark-dashboard/1.0"}
+            )
+            response = connection.getresponse()
+            length = response.getheader("Content-Length")
+            if length is not None and int(length) > MAX_HTTP_RESPONSE_BYTES:
+                raise ValueError("dashboard endpoint response is too large")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = response.read(
+                    min(64 * 1024, MAX_HTTP_RESPONSE_BYTES + 1 - total)
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_HTTP_RESPONSE_BYTES:
+                    raise ValueError("dashboard endpoint response is too large")
+            if time.monotonic() - started > timeout:
+                raise TimeoutError("dashboard endpoint exceeded its deadline")
+            return response.status, b"".join(chunks).decode("utf-8", "replace")
+        finally:
+            if timer is not None:
+                timer.cancel()
+            connection.close()
 
     def local_system(self) -> dict[str, Any]:
         mem = read_meminfo()
@@ -623,6 +711,21 @@ class Collector:
             command.extend(
                 ["-o", f"UserKnownHostsFile={self.ssh_known_hosts}"]
             )
+        if self.ssh_control_dir is not None:
+            identity = "\0".join(
+                (host, ssh_key, self.ssh_known_hosts or "default-known-hosts")
+            ).encode("utf-8")
+            control_name = "ssh-" + hashlib.sha256(identity).hexdigest()[:24]
+            command.extend(
+                [
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "-o",
+                    f"ControlPath={self.ssh_control_dir / control_name}",
+                ]
+            )
         command.extend(
             [
                 "-o",
@@ -660,6 +763,12 @@ class Collector:
     def remote_system(self) -> dict[str, Any]:
         """Sample Cerberus 2 over SSH (compatibility entry point)."""
         return self.ssh_system(self.spark2_host, self.ssh_key)
+
+    def remote_probe_due(self, name: str, now: float | None = None) -> bool:
+        """Return whether a node needs a new SSH sample."""
+        observed = time.monotonic() if now is None else now
+        previous = self._remote_last_attempt.get(name)
+        return previous is None or observed - previous >= self.remote_interval
 
     def vllm_metrics(self, base_url: str) -> dict[str, Any]:
         started = time.monotonic()
@@ -1162,6 +1271,7 @@ class Collector:
 
     def collect(self) -> None:
         now = time.time()
+        monotonic_now = time.monotonic()
         with self.lock:
             prior_snapshot = self.snapshot
         prior_time = prior_snapshot.get("_sample_time") or now - self.interval
@@ -1169,8 +1279,15 @@ class Collector:
 
         tasks: dict[str, Any] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-            tasks["cerberus1_system"] = executor.submit(self.spark1_system)
-            tasks["cerberus2_system"] = executor.submit(self.remote_system)
+            if not self.spark1_host or self.remote_probe_due(
+                "cerberus1", monotonic_now
+            ):
+                tasks["cerberus1_system"] = executor.submit(self.spark1_system)
+                if self.spark1_host:
+                    self._remote_last_attempt["cerberus1"] = monotonic_now
+            if self.remote_probe_due("cerberus2", monotonic_now):
+                tasks["cerberus2_system"] = executor.submit(self.remote_system)
+                self._remote_last_attempt["cerberus2"] = monotonic_now
             if self.inference_mode == "router":
                 tasks["router"] = executor.submit(self.router_metrics)
             for name, url in self.node_urls.items():
@@ -1180,7 +1297,26 @@ class Collector:
 
         nodes: dict[str, Any] = {}
         for name in CANONICAL_NODE_NAMES:
-            system = values[f"{name}_system"]
+            system_key = f"{name}_system"
+            fresh_system = system_key in values
+            if fresh_system:
+                system = values[system_key]
+                if name == "cerberus2" or self.spark1_host:
+                    self._remote_last_sample[name] = now
+                    system["sampled_at"] = utc_timestamp(now)
+                    system["sample_age_seconds"] = 0.0
+            else:
+                system = copy.deepcopy(
+                    prior_snapshot.get("nodes", {}).get(name, {}).get("system", {})
+                )
+                if not system:
+                    system = {
+                        "hostname": name,
+                        "error": "remote sample unavailable",
+                    }
+                sampled = self._remote_last_sample.get(name)
+                if sampled is not None:
+                    system["sample_age_seconds"] = max(0.0, now - sampled)
             role = self.node_roles[name]
             if role == "worker":
                 vllm = self.worker_state(system)
@@ -1192,7 +1328,17 @@ class Collector:
                     "cluster" if role == "aggregate" else "node"
                 )
             previous_node = prior_snapshot.get("nodes", {}).get(name, {})
-            self.add_network_rates(system, previous_node.get("system"), elapsed)
+            is_remote = name == "cerberus2" or bool(self.spark1_host)
+            if fresh_system and is_remote:
+                baseline = self._remote_counter_baselines.get(name)
+                baseline_elapsed = max(now - baseline[0], 0.001) if baseline else elapsed
+                self.add_network_rates(
+                    system, baseline[1] if baseline else None, baseline_elapsed
+                )
+                if system.get("network"):
+                    self._remote_counter_baselines[name] = (now, copy.deepcopy(system))
+            elif fresh_system:
+                self.add_network_rates(system, previous_node.get("system"), elapsed)
             if role != "worker":
                 self.add_rates(vllm, previous_node.get("vllm"), elapsed)
             node = {
@@ -1222,7 +1368,11 @@ class Collector:
             "_sample_time": now,
             "generated_at": utc_timestamp(now),
             "sample_interval_seconds": elapsed,
-            "collector": {"state": "ok", "interval_seconds": self.interval},
+            "collector": {
+                "state": "ok",
+                "interval_seconds": self.interval,
+                "remote_interval_seconds": self.remote_interval,
+            },
             "nodes": nodes,
             "router": router,
             "cluster": cluster,
@@ -1330,6 +1480,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def log_message(self, fmt: str, *args: Any) -> None:
+        # Successful browser telemetry polls are routine, not operator events.
+        # Keep errors and other requests visible without growing journald every
+        # two seconds while the dashboard is open.
+        if self.path == "/api/status" and len(args) > 1 and str(args[1]) == "200":
+            return
         print(
             f"{self.client_address[0]} - [{self.log_date_time_string()}] {fmt % args}",
             flush=True,
@@ -1417,8 +1572,13 @@ def main() -> None:
         ssh_known_hosts=(
             os.environ.get("DASHBOARD_SSH_KNOWN_HOSTS", "").strip() or None
         ),
+        ssh_control_dir=(
+            os.environ.get("DASHBOARD_SSH_CONTROL_DIR", "").strip() or None
+        ),
+        remote_interval=max(
+            float(os.environ.get("DASHBOARD_REMOTE_INTERVAL", "30")), args.interval
+        ),
     )
-    collector.collect()
     thread = threading.Thread(target=collector.run, name="collector", daemon=True)
     thread.start()
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)

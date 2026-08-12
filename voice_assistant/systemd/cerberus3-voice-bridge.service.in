@@ -3,6 +3,7 @@ Description=Cerberus voice bridge on cerberus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
 Wants=cerberus3-openclaw-voice.service cerberus3-qwen3-asr.service cerberus3-audio8.service
 After=cerberus3-openclaw-voice.service cerberus3-qwen3-asr.service cerberus3-audio8.service
+PartOf=cerberus3-voice-stack.target
 Conflicts=cerebrus3-voice-bridge.service
 StartLimitIntervalSec=0
 
@@ -26,10 +27,11 @@ Environment=VOICE_PLAYBACK_DEVICE=plughw:CARD=CP900,DEV=0
 Environment=VOICE_STATE_DIR=%t/cerberus3-voice-bridge
 EnvironmentFile=@SECRET_ENV@
 EnvironmentFile=-/etc/default/cerberus3-voice-bridge
+ExecStartPre=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/wait-dependency-ready.py all --timeout 180
 ExecStart=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/voice_bridge.py
 Restart=always
 RestartSec=3s
-TimeoutStartSec=30s
+TimeoutStartSec=210s
 TimeoutStopSec=20s
 RuntimeDirectory=cerberus3-voice-bridge
 RuntimeDirectoryMode=0700

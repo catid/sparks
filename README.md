@@ -177,8 +177,9 @@ minutes for weight loading, warm-up, and CUDA-graph capture.
 - `results/`: reviewed reports and aggregate result files only
 - `bin/`, `deepseek-v4/`, `agent_eval/`: earlier experiments and the retired
   Laguna topology, retained for provenance
-- `openclaw/`: sanitized, validated third-host OpenClaw configuration,
-  GPT-5.6 Sol verifier routing, and headless macOS persistence
+- `openclaw/`: sanitized configuration for the separate remote OpenClaw
+  control host (the Mac Studio, not a Spark), GPT-5.6 Sol verifier routing,
+  and its headless service persistence
 
 Generated responses, prompts, reasoning traces, telemetry, logs, credentials,
 certificates, model weights, and host state are intentionally excluded. Run

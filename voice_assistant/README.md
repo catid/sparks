@@ -16,7 +16,9 @@ non-loopback address. The bridge explicitly ignores proxy environment variables
 and refuses HTTP redirects for these local calls. OpenClaw still retains its
 normal text conversation state so follow-up turns share context; that private
 state is outside this checkout. The OpenClaw and bridge units mask the Docker
-socket and the service account's SSH and shell startup files.
+socket and the service account's SSH and shell startup files. OpenClaw console
+and file logs are held at `warn`, with tool redaction enabled, so successful
+requests and complete replies are not copied into journald.
 
 ## Wake behavior
 
@@ -54,6 +56,10 @@ answer is persisted. Playback order cannot overtake synthesis order. A failed
 future synthesis lets the current sentence end cleanly, then stops. A failed
 current playback discards its single prefetched successor. The persistent
 client is reused between turns and terminated on bridge shutdown.
+Transient Audio8 overload responses (`429` and `503`) are retried at most twice
+under the original synthesis deadline. `Retry-After` is honored but capped at
+two seconds; the completed OpenClaw answer remains in memory and is never
+regenerated merely because speech synthesis was briefly busy.
 
 ## Pinned ASR runtime
 
@@ -70,6 +76,13 @@ and launches the read-only container at `127.0.0.1:8020`. The API is:
 
 - `GET /health`
 - `POST /transcribe` with a bounded 16-kHz, mono, signed-PCM16 WAV body
+
+The ASR listener admits a fixed number of connections, gives headers, request
+bodies, and response writes separate total deadlines, and owns one nonblocking
+inference slot before model preprocessing begins. Extra inference requests get
+`429` with a short retry hint. The container runs under Docker's init shim and
+handles `SIGTERM` by stopping the HTTP server cleanly; systemd leaves a margin
+after Docker's stop deadline before escalating.
 
 The ASR request uses the pinned model's vocabulary-prompt support to bias the
 canonical wake word and the three node names. Override
@@ -125,6 +138,16 @@ through retries and clears only after that same stage succeeds, so an unrelated
 success cannot hide the fault. There are deliberately no fields for audio,
 transcripts, requests, answers, credentials, URLs, model tokens, hashes, or raw
 exception messages.
+
+The units do not report started merely because their processes exist. ASR and
+OpenClaw have bounded semantic readiness gates, and the bridge waits for ASR,
+OpenClaw, and Audio8 before opening the microphone. While running, it probes all
+three loopback health endpoints every five seconds. The content-free
+`dependencies` object reports only `unknown`, `ok`, or `error`, probe timestamps,
+the last healthy timestamp, and a sanitized exception class. An idle dependency
+failure also drives `overall` to `degraded`/`retry_wait`; recovery returns it to
+listening. All local HTTP reads use monotonic end-to-end deadlines and can be
+aborted promptly during service shutdown.
 
 Qwen ASR must finish before the bridge can know whether an utterance contains
 the name. During an unarmed utterance the honest state is therefore ASR

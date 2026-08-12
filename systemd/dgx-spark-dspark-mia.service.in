@@ -15,6 +15,9 @@ Environment=MIA_ENV_FILE=@PROFILE@
 Environment=MIA_SUPERVISOR_STATE_DIR=/var/lib/dgx-spark-dspark-mia
 Environment=MIA_SUPERVISOR_RUNTIME_DIR=/run/dgx-spark-dspark-mia
 Environment=MIA_SUPERVISOR_LOCK_DIR=@HOME@/.local/state/dgx-spark-dspark-mia-locks
+Environment=MIA_SUPERVISOR_POLL_SECONDS=30
+Environment=MIA_HEALTH_FULL_PROBE_INTERVAL_SECONDS=30
+Environment=MIA_SSH_CONTROL_DIR=/run/dgx-spark-dspark-mia/ssh
 ExecStart=@PROJECT_DIR@/dspark_mia/bin/supervise.sh
 ExecStopPost=-@PROJECT_DIR@/dspark_mia/bin/stop-if-owned.sh
 Restart=always

@@ -9,11 +9,13 @@ only on the management LAN; bare `cerberus1` is deliberately not required.
 
 The voice agent uses `xhigh` thinking, which the DS4F compatibility map sends
 as `reasoning_effort: max`. Its tool profile starts at `minimal` and adds only
-Exa web search, web fetch, and outbound Slack messages. Speech captured by a
-room microphone still cannot run shell commands, edit files, schedule
-automation, accept inbound Slack events, or control the cluster. The checked-in
-workspace guidance also keeps answers short enough for TTS and prevents secrets
-from being spoken.
+Exa web search, web fetch, the bundled weather skill, a fixed-endpoint read-only
+Cerberus health tool, and outbound Slack messages. The health plugin reads the
+loopback dashboard's sanitized current snapshot and cannot choose another URL,
+run commands, or mutate the host. Speech captured by a room microphone still
+cannot run shell commands, edit files, schedule automation, accept inbound Slack
+events, or control the cluster. The checked-in workspace guidance also keeps
+answers short enough for TTS and prevents secrets from being spoken.
 
 ## Installation
 
@@ -41,6 +43,12 @@ stopped and disabled and their exact containers are removed. The new units
 declare conflicts with their legacy counterparts as a second guard against
 port overlap.
 
+The installer also stops and disables the known per-user
+`openclaw-gateway.service` when present. That duplicate gateway can connect the
+same Slack app and send repeated replies after a reboot. Its unit, config, and
+state are retained; if the user manager cannot be reached safely, installation
+fails instead of leaving two gateways enabled.
+
 The installer creates `/etc/cerberus3-voice/gateway.env` once as a root-owned
 mode-`0600` file. It stores the same random bearer token under the Gateway and
 bridge variable names without ever printing it, and generates an independent
@@ -48,10 +56,16 @@ Slack HTTP signing secret. Provision `SLACK_BOT_TOKEN` and `EXA_API_KEY` in that
 file before starting the service. The Slack channel runs in outbound-only HTTP
 mode on the loopback Gateway: it does not use the Slack app token and does not
 open a second Socket Mode connection. Existing valid token, config, and
-workspace files are preserved. During the first canonical install, the
+workspace files are preserved, except that the checked-in `warn`/redacted
+logging policy is reconciled into an existing config after the merged document
+passes the pinned validator. During the first canonical install, the
 pre-rename token, optional root-owned mode-`0600` ASR and bridge overrides,
 OpenClaw state, workspace, and caches are copied without printing their
 contents, and only known host/path identity fields are updated.
+OpenClaw's HTTP compatibility path bypasses its normal console level when it
+prints an undelivered successful payload, so the unit also sends stdout to
+`null`; stderr remains in journald and the bounded OpenClaw file logger remains
+at `warn`. This prevents request/reply content from entering the system journal.
 The source trees remain available as a rollback copy. Use `--replace-config` or
 `--replace-workspace` only for an intentional replacement.
 
@@ -69,6 +83,9 @@ OpenClaw listeners themselves are loopback-only; the existing Audio8 service
 may additionally expose its API on the LAN. The bridge keeps a stable
 `cerberus3-voice` OpenClaw conversation, listens for `cerberus`, and has access
 to the CP900 through membership in the `audio` group.
+ASR and OpenClaw startup completes only after their semantic health endpoints
+are ready; the bridge then gates on all three dependencies and continues to
+publish sanitized dependency health in its RAM-only status document.
 
 Useful checks:
 
