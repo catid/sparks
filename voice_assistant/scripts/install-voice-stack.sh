@@ -52,6 +52,162 @@ shared with the local voice bridge through systemd, and never printed.
 EOF
 }
 
+reconcile_existing_openclaw_config() {
+  local existing_path="$1"
+  local rendered_path="$2"
+  local destination_path="$3"
+  python3 - "${existing_path}" "${rendered_path}" "${destination_path}" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+existing_path, rendered_path, destination_path = map(pathlib.Path, sys.argv[1:])
+existing = json.loads(existing_path.read_text(encoding="utf-8"))
+rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
+
+if not isinstance(existing, dict) or not isinstance(rendered, dict):
+    raise SystemExit("OpenClaw configs must be JSON objects")
+if not isinstance(rendered.get("logging"), dict):
+    raise SystemExit("managed logging policy is invalid")
+
+def object_member(parent, key, description):
+    value = parent.get(key)
+    if value is None:
+        value = {}
+        parent[key] = value
+    if not isinstance(value, dict):
+        raise SystemExit(f"{description} must be an object")
+    return value
+
+def string_list_member(parent, key, description):
+    value = parent.get(key)
+    if value is None:
+        value = []
+        parent[key] = value
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise SystemExit(f"{description} must be an array of strings")
+    return value
+
+def ensure_once(values, managed_value):
+    found = False
+    result = []
+    for value in values:
+        if value == managed_value:
+            if found:
+                continue
+            found = True
+        result.append(value)
+    if not found:
+        result.append(managed_value)
+    values[:] = result
+
+rendered_plugins = rendered.get("plugins")
+if not isinstance(rendered_plugins, dict):
+    raise SystemExit("rendered plugins policy is invalid")
+rendered_load = rendered_plugins.get("load")
+if not isinstance(rendered_load, dict):
+    raise SystemExit("rendered plugin load policy is invalid")
+rendered_paths = rendered_load.get("paths")
+if not isinstance(rendered_paths, list) or any(not isinstance(item, str) for item in rendered_paths):
+    raise SystemExit("rendered plugin paths policy is invalid")
+alarm_paths = [path for path in rendered_paths if path.rstrip("/").endswith("/cerberus-alarms")]
+if len(alarm_paths) != 1:
+    raise SystemExit("rendered config must contain exactly one alarm plugin path")
+alarm_path = alarm_paths[0]
+
+plugins = object_member(existing, "plugins", "plugins")
+load = object_member(plugins, "load", "plugins.load")
+ensure_once(string_list_member(load, "paths", "plugins.load.paths"), alarm_path)
+ensure_once(string_list_member(plugins, "allow", "plugins.allow"), "cerberus-alarms")
+entries = object_member(plugins, "entries", "plugins.entries")
+entries["cerberus-alarms"] = {"enabled": True}
+
+alarm_tools = (
+    "alarm_cancel",
+    "alarm_dismiss",
+    "alarm_set",
+    "alarms_list",
+    "timer_set",
+)
+required_denials = ("group:automation", "cron")
+
+def reconcile_tools(tools, description):
+    for tool in alarm_tools:
+        ensure_once(string_list_member(tools, "alsoAllow", f"{description}.alsoAllow"), tool)
+    for denial in required_denials:
+        ensure_once(string_list_member(tools, "deny", f"{description}.deny"), denial)
+
+reconcile_tools(object_member(existing, "tools", "tools"), "tools")
+agents = object_member(existing, "agents", "agents")
+agent_list = agents.get("list")
+if not isinstance(agent_list, list) or any(not isinstance(agent, dict) for agent in agent_list):
+    raise SystemExit("agents.list must be an array of objects")
+voice_agents = [agent for agent in agent_list if agent.get("id") == "voice"]
+if len(voice_agents) != 1:
+    raise SystemExit("existing config must contain exactly one voice agent")
+reconcile_tools(object_member(voice_agents[0], "tools", "voice agent tools"), "voice agent tools")
+
+existing["logging"] = rendered["logging"]
+destination_path.write_text(
+    json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
+    encoding="utf-8",
+)
+os.chmod(destination_path, 0o600)
+PY
+}
+
+reconcile_existing_agents_workspace() {
+  local existing_path="$1"
+  local template_path="$2"
+  local destination_path="$3"
+  python3 - "${existing_path}" "${template_path}" "${destination_path}" <<'PY'
+import os
+import pathlib
+import sys
+
+existing_path, template_path, destination_path = map(pathlib.Path, sys.argv[1:])
+begin = "<!-- BEGIN CERBERUS VOICE ALARMS (managed by install-voice-stack.sh) -->"
+end = "<!-- END CERBERUS VOICE ALARMS (managed by install-voice-stack.sh) -->"
+existing = existing_path.read_text(encoding="utf-8")
+template = template_path.read_text(encoding="utf-8")
+
+if template.count(begin) != 1 or template.count(end) != 1:
+    raise SystemExit("voice AGENTS template must contain one managed alarm block")
+template_start = template.index(begin)
+template_end = template.index(end, template_start) + len(end)
+block = template[template_start:template_end]
+
+begin_count = existing.count(begin)
+end_count = existing.count(end)
+if begin_count == 0 and end_count == 0:
+    merged = existing.rstrip() + "\n\n" + block + "\n"
+elif begin_count == 1 and end_count == 1:
+    existing_start = existing.index(begin)
+    existing_end = existing.index(end, existing_start) + len(end)
+    merged = existing[:existing_start] + block + existing[existing_end:]
+else:
+    raise SystemExit("existing AGENTS.md has malformed managed alarm markers")
+
+destination_path.write_text(merged, encoding="utf-8")
+os.chmod(destination_path, 0o644)
+PY
+}
+
+# Test the exact reconciliation functions without exercising host installation.
+case "${action}" in
+  _test-reconcile-config)
+    (($# == 3)) || exit 2
+    reconcile_existing_openclaw_config "$1" "$2" "$3"
+    exit 0
+    ;;
+  _test-reconcile-workspace)
+    (($# == 3)) || exit 2
+    reconcile_existing_agents_workspace "$1" "$2" "$3"
+    exit 0
+    ;;
+esac
+
 case "${action}" in
   verify|prepare|install|enable|start) ;;
   -h|--help) usage; exit 0 ;;
@@ -122,11 +278,13 @@ PY
 unit_names=(
   cerberus3-openclaw-voice.service
   cerberus3-qwen3-asr.service
+  cerberus3-alarm-service.service
   cerberus3-voice-bridge.service
   cerberus3-voice-stack.target
 )
 required_files=(
   "${voice_dir}/asr_server.py"
+  "${voice_dir}/alarm_service.py"
   "${voice_dir}/voice_bridge.py"
   "${voice_dir}/wait-dependency-ready.py"
   "${voice_dir}/run-asr.sh"
@@ -139,6 +297,9 @@ required_files=(
   "${voice_dir}/openclaw/plugins/cerberus-health/index.js"
   "${voice_dir}/openclaw/plugins/cerberus-health/openclaw.plugin.json"
   "${voice_dir}/openclaw/plugins/cerberus-health/package.json"
+  "${voice_dir}/openclaw/plugins/cerberus-alarms/index.js"
+  "${voice_dir}/openclaw/plugins/cerberus-alarms/openclaw.plugin.json"
+  "${voice_dir}/openclaw/plugins/cerberus-alarms/package.json"
   "${voice_dir}/scripts/install-openclaw-runtime.sh"
   "${voice_dir}/scripts/migrate-legacy-state.py"
   "${voice_dir}/tests/fixtures/fake-node"
@@ -171,6 +332,7 @@ bash -n \
 python3 -m json.tool "${voice_dir}/openclaw/runtime.lock.json" >/dev/null
 python3 - \
   "${voice_dir}/asr_server.py" \
+  "${voice_dir}/alarm_service.py" \
   "${voice_dir}/voice_bridge.py" \
   "${voice_dir}/wait-dependency-ready.py" \
   "${voice_dir}/scripts/migrate-legacy-state.py" <<'PY'
@@ -280,6 +442,7 @@ SYSTEMD_UNIT_PATH="${temporary_dir}:/usr/local/lib/systemd/system:/usr/lib/syste
   systemd-analyze verify \
     "${temporary_dir}/cerberus3-openclaw-voice.service" \
     "${temporary_dir}/cerberus3-qwen3-asr.service" \
+    "${temporary_dir}/cerberus3-alarm-service.service" \
     "${temporary_dir}/cerberus3-voice-bridge.service" \
     "${temporary_dir}/cerberus3-voice-stack.target"
 
@@ -524,25 +687,10 @@ if "${elevate[@]}" test -e "${config_path}" && ((replace_config == 0)); then
     ! "${elevate[@]}" test -L "${config_path}" ||
     fail "existing config must be a regular non-symlink file"
   preserved_config="${temporary_dir}/preserved-openclaw.json"
-  python3 - "${config_path}" "${rendered_config}" "${preserved_config}" <<'PY'
-import json
-import pathlib
-import sys
-
-existing_path, rendered_path, destination_path = map(pathlib.Path, sys.argv[1:])
-existing = json.loads(existing_path.read_text(encoding="utf-8"))
-rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
-if not isinstance(existing, dict) or not isinstance(rendered.get("logging"), dict):
-    raise SystemExit("OpenClaw config or managed logging policy is invalid")
-existing["logging"] = rendered["logging"]
-destination_path.write_text(
-    json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
-    encoding="utf-8",
-)
-PY
-  chmod 0600 "${preserved_config}"
+  reconcile_existing_openclaw_config \
+    "${config_path}" "${rendered_config}" "${preserved_config}"
   config_to_validate="${preserved_config}"
-  echo "Preserving the private OpenClaw config and reconciling managed logging."
+  echo "Preserving the private OpenClaw config and reconciling voice-local alarms and logging."
 fi
 
 validation_state="${temporary_dir}/validation-state"
@@ -621,7 +769,12 @@ if "${elevate[@]}" test -e "${agents_target}" && ((replace_workspace == 0)); the
   "${elevate[@]}" test -f "${agents_target}" &&
     ! "${elevate[@]}" test -L "${agents_target}" ||
     fail "existing workspace AGENTS.md must be a regular non-symlink file"
-  echo "Preserving existing voice workspace AGENTS.md."
+  preserved_agents="${temporary_dir}/preserved-AGENTS.md"
+  reconcile_existing_agents_workspace \
+    "${agents_target}" "${voice_dir}/openclaw/AGENTS.md" "${preserved_agents}"
+  "${elevate[@]}" install -o "${service_user}" -g "${service_group}" -m 0644 \
+    "${preserved_agents}" "${agents_target}"
+  echo "Preserving the custom voice workspace and reconciling voice-local alarm guidance."
 else
   "${elevate[@]}" install -o "${service_user}" -g "${service_group}" -m 0644 \
     "${voice_dir}/openclaw/AGENTS.md" "${agents_target}"
@@ -646,6 +799,7 @@ if [[ "${action}" == "start" ]]; then
   "${elevate[@]}" systemctl restart cerberus3-openclaw-voice.service
   "${elevate[@]}" systemctl restart cerberus3-qwen3-asr.service
   "${elevate[@]}" systemctl start cerberus3-audio8.service
+  "${elevate[@]}" systemctl restart cerberus3-alarm-service.service
   "${elevate[@]}" systemctl restart cerberus3-voice-bridge.service
   "${elevate[@]}" systemctl start cerberus3-voice-stack.target
 else

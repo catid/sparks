@@ -1,0 +1,82 @@
+{
+  "logging": {
+    "level": "debug",
+    "customSink": "retain-me"
+  },
+  "customTopLevel": {
+    "owner": "fixture",
+    "enabled": true
+  },
+  "plugins": {
+    "load": {
+      "paths": [
+        "/srv/custom/plugin",
+        "/srv/cerberus-health"
+      ],
+      "customLoaderOption": true
+    },
+    "allow": [
+      "custom-plugin",
+      "cerberus-health"
+    ],
+    "entries": {
+      "custom-plugin": {
+        "enabled": true,
+        "custom": "retained"
+      },
+      "cerberus-health": {
+        "enabled": true
+      }
+    },
+    "customPluginSetting": "retained"
+  },
+  "agents": {
+    "defaults": {
+      "customDefault": 17
+    },
+    "list": [
+      {
+        "id": "voice",
+        "name": "Customized voice agent",
+        "customAgentSetting": {
+          "retained": true
+        },
+        "tools": {
+          "profile": "minimal",
+          "alsoAllow": [
+            "message",
+            "cerberus_health"
+          ],
+          "deny": [
+            "group:runtime",
+            "group:fs"
+          ],
+          "customToolSetting": "retained"
+        }
+      },
+      {
+        "id": "unchanged-sidecar",
+        "tools": {
+          "alsoAllow": [
+            "custom_sidecar_tool"
+          ]
+        }
+      }
+    ],
+    "customAgentsSetting": "retained"
+  },
+  "tools": {
+    "profile": "minimal",
+    "alsoAllow": [
+      "message",
+      "web_search"
+    ],
+    "deny": [
+      "group:runtime",
+      "group:fs"
+    ],
+    "customGlobalToolSetting": {
+      "retained": true
+    }
+  }
+}

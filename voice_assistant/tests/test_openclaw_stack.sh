@@ -76,10 +76,14 @@ assert slack["actions"] == {
 }
 
 assert config["plugins"]["load"]["paths"] == [
+    str(pathlib.Path(sys.argv[3]) / "openclaw" / "plugins" / "cerberus-alarms"),
     str(pathlib.Path(sys.argv[3]) / "openclaw" / "plugins" / "cerberus-health")
 ]
-assert config["plugins"]["allow"] == ["cerberus-health", "exa", "slack"]
+assert config["plugins"]["allow"] == [
+    "cerberus-alarms", "cerberus-health", "exa", "slack"
+]
 assert config["plugins"]["entries"] == {
+    "cerberus-alarms": {"enabled": True},
     "cerberus-health": {"enabled": True},
     "exa": {"enabled": True},
     "slack": {"enabled": True},
@@ -94,7 +98,8 @@ assert voice["id"] == "voice" and voice["default"] is True
 assert voice["thinkingDefault"] == "xhigh"
 assert voice["tools"]["profile"] == "minimal"
 assert voice["tools"]["alsoAllow"] == [
-    "cerberus_health", "message", "web_fetch", "web_search"
+    "alarm_cancel", "alarm_dismiss", "alarm_set", "alarms_list",
+    "cerberus_health", "message", "web_fetch", "web_search", "timer_set"
 ]
 assert "group:runtime" in voice["tools"]["deny"]
 assert "group:fs" in voice["tools"]["deny"]
@@ -103,7 +108,8 @@ assert "group:web" not in voice["tools"]["deny"]
 assert voice["skills"] == ["weather"]
 assert config["tools"]["profile"] == "minimal"
 assert config["tools"]["alsoAllow"] == [
-    "cerberus_health", "message", "web_fetch", "web_search"
+    "alarm_cancel", "alarm_dismiss", "alarm_set", "alarms_list",
+    "cerberus_health", "message", "web_fetch", "web_search", "timer_set"
 ]
 assert config["tools"]["web"]["search"]["provider"] == "exa"
 assert "exec" not in config["tools"]["alsoAllow"]
@@ -158,8 +164,35 @@ rg -q '^Environment=VOICE_TTS_URL=http://127\.0\.0\.1:8010/v1/audio/speech$' "${
 rg -q '^SupplementaryGroups=audio$' "${bridge_unit}"
 rg -q '^DeviceAllow=char-alsa rw$' "${bridge_unit}"
 rg -q '^Environment=VOICE_STATE_DIR=%t/cerberus3-voice-bridge$' "${bridge_unit}"
+rg -q '^Environment=VOICE_PLAYBACK_LOCK_PATH=/var/lib/cerberus3-alarms/playback.lock$' "${bridge_unit}"
 rg -q '^RuntimeDirectory=cerberus3-voice-bridge$' "${bridge_unit}"
 rg -q '^RuntimeDirectoryMode=0700$' "${bridge_unit}"
+rg -q '^Wants=.*cerberus3-alarm-service\.service$' "${bridge_unit}"
+if rg -q '^Requires=.*cerberus3-alarm-service\.service' "${bridge_unit}"; then
+  echo "alarm recovery must not tear down the voice bridge" >&2
+  exit 1
+fi
+rg -q '^ReadWritePaths=/var/lib/cerberus3-alarms$' "${bridge_unit}"
+alarm_unit="${voice_dir}/systemd/cerberus3-alarm-service.service.in"
+rg -q '^Type=notify$' "${alarm_unit}"
+rg -q '^NotifyAccess=main$' "${alarm_unit}"
+rg -q '^StateDirectory=cerberus3-alarms$' "${alarm_unit}"
+rg -q '^RuntimeDirectory=cerberus3-alarms$' "${alarm_unit}"
+rg -q '^PartOf=cerberus3-voice-stack\.target$' "${alarm_unit}"
+rg -q '^RestrictAddressFamilies=AF_UNIX AF_INET$' "${alarm_unit}"
+rg -q '^DevicePolicy=closed$' "${alarm_unit}"
+rg -q '^DeviceAllow=char-alsa rw$' "${alarm_unit}"
+rg -q '^Wants=.*cerberus3-alarm-service\.service$' \
+  "${voice_dir}/systemd/cerberus3-voice-stack.target.in"
+rg -q '^Requires=cerberus3-voice-bridge.service$' \
+  "${voice_dir}/systemd/cerberus3-voice-stack.target.in"
+rg -q '^After=.*cerberus3-alarm-service\.service.*cerberus3-voice-bridge\.service$' \
+  "${voice_dir}/systemd/cerberus3-voice-stack.target.in"
+if rg -q '^Requires=.*cerberus3-alarm-service\.service' \
+  "${voice_dir}/systemd/cerberus3-voice-stack.target.in"; then
+  echo "alarm recovery must not tear down the voice target" >&2
+  exit 1
+fi
 rg -q '^Conflicts=cerebrus3-voice-bridge\.service$' "${bridge_unit}"
 rg -q '^PartOf=cerberus3-voice-stack\.target$' "${bridge_unit}"
 rg -Fq 'ExecStartPre=/usr/bin/python3 @PROJECT_DIR@/voice_assistant/wait-dependency-ready.py all --timeout 180' "${bridge_unit}"
@@ -189,9 +222,9 @@ rg -q '^Conflicts=cerebrus3-voice-stack\.target$' \
   "${voice_dir}/systemd/cerberus3-voice-stack.target.in"
 rg -q '^After=.*cerberus3-voice-bridge\.service$' \
   "${voice_dir}/systemd/cerberus3-voice-stack.target.in"
-if rg -q '^Before=.*cerberus3-voice-bridge\.service' \
+if rg -q '^Before=.*cerberus3-(alarm-service|voice-bridge)\.service' \
   "${voice_dir}/systemd/cerberus3-voice-stack.target.in"; then
-  echo "voice target must not become active before the readiness-gated bridge" >&2
+  echo "voice target must not become active before the alarm or readiness-gated bridge" >&2
   exit 1
 fi
 rg -Fq 'if [[ "${action}" == "verify" || "${action}" == "prepare" ]]; then' \
@@ -240,7 +273,7 @@ rg -Fq 'user_systemctl disable --now "${duplicate_user_unit}"' \
   "${voice_dir}/scripts/install-voice-stack.sh"
 rg -Fq 'fail "cannot safely stop ${duplicate_user_unit}: user manager bus is unavailable"' \
   "${voice_dir}/scripts/install-voice-stack.sh"
-rg -Fq 'Preserving the private OpenClaw config and reconciling managed logging.' \
+rg -Fq 'Preserving the private OpenClaw config and reconciling voice-local alarms and logging.' \
   "${voice_dir}/scripts/install-voice-stack.sh"
 if rg -q '^StateDirectory=' "${bridge_unit}"; then
   echo "ephemeral voice status must not use a persistent StateDirectory" >&2
@@ -260,6 +293,103 @@ rg -Fq 'SLACK_BOT_TOKEN must be provisioned in the secret dotenv' \
   "${voice_dir}/scripts/install-voice-stack.sh"
 rg -Fq 'EXA_API_KEY must be provisioned in the secret dotenv' \
   "${voice_dir}/scripts/install-voice-stack.sh"
+rg -Fq 'cerberus3-alarm-service.service' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
+rg -Fq 'cerberus-alarms/index.js' \
+  "${voice_dir}/scripts/install-voice-stack.sh"
+
+upgrade_config="${temporary_dir}/upgrade-openclaw.json"
+upgrade_config_twice="${temporary_dir}/upgrade-openclaw-twice.json"
+upgrade_agents="${temporary_dir}/upgrade-AGENTS.md"
+upgrade_agents_twice="${temporary_dir}/upgrade-AGENTS-twice.md"
+"${voice_dir}/scripts/install-voice-stack.sh" _test-reconcile-config \
+  "${voice_dir}/tests/fixtures/pre-alarm-openclaw.json" \
+  "${rendered_config}" "${upgrade_config}"
+"${voice_dir}/scripts/install-voice-stack.sh" _test-reconcile-config \
+  "${upgrade_config}" "${rendered_config}" "${upgrade_config_twice}"
+"${voice_dir}/scripts/install-voice-stack.sh" _test-reconcile-workspace \
+  "${voice_dir}/tests/fixtures/pre-alarm-AGENTS.md" \
+  "${voice_dir}/openclaw/AGENTS.md" "${upgrade_agents}"
+"${voice_dir}/scripts/install-voice-stack.sh" _test-reconcile-workspace \
+  "${upgrade_agents}" "${voice_dir}/openclaw/AGENTS.md" \
+  "${upgrade_agents_twice}"
+cmp "${upgrade_config}" "${upgrade_config_twice}"
+cmp "${upgrade_agents}" "${upgrade_agents_twice}"
+[[ "$(stat -c '%a' "${upgrade_config}")" == 600 ]]
+[[ "$(stat -c '%a' "${upgrade_agents}")" == 644 ]]
+
+python3 - \
+  "${voice_dir}/tests/fixtures/pre-alarm-openclaw.json" \
+  "${rendered_config}" "${upgrade_config}" \
+  "${voice_dir}/tests/fixtures/pre-alarm-AGENTS.md" \
+  "${upgrade_agents}" <<'PY'
+import json
+import pathlib
+import sys
+
+before_path, rendered_path, after_path, agents_before_path, agents_after_path = map(
+    pathlib.Path, sys.argv[1:]
+)
+before = json.loads(before_path.read_text(encoding="utf-8"))
+rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
+after = json.loads(after_path.read_text(encoding="utf-8"))
+
+assert after["logging"] == rendered["logging"]
+assert after["customTopLevel"] == before["customTopLevel"]
+assert after["agents"]["defaults"] == before["agents"]["defaults"]
+assert after["agents"]["customAgentsSetting"] == before["agents"]["customAgentsSetting"]
+assert after["agents"]["list"][1] == before["agents"]["list"][1]
+assert after["plugins"]["customPluginSetting"] == before["plugins"]["customPluginSetting"]
+assert after["plugins"]["load"]["customLoaderOption"] is True
+assert after["plugins"]["entries"]["custom-plugin"] == before["plugins"]["entries"]["custom-plugin"]
+
+alarm_path = next(
+    path for path in rendered["plugins"]["load"]["paths"]
+    if path.endswith("/cerberus-alarms")
+)
+assert after["plugins"]["load"]["paths"] == [
+    *before["plugins"]["load"]["paths"], alarm_path
+]
+assert after["plugins"]["allow"] == [*before["plugins"]["allow"], "cerberus-alarms"]
+assert after["plugins"]["entries"]["cerberus-alarms"] == {"enabled": True}
+
+alarm_tools = {
+    "alarm_cancel", "alarm_dismiss", "alarm_set", "alarms_list", "timer_set"
+}
+for tools in (after["tools"], after["agents"]["list"][0]["tools"]):
+    assert alarm_tools <= set(tools["alsoAllow"])
+    assert set(("group:automation", "cron")) <= set(tools["deny"])
+    assert "cron" not in tools["alsoAllow"]
+    assert "group:automation" not in tools["alsoAllow"]
+    assert tools["profile"] == "minimal"
+
+assert after["tools"]["customGlobalToolSetting"] == before["tools"]["customGlobalToolSetting"]
+assert (
+    after["agents"]["list"][0]["tools"]["customToolSetting"]
+    == before["agents"]["list"][0]["tools"]["customToolSetting"]
+)
+assert after["agents"]["list"][0]["customAgentSetting"] == before["agents"]["list"][0]["customAgentSetting"]
+
+agents_before = agents_before_path.read_text(encoding="utf-8").rstrip()
+agents_after = agents_after_path.read_text(encoding="utf-8")
+begin = "<!-- BEGIN CERBERUS VOICE ALARMS (managed by install-voice-stack.sh) -->"
+end = "<!-- END CERBERUS VOICE ALARMS (managed by install-voice-stack.sh) -->"
+assert agents_after.startswith(agents_before + "\n\n")
+assert agents_after.count(begin) == 1
+assert agents_after.count(end) == 1
+assert "timer_set" in agents_after and "alarm_dismiss" in agents_after
+assert "This custom instruction must survive" in agents_after
+assert "Keep this final custom line too." in agents_after
+PY
+
+[[ ! -e "${voice_dir}/scripts/configure-main-openclaw-alarms.sh" ]]
+[[ ! -e "${voice_dir}/../openclaw/AGENTS-alarms.md" ]]
+if rg -q 'configure-main-openclaw-alarms|AGENTS-alarms' \
+  "${voice_dir}/scripts/install-voice-stack.sh" \
+  "${voice_dir}/README.md" "${voice_dir}/../openclaw/README.md"; then
+  echo "unsafe remote main-gateway alarm integration is still referenced" >&2
+  exit 1
+fi
 
 fake_bin="${temporary_dir}/fake-bin"
 legacy_runtime="${temporary_dir}/legacy-runtime"

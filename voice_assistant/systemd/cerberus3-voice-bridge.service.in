@@ -1,8 +1,8 @@
 [Unit]
 Description=Cerberus voice bridge on cerberus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
-Wants=cerberus3-openclaw-voice.service cerberus3-qwen3-asr.service cerberus3-audio8.service
-After=cerberus3-openclaw-voice.service cerberus3-qwen3-asr.service cerberus3-audio8.service
+Wants=cerberus3-openclaw-voice.service cerberus3-qwen3-asr.service cerberus3-audio8.service cerberus3-alarm-service.service
+After=cerberus3-alarm-service.service cerberus3-openclaw-voice.service cerberus3-qwen3-asr.service cerberus3-audio8.service
 PartOf=cerberus3-voice-stack.target
 Conflicts=cerebrus3-voice-bridge.service
 StartLimitIntervalSec=0
@@ -24,6 +24,7 @@ Environment=VOICE_OPENCLAW_USER=cerberus3-voice
 Environment=VOICE_TTS_URL=http://127.0.0.1:8010/v1/audio/speech
 Environment=VOICE_CAPTURE_DEVICE=plughw:CARD=CP900,DEV=0
 Environment=VOICE_PLAYBACK_DEVICE=plughw:CARD=CP900,DEV=0
+Environment=VOICE_PLAYBACK_LOCK_PATH=/var/lib/cerberus3-alarms/playback.lock
 Environment=VOICE_STATE_DIR=%t/cerberus3-voice-bridge
 EnvironmentFile=@SECRET_ENV@
 EnvironmentFile=-/etc/default/cerberus3-voice-bridge
@@ -39,6 +40,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=/var/lib/cerberus3-alarms
 InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -@HOME@/.ssh -@HOME@/.bashrc -@HOME@/.zshrc -@HOME@/.profile
 ProtectKernelTunables=true
 ProtectKernelModules=true

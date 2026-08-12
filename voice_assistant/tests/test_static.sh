@@ -77,5 +77,20 @@ if grep -Eq 'tempfile|mkstemp|NamedTemporaryFile' \
   echo "Voice bridge must keep audio in memory." >&2
   exit 1
 fi
+grep -Fq 'http.client.HTTPConnection("127.0.0.1"' \
+  "${repo_root}/voice_assistant/alarm_service.py"
+if grep -Eq 'tempfile|mkstemp|NamedTemporaryFile' \
+  "${repo_root}/voice_assistant/alarm_service.py"; then
+  echo "Alarm service must keep generated audio in memory." >&2
+  exit 1
+fi
+grep -Fq 'ThreadingUnixStreamServer' \
+  "${repo_root}/voice_assistant/alarm_service.py"
+grep -Fq 'threading.BoundedSemaphore(max_connections)' \
+  "${repo_root}/voice_assistant/alarm_service.py"
+grep -Fq 'READY=1' \
+  "${repo_root}/voice_assistant/alarm_service.py"
+grep -Fq 'MAX_RINGING_SECONDS = 10 * 60' \
+  "${repo_root}/voice_assistant/alarm_service.py"
 
 echo "ASR pinning, container isolation, and RAM-only bridge static tests passed."

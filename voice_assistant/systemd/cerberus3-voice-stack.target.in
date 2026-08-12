@@ -1,10 +1,10 @@
 [Unit]
 Description=Cerberus always-on local voice assistant on cerberus3
 Documentation=file:@PROJECT_DIR@/voice_assistant/README.md
-Wants=cerberus3-openclaw-voice.service cerberus3-qwen3-asr.service cerberus3-audio8.service
+Wants=cerberus3-openclaw-voice.service cerberus3-qwen3-asr.service cerberus3-audio8.service cerberus3-alarm-service.service
 Requires=cerberus3-voice-bridge.service
 After=network-online.target
-After=cerberus3-openclaw-voice.service cerberus3-qwen3-asr.service cerberus3-audio8.service cerberus3-voice-bridge.service
+After=cerberus3-openclaw-voice.service cerberus3-qwen3-asr.service cerberus3-audio8.service cerberus3-alarm-service.service cerberus3-voice-bridge.service
 Conflicts=cerebrus3-voice-stack.target
 
 [Install]

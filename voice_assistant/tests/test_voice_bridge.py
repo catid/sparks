@@ -4,6 +4,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import struct
 import sys
@@ -46,6 +47,7 @@ class BridgeTestCase(unittest.TestCase):
             "tts_model": "audio8/tts-0.6b",
             "capture_device": "plughw:CARD=CP900,DEV=0",
             "playback_device": "plughw:CARD=CP900,DEV=0",
+            "playback_lock_path": None,
             "frame_ms": 20,
             "pre_roll_ms": 300,
             "speech_start_ms": 80,
@@ -559,6 +561,7 @@ class PlaybackPrimitiveTests(BridgeTestCase):
             del timeout
             return self.return_code
 
+    @unittest.skipUnless(hasattr(os, "memfd_create"), "Linux memfd is required")
     def test_start_playback_uses_exact_ram_wav_and_closes_memfd(self) -> None:
         payload = self.module.fallback_thinking_cue()
         captured = {}
@@ -583,6 +586,7 @@ class PlaybackPrimitiveTests(BridgeTestCase):
         with self.assertRaises(OSError):
             self.module.os.fstat(captured["fd"])
 
+    @unittest.skipUnless(hasattr(os, "memfd_create"), "Linux memfd is required")
     def test_start_playback_closes_memfd_when_aplay_cannot_start(self) -> None:
         payload = self.module.fallback_thinking_cue()
         captured = {}
@@ -600,6 +604,27 @@ class PlaybackPrimitiveTests(BridgeTestCase):
             self.module.start_playback(self.settings(), payload)
         with self.assertRaises(OSError):
             self.module.os.fstat(captured["fd"])
+
+    @unittest.skipUnless(hasattr(os, "memfd_create"), "Linux memfd is required")
+    def test_staging_failure_releases_shared_playback_lock(self) -> None:
+        payload = self.module.fallback_thinking_cue()
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = str(pathlib.Path(directory) / "playback.lock")
+            settings = self.settings(playback_lock_path=lock_path)
+            with (
+                mock.patch.object(
+                    self.module.os,
+                    "write",
+                    side_effect=OSError("staging failed"),
+                ),
+                self.assertRaisesRegex(OSError, "staging failed"),
+            ):
+                self.module.start_playback(settings, payload)
+
+            reacquired = self.module.acquire_playback_lock(lock_path, 0.1)
+            self.assertIsNotNone(reacquired)
+            assert reacquired is not None
+            self.module.os.close(reacquired)
 
     def test_playback_exit_timeout_and_stop_are_bounded(self) -> None:
         stopped = self.module.threading.Event()
@@ -620,6 +645,26 @@ class PlaybackPrimitiveTests(BridgeTestCase):
             self.module.PlaybackProcess(cancelled, 10).wait(stopped)
         )
         self.assertTrue(cancelled.terminated)
+
+    def test_shared_playback_lock_is_exclusive_and_released(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(pathlib.Path(directory) / "playback.lock")
+            first = self.module.acquire_playback_lock(path, 0.1)
+            self.assertIsNotNone(first)
+            with self.assertRaisesRegex(RuntimeError, "speaker remained busy"):
+                self.module.acquire_playback_lock(path, 0.01)
+            assert first is not None
+            self.module.os.close(first)
+
+            second = self.module.acquire_playback_lock(path, 0.1)
+            self.assertIsNotNone(second)
+            assert second is not None
+            playback = self.module.PlaybackProcess(
+                self.FakeProcess(return_code=0), 10, second
+            )
+            self.assertTrue(playback.poll())
+            with self.assertRaises(OSError):
+                self.module.os.fstat(second)
 
     def test_stop_during_playback_spawn_cancels_the_new_child(self) -> None:
         bridge = self.module.VoiceBridge(self.settings())

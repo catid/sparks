@@ -85,15 +85,20 @@
   "plugins": {
     "load": {
       "paths": [
+        "@PROJECT_DIR@/voice_assistant/openclaw/plugins/cerberus-alarms",
         "@PROJECT_DIR@/voice_assistant/openclaw/plugins/cerberus-health"
       ]
     },
     "allow": [
+      "cerberus-alarms",
       "cerberus-health",
       "exa",
       "slack"
     ],
     "entries": {
+      "cerberus-alarms": {
+        "enabled": true
+      },
       "cerberus-health": {
         "enabled": true
       },
@@ -179,10 +184,15 @@
         "tools": {
           "profile": "minimal",
           "alsoAllow": [
+            "alarm_cancel",
+            "alarm_dismiss",
+            "alarm_set",
+            "alarms_list",
             "cerberus_health",
             "message",
             "web_fetch",
-            "web_search"
+            "web_search",
+            "timer_set"
           ],
           "deny": [
             "group:runtime",
@@ -205,10 +215,15 @@
   "tools": {
     "profile": "minimal",
     "alsoAllow": [
+      "alarm_cancel",
+      "alarm_dismiss",
+      "alarm_set",
+      "alarms_list",
       "cerberus_health",
       "message",
       "web_fetch",
-      "web_search"
+      "web_search",
+      "timer_set"
     ],
     "deny": [
       "group:runtime",
